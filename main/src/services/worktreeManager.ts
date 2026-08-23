@@ -12,6 +12,7 @@ import { worktreePoolManager } from './worktreePoolManager';
 import { ensureFastGitConfig, forceRemoveWorktree } from './gitPerformanceConfig';
 import { removeWorktreeViaTrash, sweepWorktreeTrash, type WorktreeTrashDeletion } from './worktreeTrash';
 import { boundary, decodeBoundary } from '../../../shared/validation/boundaryDecoder';
+import type { CreatePullRequestResult } from '../../../shared/types/git';
 
 type WorktreeAuditSource = 'session-delete' | 'project-delete' | 'create-cleanup';
 
@@ -1339,7 +1340,7 @@ export class WorktreeManager {
     baseBranch: string,
     currentBranch: string,
     commandRunner: CommandRunner,
-  ): Promise<{ output: string; url?: string }> {
+  ): Promise<CreatePullRequestResult> {
     try {
       const normalizedBaseBranch = baseBranch.replace(/^origin\//, '');
       const command = [
