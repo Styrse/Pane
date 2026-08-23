@@ -1,5 +1,7 @@
 import { mkdir } from 'fs/promises';
 import { withLock } from '../utils/mutex';
+import { escapeShellArg } from '../utils/shellEscape';
+import { escapeForBash } from '../utils/wslUtils';
 import type { ConfigManager } from './configManager';
 import type { AnalyticsManager } from './analyticsManager';
 import { PathResolver } from '../utils/pathResolver';
@@ -58,6 +60,10 @@ class GitOperationError extends Error {
   workingDirectory?: string;
   projectPath?: string;
   originalError?: { message?: string; stderr?: string; stdout?: string };
+}
+
+function escapeCommandArg(arg: string, commandRunner: CommandRunner): string {
+  return commandRunner.wslContext ? escapeForBash(arg) : escapeShellArg(arg);
 }
 
 // Interface for raw commit data
@@ -1339,8 +1345,8 @@ export class WorktreeManager {
       const command = [
         'gh pr create',
         '--fill',
-        `--base ${escapeShellArg(normalizedBaseBranch)}`,
-        `--head ${escapeShellArg(currentBranch)}`,
+        `--base ${escapeCommandArg(normalizedBaseBranch, commandRunner)}`,
+        `--head ${escapeCommandArg(currentBranch, commandRunner)}`,
       ].join(' ');
 
       const { stdout, stderr } = await commandRunner.execAsync(command, worktreePath, { timeout: 120000 });
