@@ -1355,11 +1355,8 @@ export class WorktreeManager {
 
       return { output, url };
     } catch (error: unknown) {
-      const err = error as Error & { stderr?: string; stdout?: string };
-      const gitError = new Error(err.message || 'Failed to create pull request') as Error & {
-        gitOutput?: string;
-        workingDirectory?: string;
-      };
+      const err = decodeBoundary(error, commandErrorSchema);
+      const gitError = new GitOperationError(err.message || 'Failed to create pull request');
       gitError.gitOutput = err.stderr || err.stdout || err.message || '';
       gitError.workingDirectory = worktreePath;
       throw gitError;
