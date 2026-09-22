@@ -168,6 +168,15 @@ jobs:
         os: [macos-latest, windows-2022]
 
     steps:
+    # The default Windows TEMP is on the runner's slow C: drive; the database
+    # tests write SQLite files there. D: (RUNNER_TEMP) is several times faster.
+    - name: Keep temp files on the workspace drive
+      if: runner.os == 'Windows'
+      shell: bash
+      run: |
+        echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+        echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+
     - name: Checkout code
       uses: actions/checkout@v7
 
