@@ -57,14 +57,8 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v7
 
-    - name: Setup pnpm
-      uses: pnpm/action-setup@v6
-
-    - name: Setup Node.js
-      uses: actions/setup-node@v6
-      with:
-        node-version: '22.18.0'
-        cache: 'pnpm'
+    - name: Setup Node.js and pnpm
+      uses: ./.github/actions/setup-pnpm
 
     - name: Install dependencies
       run: pnpm install
@@ -97,14 +91,8 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v7
 
-    - name: Setup pnpm
-      uses: pnpm/action-setup@v6
-
-    - name: Setup Node.js
-      uses: actions/setup-node@v6
-      with:
-        node-version: '22.18.0'
-        cache: 'pnpm'
+    - name: Setup Node.js and pnpm
+      uses: ./.github/actions/setup-pnpm
 
     - name: Install dependencies
       run: pnpm install
@@ -154,14 +142,10 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v7
 
-    - name: Setup pnpm
-      uses: pnpm/action-setup@v6
-
-    - name: Setup Node.js
-      uses: actions/setup-node@v6
+    - name: Setup Node.js and pnpm
+      uses: ./.github/actions/setup-pnpm
       with:
         node-version: ${{ matrix.node-version }}
-        cache: 'pnpm'
 
     - name: Setup Python
       uses: actions/setup-python@v6
@@ -208,14 +192,8 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v7
 
-    - name: Setup pnpm
-      uses: pnpm/action-setup@v6
-
-    - name: Setup Node.js
-      uses: actions/setup-node@v6
-      with:
-        node-version: '22.18.0'
-        cache: 'pnpm'
+    - name: Setup Node.js and pnpm
+      uses: ./.github/actions/setup-pnpm
 
     - name: Install dependencies
       run: pnpm install
