@@ -217,11 +217,17 @@ jobs:
     - name: Install dependencies
       run: pnpm install
 
-    - name: Run main process type checking
-      run: pnpm --filter main typecheck
+    - name: Start main process type checking
+      shell: bash
+      run: scripts/ci-background.sh start typecheck pnpm --filter main typecheck
 
     - name: Rebuild native modules for Node tests
       run: pnpm rebuild better-sqlite3-multiple-ciphers
 
     - name: Run main process unit tests
       run: pnpm --filter main test
+
+    - name: Finish main process type checking
+      if: ${{ !cancelled() }}
+      shell: bash
+      run: scripts/ci-background.sh wait typecheck
