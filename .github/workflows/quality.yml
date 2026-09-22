@@ -63,11 +63,13 @@ jobs:
     - name: Install dependencies
       run: pnpm install
 
-    - name: Run type checking
-      run: pnpm typecheck
+    # Type checking and lint run in the background beside the tests; their
+    # Finish steps print the output and fail the job on errors.
+    - name: Start type checking
+      run: scripts/ci-background.sh start typecheck pnpm typecheck
 
-    - name: Run consolidated lint harness
-      run: pnpm lint
+    - name: Start consolidated lint harness
+      run: scripts/ci-background.sh start lint pnpm lint
 
     - name: Verify GitHub release publication behavior
       run: bash scripts/test-publish-github-release.sh
@@ -80,6 +82,14 @@ jobs:
 
     - name: Run frontend unit tests
       run: CI=1 pnpm --filter frontend test
+
+    - name: Finish type checking
+      if: ${{ !cancelled() }}
+      run: scripts/ci-background.sh wait typecheck
+
+    - name: Finish consolidated lint harness
+      if: ${{ !cancelled() }}
+      run: scripts/ci-background.sh wait lint
 
   # Runs beside quality-checks so the Electron smoke path does not wait on
   # typecheck, lint, and unit tests.
@@ -101,9 +111,7 @@ jobs:
     # apt upgrades libraries Electron loads, so the wait step comes before
     # Electron first starts.
     - name: Start Playwright browser dependencies install
-      run: |
-        (pnpm exec playwright install --with-deps chromium > "$RUNNER_TEMP/playwright-install.log" 2>&1
-         echo $? > "$RUNNER_TEMP/playwright-install.exit") &
+      run: scripts/ci-background.sh start playwright pnpm exec playwright install --with-deps chromium
 
     - name: Rebuild native modules for Electron smoke tests
       run: pnpm run electron:rebuild
@@ -119,10 +127,7 @@ jobs:
       run: pnpm build:main
 
     - name: Finish Playwright browser dependencies install
-      run: |
-        while [ ! -f "$RUNNER_TEMP/playwright-install.exit" ]; do sleep 1; done
-        cat "$RUNNER_TEMP/playwright-install.log"
-        exit "$(cat "$RUNNER_TEMP/playwright-install.exit")"
+      run: scripts/ci-background.sh wait playwright
 
     - name: Verify sandboxed Electron preload
       run: xvfb-run -a pnpm exec electron scripts/smoke-sandboxed-preload.cjs
