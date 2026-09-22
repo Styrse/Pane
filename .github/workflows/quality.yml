@@ -7,6 +7,12 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+# A new push to a PR cancels that PR's in-flight run. Every other event gets
+# its own group, so no main commit ever loses its run.
+concurrency:
+  group: code-quality-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   changes:
     name: Detect changed areas
