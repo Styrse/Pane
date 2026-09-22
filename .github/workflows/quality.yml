@@ -60,8 +60,10 @@ jobs:
     - name: Setup Node.js and pnpm
       uses: ./.github/actions/setup-pnpm
 
+    # Skip the Electron-targeted postinstall rebuild; the Node rebuild below
+    # builds the only native module these tests load.
     - name: Install dependencies
-      run: pnpm install
+      run: pnpm install --ignore-scripts
 
     # Type checking and lint run in the background beside the tests; their
     # Finish steps print the output and fail the job on errors.
@@ -208,14 +210,23 @@ jobs:
         echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
         echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
 
+    # Without this, Defender is still scanning the freshly installed packages
+    # when the tests start, and it holds test worktrees open (EBUSY on cleanup).
+    - name: Exclude temp files and workspace from Defender scanning
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: Add-MpPreference -ExclusionPath $env:RUNNER_TEMP, $env:GITHUB_WORKSPACE
+
     - name: Checkout code
       uses: actions/checkout@v7
 
     - name: Setup Node.js and pnpm
       uses: ./.github/actions/setup-pnpm
 
+    # Skip the Electron-targeted postinstall rebuild; the Node rebuild below
+    # builds the only native module these tests load.
     - name: Install dependencies
-      run: pnpm install
+      run: pnpm install --ignore-scripts
 
     - name: Start main process type checking
       shell: bash
