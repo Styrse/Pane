@@ -44,7 +44,7 @@ jobs:
             - '.github/workflows/quality.yml'
 
   quality-checks:
-    name: Quality Checks + Smoke
+    name: Quality Checks
     runs-on: ubuntu-latest
 
     steps:
@@ -80,6 +80,28 @@ jobs:
 
     - name: Run frontend unit tests
       run: CI=1 pnpm --filter frontend test
+
+  # Runs beside quality-checks so the Electron smoke path does not wait on
+  # typecheck, lint, and unit tests.
+  functional-smoke:
+    name: Functional Smoke
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v7
+
+    - name: Setup pnpm
+      uses: pnpm/action-setup@v6
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v6
+      with:
+        node-version: '22.18.0'
+        cache: 'pnpm'
+
+    - name: Install dependencies
+      run: pnpm install
 
     - name: Install Playwright browser dependencies
       run: pnpm exec playwright install --with-deps chromium
