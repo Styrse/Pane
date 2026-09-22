@@ -97,8 +97,13 @@ jobs:
     - name: Install dependencies
       run: pnpm install
 
-    - name: Install Playwright browser dependencies
-      run: pnpm exec playwright install --with-deps chromium
+    # The browser download and apt packages overlap the build steps below.
+    # apt upgrades libraries Electron loads, so the wait step comes before
+    # Electron first starts.
+    - name: Start Playwright browser dependencies install
+      run: |
+        (pnpm exec playwright install --with-deps chromium > "$RUNNER_TEMP/playwright-install.log" 2>&1
+         echo $? > "$RUNNER_TEMP/playwright-install.exit") &
 
     - name: Rebuild native modules for Electron smoke tests
       run: pnpm run electron:rebuild
@@ -110,8 +115,17 @@ jobs:
         sudo chown root "${electron_dir}/chrome-sandbox"
         sudo chmod 4755 "${electron_dir}/chrome-sandbox"
 
+    - name: Build main process
+      run: pnpm build:main
+
+    - name: Finish Playwright browser dependencies install
+      run: |
+        while [ ! -f "$RUNNER_TEMP/playwright-install.exit" ]; do sleep 1; done
+        cat "$RUNNER_TEMP/playwright-install.log"
+        exit "$(cat "$RUNNER_TEMP/playwright-install.exit")"
+
     - name: Verify sandboxed Electron preload
-      run: pnpm build:main && xvfb-run -a pnpm exec electron scripts/smoke-sandboxed-preload.cjs
+      run: xvfb-run -a pnpm exec electron scripts/smoke-sandboxed-preload.cjs
 
     - name: Run maintained functional smoke tests
       run: xvfb-run -a pnpm test:ci:minimal
