@@ -672,13 +672,14 @@ export class PtyHostSupervisor extends EventEmitter {
   }
 
   /**
-   * Post `frame` to every attached renderer's data port. Preload routes the
-   * frame to subscribers registered via `electronAPI.ptyHost.onData` /
-   * `onExit` by `ptyId`; windows that never registered a subscriber for
-   * `frame.ptyId` drop the frame on the floor.
+   * Post `frame` to every attached renderer's port. Preload routes the
+   * frame to subscribers registered via `electronAPI.ptyHost.onExit` by
+   * `ptyId`; windows that never registered a subscriber for `frame.ptyId`
+   * drop the frame on the floor.
    *
-   * Kept narrow: only `data` and `exit` frames flow this way. Heartbeat and
-   * RPC-response frames stay on the main-side RPC port.
+   * Kept narrow: only `exit` frames flow this way. Terminal bytes reach the
+   * renderer over `terminal:output`; heartbeat and RPC-response frames stay
+   * on the main-side RPC port.
    */
   private broadcastToRenderers(frame: PtyHostEvent): void {
     for (const { mainPort } of this.windowPorts.values()) {
@@ -689,20 +690,6 @@ export class PtyHostSupervisor extends EventEmitter {
         console.warn('[ptyHost] failed to post renderer frame', err);
       }
     }
-  }
-
-  /**
-   * Post a FILTERED `data` frame to every attached renderer's data port.
-   * Called by main-side managers (e.g. `terminalPanelManager.flushOutputBuffer`)
-   * AFTER running `filterSyncBlockClears` and alt-screen detection on the raw
-   * bytes. This is the hand-off for flag-on renderer subscriptions via
-   * `electronAPI.ptyHost.onData(ptyId, cb)`.
-   *
-   * Kept separate from `broadcastToRenderers` so the intent is explicit:
-   * supervisor never auto-broadcasts raw data bytes.
-   */
-  postDataToRenderers(ptyId: string, data: string): void {
-    this.broadcastToRenderers({ type: 'data', ptyId, data });
   }
 
   /**

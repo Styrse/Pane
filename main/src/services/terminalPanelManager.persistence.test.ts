@@ -49,7 +49,6 @@ class FakePtyHandle implements PtyHandleLike {
 
 class FakePtyHost implements PtyHostRuntime {
   readonly handles = new Map<string, FakePtyHandle>();
-  readonly posted: Array<{ ptyId: string; data: string }> = [];
 
   async spawn(_opts: PtyHostSpawnOpts): Promise<{ ptyId: string; pid: number }> {
     const ptyId = `pty-${this.handles.size + 1}`;
@@ -67,10 +66,6 @@ class FakePtyHost implements PtyHostRuntime {
 
   getHandle(ptyId: string): PtyHandleLike | undefined {
     return this.handles.get(ptyId);
-  }
-
-  postDataToRenderers(ptyId: string, data: string): void {
-    this.posted.push({ ptyId, data });
   }
 
   latest(): FakePtyHandle {

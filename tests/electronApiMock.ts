@@ -790,7 +790,6 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
       }),
       ptyHost: namespace({
         ack: () => Promise.resolve(),
-        onData: subscribe,
         onExit: subscribe,
       }),
       resourceMonitor: namespace({

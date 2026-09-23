@@ -143,33 +143,24 @@ ipcRenderer.setMaxListeners(50);
 // directly, so we keep it in this preload-scoped closure and expose a typed
 // function surface on `window.electronAPI.ptyHost` below.
 //
-// Chunk C: ptyHost does not yet tee bytes to this port; the RPC path on the
-// main side continues to deliver bytes via the existing `terminal:output`
-// channel. Subscribers are still wired so Chunk D can flip the byte path over
-// without further preload changes.
-type PtyHostDataFrame = { type: 'data'; ptyId: string; data: string };
+// Terminal bytes do not use this port: they reach the renderer once, over the
+// `terminal:output` channel, for ptyHost and legacy PTYs alike.
 type PtyHostExitFrame = {
   type: 'exit';
   ptyId: string;
   exitCode: number | null;
   signal: number | null;
 };
-type PtyHostInboundFrame = PtyHostDataFrame | PtyHostExitFrame;
-const ptyHostInboundSchema = boundary.union(
-  boundary.object({ type: boundary.literal('data'), ptyId: boundary.string, data: boundary.string }),
-  boundary.object({
-    type: boundary.literal('exit'),
-    ptyId: boundary.string,
-    exitCode: boundary.nullable(boundary.number),
-    signal: boundary.nullable(boundary.number),
-  }),
-);
+const ptyHostInboundSchema = boundary.object({
+  type: boundary.literal('exit'),
+  ptyId: boundary.string,
+  exitCode: boundary.nullable(boundary.number),
+  signal: boundary.nullable(boundary.number),
+});
 
-type PtyDataCallback = (data: string) => void;
 type PtyExitCallback = (exitCode: number | null, signal: number | null) => void;
 
 let ptyHostPort: MessagePort | null = null;
-const ptyDataSubscribers = new Map<string, Set<PtyDataCallback>>();
 const ptyExitSubscribers = new Map<string, Set<PtyExitCallback>>();
 
 ipcRenderer.on('ptyHost-port', (event) => {
@@ -181,37 +172,21 @@ ipcRenderer.on('ptyHost-port', (event) => {
   // Renderer-world MessagePort is DOM-style: use .start() + .onmessage.
   port.start();
   port.onmessage = (e: MessageEvent) => {
-    let frame: PtyHostInboundFrame;
+    let frame: PtyHostExitFrame;
     try {
       frame = decodeBoundary(e.data, ptyHostInboundSchema);
     } catch {
       return;
     }
-    if (frame.type === 'data') {
-      const subs = ptyDataSubscribers.get(frame.ptyId);
-      if (subs) {
-        for (const cb of subs) {
-          try {
-            cb(frame.data);
-          } catch (err) {
-            console.error('[ptyHost] data subscriber threw', err);
-          }
+    const subs = ptyExitSubscribers.get(frame.ptyId);
+    if (subs) {
+      for (const cb of subs) {
+        try {
+          cb(frame.exitCode, frame.signal);
+        } catch (err) {
+          console.error('[ptyHost] exit subscriber threw', err);
         }
       }
-      return;
-    }
-    if (frame.type === 'exit') {
-      const subs = ptyExitSubscribers.get(frame.ptyId);
-      if (subs) {
-        for (const cb of subs) {
-          try {
-            cb(frame.exitCode, frame.signal);
-          } catch (err) {
-            console.error('[ptyHost] exit subscriber threw', err);
-          }
-        }
-      }
-      return;
     }
   };
   ptyHostPort = port;
@@ -918,9 +893,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
     // Fired once per terminal spawn when the `usePtyHost` setting is on and
     // the ptyHost supervisor is live. Carries the host-allocated `ptyId` so
-    // `TerminalPanel.tsx` can subscribe to `electronAPI.ptyHost.onData(ptyId, ...)`
-    // instead of the legacy `terminal:output` channel. Fires again on auto-reattach
-    // after a supervisor restart so the renderer re-subscribes to the new ptyId.
+    // `TerminalPanel.tsx` can ack flow-control bytes over the ptyHost port.
+    // Fires again on auto-reattach after a supervisor restart with the new ptyId.
     onTerminalPtyReady: (callback: (data: { sessionId: string; panelId: string; ptyId: string }) => void) => {
       const wrappedCallback = (_event: Electron.IpcRendererEvent, data: { sessionId: string; panelId: string; ptyId: string }) => callback(data);
       ipcRenderer.on('terminal:ptyReady', wrappedCallback);
@@ -1135,29 +1109,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ptyHost: typed wrapper over the per-window MessagePort. The raw port is
   // kept in preload scope; only these functions cross the contextBridge.
   //
-  // `onData` / `onExit` return an unsubscribe function matching the existing
-  // event-subscription convention elsewhere on `electronAPI.events`. Chunks
-  // D/E switch `TerminalPanel.tsx` over to these.
+  // `onExit` returns an unsubscribe function matching the existing
+  // event-subscription convention elsewhere on `electronAPI.events`.
   //
   // `write` / `ack` post frames back over the port; Chunk D wires these in
   // main-side via `PtyHostSupervisor.onRendererMessage` when they land.
   ptyHost: {
-    onData: (ptyId: string, cb: PtyDataCallback): (() => void) => {
-      let set = ptyDataSubscribers.get(ptyId);
-      if (!set) {
-        set = new Set();
-        ptyDataSubscribers.set(ptyId, set);
-      }
-      set.add(cb);
-      return () => {
-        const current = ptyDataSubscribers.get(ptyId);
-        if (!current) return;
-        current.delete(cb);
-        if (current.size === 0) {
-          ptyDataSubscribers.delete(ptyId);
-        }
-      };
-    },
     onExit: (ptyId: string, cb: PtyExitCallback): (() => void) => {
       let set = ptyExitSubscribers.get(ptyId);
       if (!set) {

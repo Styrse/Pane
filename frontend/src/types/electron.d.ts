@@ -441,8 +441,8 @@ interface ElectronAPI {
     onTerminalAlternateScreen: (callback: (data: { panelId: string; active: boolean }) => void) => () => void;
     /**
      * Fired when a terminal panel is spawned via the ptyHost UtilityProcess.
-     * Carries the host-allocated `ptyId` so TerminalPanel.tsx can subscribe to
-     * `electronAPI.ptyHost.onData(ptyId, cb)` when the `usePtyHost` setting is on.
+     * Carries the host-allocated `ptyId` so TerminalPanel.tsx can ack
+     * flow-control bytes over `electronAPI.ptyHost.ack` when `usePtyHost` is on.
      * Re-fires on auto-reattach after a supervisor restart with a new ptyId.
      */
     onTerminalPtyReady: (callback: (data: { sessionId: string; panelId: string; ptyId: string }) => void) => () => void;
@@ -606,12 +606,9 @@ interface ElectronAPI {
 
   // ptyHost: typed wrapper over the per-window MessagePort installed by the
   // preload script. The raw port never crosses contextBridge — these
-  // functions are the only surface. Chunk D will switch TerminalPanel.tsx
-  // over to these; Chunk C ships the plumbing so renderer code can start
-  // subscribing when the `usePtyHost` setting is on.
+  // functions are the only surface. Terminal bytes arrive on
+  // `events.onTerminalOutput`, not here.
   ptyHost: {
-    /** Subscribe to PTY byte output for a given ptyId. Returns unsubscribe. */
-    onData: (ptyId: string, cb: (data: string) => void) => () => void;
     /** Subscribe to PTY exit for a given ptyId. Returns unsubscribe. */
     onExit: (
       ptyId: string,
