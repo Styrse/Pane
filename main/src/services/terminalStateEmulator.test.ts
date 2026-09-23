@@ -49,6 +49,17 @@ describe('TerminalStateEmulator', () => {
     emulator.dispose();
   });
 
+  it('can blank dim cells, which TUIs use for placeholder suggestions', async () => {
+    const emulator = new TerminalStateEmulator(40, 5);
+
+    emulator.write('❯ \x1b[2mTry "fix the tests"\x1b[22m\r\ntyped \x1b[2mhint\x1b[22m kept');
+    await emulator.waitForIdle();
+
+    expect(emulator.getScreenText()).toBe('❯ Try "fix the tests"\ntyped hint kept');
+    expect(emulator.getScreenText({ omitDim: true })).toBe('❯\ntyped      kept');
+    emulator.dispose();
+  });
+
   it('restores the normal screen after leaving the alternate buffer', async () => {
     const emulator = new TerminalStateEmulator(20, 5);
 

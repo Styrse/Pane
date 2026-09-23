@@ -1665,6 +1665,115 @@ describe('runpane IPC handlers', () => {
     });
   });
 
+  it('stages text before submitting a Claude composer', async () => {
+    vi.useFakeTimers();
+    const rule = '─'.repeat(40);
+    vi.mocked(terminalPanelManager.getTerminalSnapshot)
+      .mockReturnValueOnce(terminalSnapshot(`${rule}\n❯ \n${rule}\n`, 'active', 'claude'))
+      .mockReturnValueOnce(terminalSnapshot(`${rule}\n❯ Read and follow brief.md\n${rule}\n`, 'idle', 'claude'))
+      .mockReturnValueOnce(terminalSnapshot(`${rule}\n❯ Read and follow brief.md\n${rule}\n`, 'idle', 'claude'))
+      .mockReturnValue(terminalSnapshot(`❯ Read and follow brief.md\n✻ Working\n${rule}\n❯ \n${rule}\n`, 'active', 'claude'));
+    const registry = createRegistry();
+
+    const pendingResult = registry.invoke('runpane:panels:submit', [{
+      panelId: terminalPanel.id,
+      input: 'Read and follow brief.md\n',
+    }]);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    const result = await pendingResult;
+
+    expect(terminalPanelManager.writeToTerminal).toHaveBeenNthCalledWith(1, terminalPanel.id, 'Read and follow brief.md');
+    expect(terminalPanelManager.writeToTerminal).toHaveBeenNthCalledWith(2, terminalPanel.id, '\r');
+    expect(result).toMatchObject({
+      ok: true,
+      sequenceName: 'enter-cr',
+      verifiedSubmitted: true,
+    });
+  });
+
+  it('does not take a Claude redraw frame as proof that the prompt was submitted', async () => {
+    vi.useFakeTimers();
+    const rule = '─'.repeat(40);
+    let staged = false;
+    let enters = 0;
+    let redrawShown = false;
+    vi.mocked(terminalPanelManager.writeToTerminal).mockImplementation((_panelId, data) => {
+      if (data === '\r') enters += 1;
+      else staged = true;
+    });
+    vi.mocked(terminalPanelManager.getOutputGeneration).mockImplementation(() => enters);
+    vi.mocked(terminalPanelManager.getTerminalSnapshot).mockImplementation(() => {
+      if (!staged) return terminalSnapshot(`${rule}\n❯\n${rule}\n`, 'active', 'claude');
+      if (enters === 1 && !redrawShown) {
+        redrawShown = true;
+        return terminalSnapshot('Claude Code v2.1.281\n', 'active', 'claude');
+      }
+      return terminalSnapshot(`${rule}\n❯ Read and follow brief.md\n${rule}\n`, 'idle', 'claude');
+    });
+    const registry = createRegistry();
+
+    const pendingResult = registry.invoke('runpane:panels:submit', [{
+      panelId: terminalPanel.id,
+      input: 'Read and follow brief.md',
+    }]);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    const result = await pendingResult;
+
+    expect(redrawShown).toBe(true);
+    expect(result).toMatchObject({
+      ok: false,
+      verifiedSubmitted: false,
+      blocked: { kind: 'agent-prompt' },
+    });
+  });
+
+  it('waits for a starting Claude to draw its composer and echo the text before pressing Enter', async () => {
+    vi.useFakeTimers();
+    const rule = '─'.repeat(40);
+    let staged = false;
+    let enters = 0;
+    let startupPolls = 0;
+    let echoPolls = 0;
+    let echoPollsBeforeEnter = -1;
+    vi.mocked(terminalPanelManager.writeToTerminal).mockImplementation((_panelId, data) => {
+      if (data === '\r') {
+        enters += 1;
+        echoPollsBeforeEnter = echoPolls;
+      } else {
+        staged = true;
+      }
+    });
+    vi.mocked(terminalPanelManager.getTerminalSnapshot).mockImplementation(() => {
+      if (startupPolls < 5) {
+        startupPolls += 1;
+        return terminalSnapshot('Claude Code v2.1.281\n', 'active', 'claude');
+      }
+      if (!staged) return terminalSnapshot(`${rule}\n❯\n${rule}\n`, 'active', 'claude');
+      if (echoPolls < 3) {
+        echoPolls += 1;
+        return terminalSnapshot(`${rule}\n❯\n${rule}\n`, 'active', 'claude');
+      }
+      if (enters === 0) return terminalSnapshot(`${rule}\n❯ Read and follow brief.md\n${rule}\n`, 'idle', 'claude');
+      return terminalSnapshot(`❯ Read and follow brief.md\n✻ Working\n${rule}\n❯\n${rule}\n`, 'active', 'claude');
+    });
+    const registry = createRegistry();
+
+    const pendingResult = registry.invoke('runpane:panels:submit', [{
+      panelId: terminalPanel.id,
+      input: 'Read and follow brief.md',
+    }]);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    const result = await pendingResult;
+
+    expect(terminalPanelManager.writeToTerminal).toHaveBeenNthCalledWith(1, terminalPanel.id, 'Read and follow brief.md');
+    expect(startupPolls).toBe(5);
+    expect(echoPollsBeforeEnter).toBe(3);
+    expect(result).toMatchObject({ ok: true, verifiedSubmitted: true });
+  });
+
   it('does not report success when submitted text remains in an idle Codex composer', async () => {
     vi.useFakeTimers();
     vi.mocked(terminalPanelManager.getTerminalSnapshot)
@@ -1677,7 +1786,7 @@ describe('runpane IPC handlers', () => {
       input: 'Continue the existing task',
     }]);
 
-    await vi.advanceTimersByTimeAsync(4_000);
+    await vi.advanceTimersByTimeAsync(8_000);
     const result = await pendingResult;
 
     expect(result).toMatchObject({
@@ -1844,6 +1953,43 @@ describe('runpane IPC handlers', () => {
         isPresent: true,
         hasUndeliveredText: expected,
       },
+    });
+  });
+
+  it.each([
+    ['held prompt', `⏺ Done\n${'─'.repeat(40)}\n❯ Read and follow brief.md\n${'─'.repeat(40)}\n  ⏵⏵ bypass permissions on\n`, true, true],
+    ['held paste', `${'─'.repeat(40)}\n❯ [Pasted text #1 +10 lines]\n${'─'.repeat(40)}\n`, true, true],
+    ['held second line', `${'─'.repeat(40)}\n❯ Read the brief\n  then report back\n${'─'.repeat(40)}\n`, true, true],
+    ['empty composer', `${'─'.repeat(40)}\n❯\n${'─'.repeat(40)}\n`, true, false],
+    ['menu choice', 'Quick safety check\n ❯ No, exit\n   Yes, I trust this folder\n', false, false],
+  ])('reports whether the Claude composer has undelivered text: %s', async (_name, text, isPresent, hasUndeliveredText) => {
+    vi.mocked(terminalPanelManager.getTerminalSnapshot).mockReturnValue(
+      terminalSnapshot(text, 'idle', 'claude'),
+    );
+    const registry = createRegistry();
+
+    const result = await registry.invoke('runpane:panels:screen', [{
+      panelId: terminalPanel.id,
+    }]);
+
+    expect(result).toMatchObject({ composer: { isPresent, hasUndeliveredText } });
+  });
+
+  it('does not count a dim Claude placeholder suggestion as undelivered text', async () => {
+    const rule = '─'.repeat(40);
+    vi.mocked(terminalPanelManager.getTerminalSnapshot).mockReturnValue({
+      ...terminalSnapshot(`${rule}\n❯ Try "fix lint errors"\n${rule}\n`, 'idle', 'claude'),
+      inputScreenText: `${rule}\n❯\n${rule}`,
+    });
+    const registry = createRegistry();
+
+    const result = await registry.invoke('runpane:panels:screen', [{
+      panelId: terminalPanel.id,
+    }]);
+
+    expect(result).toMatchObject({
+      text: expect.stringContaining('Try "fix lint errors"'),
+      composer: { isPresent: true, hasUndeliveredText: false },
     });
   });
 

@@ -5788,7 +5788,7 @@ export const RUNPANE_CONTRACT = {
         "If the repository exists on disk but is not saved in Pane, use `runpane repos add --path <repo> --yes --json` before creating panes.",
         "Use `runpane agents doctor --agent <codex|claude|cursor> --repo <selector> --json` when agent availability differs across host, Windows, WSL, or repo environments.",
         "Use `runpane panes create --wait-ready` to create Panes and validate initial terminal readiness in one call.",
-        "Use `runpane panels screen` for compact current state, including Codex composer state. Use `panels wait` for create-time readiness or text checks. Use `runpane watch --follow` to block on workspace transitions (READY, BLOCKED, IDLE, STUCK, EXIT) without polling. Use `panels submit` to send and submit a new turn. Use `panels submit-composer --strategy auto` only for a composer that was filled separately.",
+        "Use `runpane panels screen` for compact current state, including Claude and Codex composer state. Use `panels wait` for create-time readiness or text checks. Use `runpane watch --follow` to block on workspace transitions (READY, BLOCKED, IDLE, STUCK, EXIT) without polling. Use `panels submit` to send and submit a new turn. Use `panels submit-composer --strategy auto` only for a composer that was filled separately.",
         "Use `runpane panels input` only when exact bytes are required, such as Ctrl-C or handcrafted terminal input.",
         "Pane terminals draw inline images: sixel, iTerm2 inline images, and the kitty graphics protocol. Tools that need kitty graphics, such as terminal-browser and terminal-doom, run inside a Pane panel; `runpane doctor --json` reports the exact list under `terminal.graphicsProtocols`.",
         "After creating Panes or sending terminal input, validate with `panels wait` or bounded `panels screen` before reporting success. For ongoing supervision, `runpane watch --follow` is the canonical monitor."
@@ -7094,14 +7094,14 @@ export const RUNPANE_CONTRACT = {
         ],
         "notes": [
           "Use this before `panels output` when an agent only needs the latest visible/current state.",
-          "The composer object reports whether a Codex composer is present and whether it holds undelivered text.",
+          "The composer object reports whether a Claude or Codex composer is present and whether it holds undelivered text. Claude's dim placeholder suggestion does not count as undelivered text.",
           "If hasMore is true and context is missing, rerun with a larger --limit or use `panels output`."
         ]
       },
       "panels submit": {
         "name": "panels submit",
         "summary": "Send and submit text to a terminal panel, including idle agent composers.",
-        "details": "Use this for ordinary interactive submissions. For an idle Codex composer, Pane stages the text, waits for Codex paste handling, sends the Codex submit sequence, and verifies that the turn started when visible evidence is available. Other terminals receive a normalized CR Enter. Exact byte workflows remain on `panels input`.",
+        "details": "Use this for ordinary interactive submissions. For Claude, Pane waits for the composer to appear and show the staged text, then sends Enter on its own and verifies that the composer cleared; Claude keeps an Enter that arrives together with the text as a newline. For an idle Codex composer, Pane stages the text, waits for Codex paste handling, sends the Codex submit sequence, and verifies that the turn started when visible evidence is available. Other terminals receive a normalized CR Enter. Exact byte workflows remain on `panels input`.",
         "requiresPaneDaemon": true,
         "mutates": true,
         "arguments": [
@@ -7150,7 +7150,7 @@ export const RUNPANE_CONTRACT = {
         ],
         "notes": [
           "The response includes sequenceName, verifiedSubmitted, and nextCommand. If ok is false, inspect blocked and do not assume the turn started.",
-          "Do not follow `panels submit` with `panels submit-composer`; idle Codex composer submission is handled atomically.",
+          "Do not follow `panels submit` with `panels submit-composer`; Claude and idle Codex composer submission is handled atomically.",
           "Use `panels input` for Ctrl-C, escape sequences, or any workflow requiring exact bytes."
         ]
       },

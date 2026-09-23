@@ -77,6 +77,8 @@ export interface TerminalPanelSnapshot {
   alternateScreenBuffer: string;
   /** Plain text for the current emulated viewport. */
   screenText?: string;
+  /** screenText with dim cells blanked, so placeholder hints do not read as typed input. */
+  inputScreenText?: string;
   isAlternateScreen: boolean;
   activityStatus: 'active' | 'idle';
   lastActivityTime: string;
@@ -1589,6 +1591,7 @@ export class TerminalPanelManager extends EventEmitter {
       scrollbackBuffer: terminal.scrollbackBuffer,
       alternateScreenBuffer: terminal.alternateScreenBuffer,
       screenText: terminal.screenEmulator?.getScreenText(),
+      inputScreenText: terminal.screenEmulator?.getScreenText({ omitDim: true }),
       isAlternateScreen: terminal.screenEmulator?.isAlternateScreen ?? terminal.isAlternateScreen,
       activityStatus: this.deriveActivityStatus(panelId),
       lastActivityTime: terminal.lastActivity.toISOString(),

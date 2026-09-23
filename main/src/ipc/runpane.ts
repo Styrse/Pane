@@ -164,6 +164,7 @@ const DEFAULT_PANEL_WAIT_INTERVAL_MS = 500;
 const DEFAULT_COMPOSER_VERIFY_TIMEOUT_MS = 3_000;
 const DEFAULT_COMPOSER_VERIFY_INTERVAL_MS = 100;
 const CODEX_SUBMIT_STAGE_DELAY_MS = 500;
+const CLAUDE_INPUT_WAIT_TIMEOUT_MS = 15_000;
 const MAX_CREATE_SUBMIT_ATTEMPTS = 3;
 const CREATE_SUBMIT_CONFIRMATION_DELAY_MS = 400;
 const DEFAULT_ARCHIVE_CLEANUP_TIMEOUT_MS = 30_000;
@@ -965,17 +966,25 @@ export function registerRunpaneHandlers(
         throw new Error(`Terminal panel ${panel.id} is not initialized`);
       }
 
-      const beforeScreen = await buildPanelScreenResult(panel, DEFAULT_PANEL_SCREEN_LIMIT);
+      let beforeScreen = await buildPanelScreenResult(panel, DEFAULT_PANEL_SCREEN_LIMIT);
       const stagedInput = stripSubmitEnter(normalized.input);
-      if (
-        stagedInput.length > 0 &&
-        beforeScreen.state.agentType === 'codex' &&
-        beforeScreen.state.activityStatus === 'idle' &&
-        beforeScreen.state.isCliReady === true &&
-        beforeScreen.composer.isPresent
-      ) {
+      const { agentType, activityStatus, isCliReady } = beforeScreen.state;
+      // Claude reads text and Enter arriving in one read as a paste and keeps
+      // the Enter as a newline. Terminal readiness can precede Claude drawing
+      // its UI or reading input, so wait for its composer, then for the staged
+      // text to show in it, before sending Enter on its own.
+      if (stagedInput.length > 0 && agentType === 'claude' && !beforeScreen.composer.isPresent) {
+        beforeScreen = await waitForPanelScreen(panel, screen => screen.composer.isPresent);
+      }
+      const stagesComposer = agentType === 'claude' ||
+        (agentType === 'codex' && activityStatus === 'idle' && isCliReady === true && beforeScreen.composer.isPresent);
+      if (stagedInput.length > 0 && stagesComposer) {
         terminalPanelManager.writeToTerminal(panel.id, stagedInput);
-        await sleep(CODEX_SUBMIT_STAGE_DELAY_MS);
+        if (agentType === 'claude') {
+          await waitForPanelScreen(panel, screen => screen.composer.hasUndeliveredText);
+        } else {
+          await sleep(CODEX_SUBMIT_STAGE_DELAY_MS);
+        }
         const submission = await submitComposerForPanel(panel, 'auto');
         return {
           ok: submission.ok,
@@ -1718,7 +1727,7 @@ async function buildPanelScreenResult(panel: ToolPanel, limit: number): Promise<
   const persisted = liveSnapshot ? null : panelDatabase.getPanelBuffers(panel.id);
   const { source, rawText } = selectPanelScreenText(liveSnapshot, customState, persisted);
   const bounded = boundSanitizedLines(rawText, limit);
-  const composer = detectPanelComposer(bounded.text, state.agentType);
+  const composer = detectPanelComposer(liveSnapshot?.inputScreenText ?? bounded.text, state.agentType);
 
   return {
     ok: true,
@@ -1739,6 +1748,9 @@ function detectPanelComposer(
   text: string,
   agentType: RunpaneAgentId | undefined,
 ): RunpanePanelScreenResult['composer'] {
+  if (agentType === 'claude') {
+    return detectClaudeComposer(text);
+  }
   if (agentType !== 'codex') {
     return { isPresent: false, hasUndeliveredText: false };
   }
@@ -1761,6 +1773,25 @@ function detectPanelComposer(
     isPresent: hasPastedContent,
     hasUndeliveredText: hasPastedContent,
   };
+}
+
+// Claude draws its composer as a `❯` line boxed between two horizontal rules;
+// held input is anything between the prompt marker and the closing rule.
+function detectClaudeComposer(text: string): RunpanePanelScreenResult['composer'] {
+  const lines = text.split(/\r?\n/u).map(line => line.trim());
+  const isRule = (line: string | undefined) => line !== undefined && /^─{3,}$/u.test(line);
+  for (let index = lines.length - 1; index > 0; index -= 1) {
+    const match = lines[index].match(/^❯(?:\s+(.*))?$/u);
+    if (!match || !isRule(lines[index - 1])) continue;
+
+    const closingRule = lines.findIndex((line, lineIndex) => lineIndex > index && isRule(line));
+    const held = [match[1] ?? '', ...lines.slice(index + 1, closingRule < 0 ? undefined : closingRule)];
+    return {
+      isPresent: true,
+      hasUndeliveredText: held.some(line => line.length > 0),
+    };
+  }
+  return { isPresent: false, hasUndeliveredText: false };
 }
 
 interface PanelScreenText {
@@ -2036,6 +2067,19 @@ async function submitComposerForPanel(
   };
 }
 
+async function waitForPanelScreen(
+  panel: ToolPanel,
+  isReady: (screen: RunpanePanelScreenResult) => boolean,
+): Promise<RunpanePanelScreenResult> {
+  const startedAt = Date.now();
+  let screen = await buildPanelScreenResult(panel, DEFAULT_PANEL_SCREEN_LIMIT);
+  while (!isReady(screen) && Date.now() - startedAt < CLAUDE_INPUT_WAIT_TIMEOUT_MS) {
+    await sleep(DEFAULT_COMPOSER_VERIFY_INTERVAL_MS);
+    screen = await buildPanelScreenResult(panel, DEFAULT_PANEL_SCREEN_LIMIT);
+  }
+  return screen;
+}
+
 async function verifyComposerSubmitted(
   panel: ToolPanel,
   beforeScreen: RunpanePanelScreenResult,
@@ -2052,11 +2096,24 @@ async function verifyComposerSubmitted(
   }
   const stagedText = composerEvidenceText(beforeScreen.text);
   let latestScreen = beforeScreen;
+  let previousPollShowedEmptyComposer = false;
   const startedAt = Date.now();
 
   while (Date.now() - startedAt <= DEFAULT_COMPOSER_VERIFY_TIMEOUT_MS) {
     await sleep(DEFAULT_COMPOSER_VERIFY_INTERVAL_MS);
     latestScreen = await buildPanelScreenResult(panel, DEFAULT_PANEL_SCREEN_LIMIT);
+
+    // Claude always draws its composer box, and repaints (at startup, say)
+    // briefly show neither the box nor the prompt; only a steady empty box
+    // proves the prompt was taken.
+    if (beforeScreen.state.agentType === 'claude') {
+      const showsEmptyComposer = latestScreen.composer.isPresent && !latestScreen.composer.hasUndeliveredText;
+      if (beforeHadComposerPrompt && showsEmptyComposer && previousPollShowedEmptyComposer) {
+        return { ok: true, verifiedSubmitted: true, verification: 'observed' };
+      }
+      previousPollShowedEmptyComposer = showsEmptyComposer;
+      continue;
+    }
 
     const verdict = assessComposerEvidence({
       beforeText: beforeScreen.text,

@@ -109,16 +109,31 @@ export class TerminalStateEmulator {
         }) + (this.win32InputMode ? '\x1b[?9001h' : '');
   }
 
-  /** Return plain text for the currently visible viewport. */
-  getScreenText(): string {
+  /**
+   * Return plain text for the currently visible viewport. omitDim blanks dim
+   * cells, which agent TUIs use for placeholder suggestions in their composer.
+   */
+  getScreenText({ omitDim = false }: { omitDim?: boolean } = {}): string {
     if (this.disposed) return this.finalScreenText;
 
     const buffer = this.terminal.buffer.active;
     const lines: string[] = [];
     const end = buffer.viewportY + this.terminal.rows;
+    const cell = buffer.getNullCell();
 
     for (let index = buffer.viewportY; index < end; index += 1) {
-      lines.push(buffer.getLine(index)?.translateToString(true) ?? '');
+      const line = buffer.getLine(index);
+      if (!line || !omitDim) {
+        lines.push(line?.translateToString(true) ?? '');
+        continue;
+      }
+      let text = '';
+      for (let column = 0; column < line.length; column += 1) {
+        line.getCell(column, cell);
+        if (cell.getWidth() === 0) continue;
+        text += cell.isDim() ? ' '.repeat(cell.getWidth()) : cell.getChars() || ' ';
+      }
+      lines.push(text.trimEnd());
     }
 
     while (lines.length > 0 && lines[lines.length - 1] === '') {
