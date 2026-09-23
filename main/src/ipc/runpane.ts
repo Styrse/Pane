@@ -165,6 +165,7 @@ const DEFAULT_COMPOSER_VERIFY_TIMEOUT_MS = 3_000;
 const DEFAULT_COMPOSER_VERIFY_INTERVAL_MS = 100;
 const CODEX_SUBMIT_STAGE_DELAY_MS = 500;
 const CLAUDE_INPUT_WAIT_TIMEOUT_MS = 15_000;
+const CLAUDE_STARTUP_QUIET_MS = 3_000;
 const MAX_CREATE_SUBMIT_ATTEMPTS = 3;
 const CREATE_SUBMIT_CONFIRMATION_DELAY_MS = 400;
 const DEFAULT_ARCHIVE_CLEANUP_TIMEOUT_MS = 30_000;
@@ -971,17 +972,25 @@ export function registerRunpaneHandlers(
       const { agentType, activityStatus, isCliReady } = beforeScreen.state;
       // Claude reads text and Enter arriving in one read as a paste and keeps
       // the Enter as a newline. Terminal readiness can precede Claude drawing
-      // its UI or reading input, so wait for its composer, then for the staged
-      // text to show in it, before sending Enter on its own.
+      // its UI or reading input, so wait while it is still drawing for its
+      // composer, then for the staged text to show, before sending Enter alone.
+      // A quiet screen without a composer (a menu, a shell) gets the plain write.
       if (stagedInput.length > 0 && agentType === 'claude' && !beforeScreen.composer.isPresent) {
-        beforeScreen = await waitForPanelScreen(panel, screen => screen.composer.isPresent);
+        beforeScreen = await waitForPanelScreen(
+          panel,
+          screen => screen.composer.isPresent || !panelHasOutputWithin(panel.id, CLAUDE_STARTUP_QUIET_MS),
+        );
       }
-      const stagesComposer = agentType === 'claude' ||
-        (agentType === 'codex' && activityStatus === 'idle' && isCliReady === true && beforeScreen.composer.isPresent);
+      const stagesComposer = beforeScreen.composer.isPresent && (agentType === 'claude' ||
+        (agentType === 'codex' && activityStatus === 'idle' && isCliReady === true));
       if (stagedInput.length > 0 && stagesComposer) {
+        const outputGenerationBeforeStage = terminalPanelManager.getOutputGeneration(panel.id);
         terminalPanelManager.writeToTerminal(panel.id, stagedInput);
         if (agentType === 'claude') {
-          await waitForPanelScreen(panel, screen => screen.composer.hasUndeliveredText);
+          await waitForPanelScreen(
+            panel,
+            screen => screen.composer.hasUndeliveredText && panelHasFreshOutputSince(panel.id, outputGenerationBeforeStage),
+          );
         } else {
           await sleep(CODEX_SUBMIT_STAGE_DELAY_MS);
         }
@@ -1592,6 +1601,11 @@ function panelHasFreshOutputSince(panelId: string, generation: number): boolean 
   return terminalPanelManager.getOutputGeneration(panelId) > generation;
 }
 
+function panelHasOutputWithin(panelId: string, windowMs: number): boolean {
+  const lastOutputAt = terminalPanelManager.getLastOutputAt(panelId);
+  return lastOutputAt !== undefined && Date.now() - Date.parse(lastOutputAt) < windowMs;
+}
+
 async function createPaneItem(
   services: AppServices,
   repo: Project,
@@ -1727,7 +1741,10 @@ async function buildPanelScreenResult(panel: ToolPanel, limit: number): Promise<
   const persisted = liveSnapshot ? null : panelDatabase.getPanelBuffers(panel.id);
   const { source, rawText } = selectPanelScreenText(liveSnapshot, customState, persisted);
   const bounded = boundSanitizedLines(rawText, limit);
-  const composer = detectPanelComposer(liveSnapshot?.inputScreenText ?? bounded.text, state.agentType);
+  const composerText = state.agentType === 'claude' && liveSnapshot
+    ? terminalPanelManager.getInputScreenText(panel.id) ?? bounded.text
+    : bounded.text;
+  const composer = detectPanelComposer(composerText, state.agentType);
 
   return {
     ok: true,

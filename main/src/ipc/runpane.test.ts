@@ -36,6 +36,7 @@ vi.spyOn(terminalPanelManager, 'getTerminalScrollback');
 vi.spyOn(terminalPanelManager, 'writeToTerminal');
 vi.spyOn(terminalPanelManager, 'getLastOutputAt');
 vi.spyOn(terminalPanelManager, 'getOutputGeneration');
+vi.spyOn(terminalPanelManager, 'getInputScreenText');
 vi.spyOn(terminalPanelManager, 'deliverPendingInitialInput');
 vi.spyOn(terminalPanelManager, 'getAgentStatus');
 vi.spyOn(panelDatabase, 'getPanelBuffers');
@@ -299,6 +300,7 @@ describe('runpane IPC handlers', () => {
     vi.mocked(terminalPanelManager.writeToTerminal).mockReset();
     vi.mocked(terminalPanelManager.getLastOutputAt).mockReset();
     vi.mocked(terminalPanelManager.getOutputGeneration).mockReset();
+    vi.mocked(terminalPanelManager.getInputScreenText).mockReset();
     vi.mocked(terminalPanelManager.deliverPendingInitialInput).mockReset();
     vi.mocked(terminalPanelManager.getAgentStatus).mockReset();
     vi.mocked(terminalPanelManager.getOutputGeneration).mockReturnValue(0);
@@ -1673,6 +1675,7 @@ describe('runpane IPC handlers', () => {
       .mockReturnValueOnce(terminalSnapshot(`${rule}\n❯ Read and follow brief.md\n${rule}\n`, 'idle', 'claude'))
       .mockReturnValueOnce(terminalSnapshot(`${rule}\n❯ Read and follow brief.md\n${rule}\n`, 'idle', 'claude'))
       .mockReturnValue(terminalSnapshot(`❯ Read and follow brief.md\n✻ Working\n${rule}\n❯ \n${rule}\n`, 'active', 'claude'));
+    vi.mocked(terminalPanelManager.getOutputGeneration).mockReturnValueOnce(0).mockReturnValue(1);
     const registry = createRegistry();
 
     const pendingResult = registry.invoke('runpane:panels:submit', [{
@@ -1702,7 +1705,7 @@ describe('runpane IPC handlers', () => {
       if (data === '\r') enters += 1;
       else staged = true;
     });
-    vi.mocked(terminalPanelManager.getOutputGeneration).mockImplementation(() => enters);
+    vi.mocked(terminalPanelManager.getOutputGeneration).mockImplementation(() => (staged ? enters + 1 : 0));
     vi.mocked(terminalPanelManager.getTerminalSnapshot).mockImplementation(() => {
       if (!staged) return terminalSnapshot(`${rule}\n❯\n${rule}\n`, 'active', 'claude');
       if (enters === 1 && !redrawShown) {
@@ -1758,6 +1761,8 @@ describe('runpane IPC handlers', () => {
       if (enters === 0) return terminalSnapshot(`${rule}\n❯ Read and follow brief.md\n${rule}\n`, 'idle', 'claude');
       return terminalSnapshot(`❯ Read and follow brief.md\n✻ Working\n${rule}\n❯\n${rule}\n`, 'active', 'claude');
     });
+    vi.mocked(terminalPanelManager.getLastOutputAt).mockImplementation(() => new Date().toISOString());
+    vi.mocked(terminalPanelManager.getOutputGeneration).mockImplementation(() => echoPolls);
     const registry = createRegistry();
 
     const pendingResult = registry.invoke('runpane:panels:submit', [{
@@ -1772,6 +1777,55 @@ describe('runpane IPC handlers', () => {
     expect(startupPolls).toBe(5);
     expect(echoPollsBeforeEnter).toBe(3);
     expect(result).toMatchObject({ ok: true, verifiedSubmitted: true });
+  });
+
+  it('sends a plain submit when a quiet Claude screen shows no composer', async () => {
+    vi.mocked(terminalPanelManager.getTerminalSnapshot).mockReturnValue(
+      terminalSnapshot('Do you want to proceed?\n ❯ 1. Yes\n   2. No\n', 'idle', 'claude'),
+    );
+    vi.mocked(terminalPanelManager.getLastOutputAt).mockReturnValue(new Date(Date.now() - 60_000).toISOString());
+    const registry = createRegistry();
+
+    const result = await registry.invoke('runpane:panels:submit', [{
+      panelId: terminalPanel.id,
+      input: '1',
+    }]);
+
+    expect(terminalPanelManager.writeToTerminal).toHaveBeenCalledTimes(1);
+    expect(terminalPanelManager.writeToTerminal).toHaveBeenCalledWith(terminalPanel.id, '1\r');
+    expect(result).toMatchObject({ ok: true, verifiedSubmitted: false });
+  });
+
+  it('waits for the staged text itself, not an older draft, before pressing Enter on Claude', async () => {
+    vi.useFakeTimers();
+    const rule = '─'.repeat(40);
+    let staged = false;
+    let generation = 0;
+    let generationAtEnter = -1;
+    vi.mocked(terminalPanelManager.writeToTerminal).mockImplementation((_panelId, data) => {
+      if (data === '\r') generationAtEnter = generation;
+      else staged = true;
+    });
+    vi.mocked(terminalPanelManager.getOutputGeneration).mockImplementation(() => generation);
+    let pollsAfterStage = 0;
+    vi.mocked(terminalPanelManager.getTerminalSnapshot).mockImplementation(() => {
+      if (!staged) return terminalSnapshot(`${rule}\n❯ old draft\n${rule}\n`, 'idle', 'claude');
+      pollsAfterStage += 1;
+      if (pollsAfterStage === 4) generation = 1;
+      if (generationAtEnter >= 0) return terminalSnapshot(`✻ Working\n${rule}\n❯\n${rule}\n`, 'active', 'claude');
+      return terminalSnapshot(`${rule}\n❯ old draft${generation ? ' Continue' : ''}\n${rule}\n`, 'idle', 'claude');
+    });
+    const registry = createRegistry();
+
+    const pendingResult = registry.invoke('runpane:panels:submit', [{
+      panelId: terminalPanel.id,
+      input: ' Continue',
+    }]);
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    await pendingResult;
+
+    expect(generationAtEnter).toBe(1);
   });
 
   it('does not report success when submitted text remains in an idle Codex composer', async () => {
@@ -1977,10 +2031,10 @@ describe('runpane IPC handlers', () => {
 
   it('does not count a dim Claude placeholder suggestion as undelivered text', async () => {
     const rule = '─'.repeat(40);
-    vi.mocked(terminalPanelManager.getTerminalSnapshot).mockReturnValue({
-      ...terminalSnapshot(`${rule}\n❯ Try "fix lint errors"\n${rule}\n`, 'idle', 'claude'),
-      inputScreenText: `${rule}\n❯\n${rule}`,
-    });
+    vi.mocked(terminalPanelManager.getTerminalSnapshot).mockReturnValue(
+      terminalSnapshot(`${rule}\n❯ Try "fix lint errors"\n${rule}\n`, 'idle', 'claude'),
+    );
+    vi.mocked(terminalPanelManager.getInputScreenText).mockReturnValue(`${rule}\n❯\n${rule}`);
     const registry = createRegistry();
 
     const result = await registry.invoke('runpane:panels:screen', [{
