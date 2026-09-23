@@ -15,17 +15,20 @@ if (!fs.existsSync(assetsDir)) {
   process.exit(1);
 }
 
-const terminalChunks = fs.readdirSync(assetsDir)
-  .filter((file) => /^TerminalPanel-.*\.js$/.test(file));
+// The bundler names xterm's shared chunk after one of the modules it groups
+// (currently addon-fit), so find it by the enum inside requestMode instead.
+const xtermChunks = fs.readdirSync(assetsDir)
+  .filter((file) => file.endsWith('.js'))
+  .filter((file) => fs.readFileSync(path.join(assetsDir, file), 'utf8').includes('NOT_RECOGNIZED'));
 
-if (terminalChunks.length === 0) {
-  console.error(`[verify-xterm] Could not find TerminalPanel chunk in ${assetsDir}`);
+if (xtermChunks.length === 0) {
+  console.error(`[verify-xterm] Could not find xterm's requestMode in any chunk in ${assetsDir}`);
   process.exit(1);
 }
 
 const brokenRequestModePattern = /requestMode\([^)]*\)\{[^}]*void 0\|\|\([A-Za-z_$][\w$]*=\{\}\)/;
 
-for (const chunk of terminalChunks) {
+for (const chunk of xtermChunks) {
   const filePath = path.join(assetsDir, chunk);
   const content = fs.readFileSync(filePath, 'utf8');
 
@@ -36,4 +39,4 @@ for (const chunk of terminalChunks) {
   }
 }
 
-console.log(`[verify-xterm] requestMode build output OK (${terminalChunks.join(', ')})`);
+console.log(`[verify-xterm] requestMode build output OK (${xtermChunks.join(', ')})`);
