@@ -22,7 +22,7 @@ import {
   onAck as flowControlOnAck,
   onPtyBytes as flowControlOnPtyBytes,
 } from '../ptyHost/flowControl';
-import { TerminalStateEmulator } from './terminalStateEmulator';
+import { sharedEmulatorThread, type RemoteTerminalEmulator, type TerminalEmulatorHostConnection } from './terminalEmulatorClient';
 import { AgentStatusMonitor } from './agentStatus/agentStatusMonitor';
 import { detectAgentState } from './agentStatus/manifestEngine';
 import { getManifestForAgent } from './agentStatus/manifests';
@@ -193,7 +193,7 @@ interface TerminalProcess {
   scrollbackBuffer: string;
   alternateScreenBuffer: string;
   /** Authoritative xterm-compatible model of the live PTY byte stream. */
-  screenEmulator?: TerminalStateEmulator;
+  screenEmulator?: RemoteTerminalEmulator;
   commandHistory: string[];
   currentCommand: string;
   lastActivity: Date;
@@ -252,9 +252,9 @@ export class TerminalPanelManager extends EventEmitter {
   // At-a-glance agent status (blocked/working/done) for AI/CLI panels.
   private readonly agentStatusMonitor = new AgentStatusMonitor();
   private agentStatusPollTimer: ReturnType<typeof setInterval> | null = null;
-  private agentStatusPolling = false;
 
-  constructor() {
+  /** Screen models parse PTY output on this host, off the main thread. */
+  constructor(private readonly emulatorHost: () => TerminalEmulatorHostConnection = sharedEmulatorThread) {
     super();
     this.setMaxListeners(100);
   }
@@ -1017,7 +1017,7 @@ export class TerminalPanelManager extends EventEmitter {
       sessionId: panel.sessionId,
       scrollbackBuffer: '',
       alternateScreenBuffer: '',
-      screenEmulator: new TerminalStateEmulator(spawnCols, spawnRows),
+      screenEmulator: this.emulatorHost().createEmulator(spawnCols, spawnRows),
       commandHistory: [],
       currentCommand: '',
       lastActivity: new Date(),
@@ -1437,8 +1437,6 @@ export class TerminalPanelManager extends EventEmitter {
     const panel = panelManager.getPanel(panelId);
     if (!panel) return;
 
-    await terminal.screenEmulator?.waitForIdle();
-    
     // Get current working directory (if possible)
     let cwd = (panel.state.customState && 'cwd' in panel.state.customState) ? panel.state.customState.cwd : undefined;
     cwd = cwd || process.cwd();
@@ -1457,14 +1455,14 @@ export class TerminalPanelManager extends EventEmitter {
     
     // Save state to panel
     const state = panel.state;
-    const savedIsAlternateScreen =
-      terminal.screenEmulator?.isAlternateScreen ?? terminal.isAlternateScreen;
+    const restore = await terminal.screenEmulator?.restoreSnapshot();
+    const savedIsAlternateScreen = restore?.isAlternateScreen ?? terminal.isAlternateScreen;
     // Same source as getTerminalState: persist the rendered emulator model for
     // normal buffers so restarts replay a duplicate-free snapshot, not the raw
     // append log with its accumulated repaint traffic.
     const savedScrollback =
-      !savedIsAlternateScreen && terminal.screenEmulator
-        ? trimAnsiSafe(terminal.screenEmulator.serializeForRestore(true), MAX_RESTORE_PAYLOAD_SIZE)
+      restore && !savedIsAlternateScreen
+        ? trimAnsiSafe(restore.serialized, MAX_RESTORE_PAYLOAD_SIZE)
         : terminal.scrollbackBuffer;
     const customState: TerminalPanelState = {
       ...terminalCustomState(state),
@@ -1474,8 +1472,8 @@ export class TerminalPanelManager extends EventEmitter {
       alternateScreenBuffer: terminal.alternateScreenBuffer,
       isAlternateScreen: savedIsAlternateScreen,
       lastActivityTime: terminal.lastActivity.toISOString(),
-      serializedBuffer: terminal.screenEmulator?.isAlternateScreen
-        ? terminal.screenEmulator.serializeForRestore()
+      serializedBuffer: restore?.isAlternateScreen
+        ? restore.serialized
         : this.serializedBuffers.get(panelId),
     };
     if (terminal.capturedAgentSessionId && terminal.agentType) {
@@ -1542,18 +1540,17 @@ export class TerminalPanelManager extends EventEmitter {
     const terminal = this.terminals.get(panelId);
     if (!terminal) return null;
 
-    await terminal.screenEmulator?.waitForIdle();
-
-    const isAlternateScreen = terminal.screenEmulator?.isAlternateScreen ?? terminal.isAlternateScreen;
+    const restore = await terminal.screenEmulator?.restoreSnapshot();
+    const isAlternateScreen = restore?.isAlternateScreen ?? terminal.isAlternateScreen;
     // Normal-buffer restore content comes from the rendered emulator model, not
     // the raw append log: the log accumulates repaint traffic (forced activation
     // redraws re-emit the current frame), which a reset+replay renders as
     // duplicated rows. The emulator consumed those bytes like a live terminal —
     // repaints overwrite in place — so its serialization is duplicate-free.
-    const cappedScrollback =
-      !isAlternateScreen && terminal.screenEmulator
-        ? trimAnsiSafe(terminal.screenEmulator.serializeForRestore(true), MAX_RESTORE_PAYLOAD_SIZE)
-        : trimAnsiSafe(terminal.scrollbackBuffer, MAX_RESTORE_PAYLOAD_SIZE);
+    const cappedScrollback = trimAnsiSafe(
+      restore && !isAlternateScreen ? restore.serialized : terminal.scrollbackBuffer,
+      MAX_RESTORE_PAYLOAD_SIZE,
+    );
     return {
       isInitialized: true,
       cwd: process.cwd(), // Simplified - would need platform-specific implementation
@@ -1565,7 +1562,7 @@ export class TerminalPanelManager extends EventEmitter {
       // An active alternate screen cannot be reconstructed from normal shell
       // scrollback. Serialize the authoritative live model for renderer remounts.
       serializedBuffer: isAlternateScreen
-        ? terminal.screenEmulator?.serializeForRestore()
+        ? restore?.serialized
         : cappedScrollback.length > 0
           ? undefined
           : this.serializedBuffers.get(panelId)
@@ -1573,7 +1570,7 @@ export class TerminalPanelManager extends EventEmitter {
   }
 
   async waitForTerminalState(panelId: string): Promise<void> {
-    await this.terminals.get(panelId)?.screenEmulator?.waitForIdle();
+    await this.terminals.get(panelId)?.screenEmulator?.refresh();
   }
 
   getTerminalSnapshot(panelId: string): TerminalPanelSnapshot | null {
@@ -1588,8 +1585,8 @@ export class TerminalPanelManager extends EventEmitter {
       initialized: true,
       scrollbackBuffer: terminal.scrollbackBuffer,
       alternateScreenBuffer: terminal.alternateScreenBuffer,
-      screenText: terminal.screenEmulator?.getScreenText(),
-      isAlternateScreen: terminal.screenEmulator?.isAlternateScreen ?? terminal.isAlternateScreen,
+      screenText: terminal.screenEmulator?.state.screenText,
+      isAlternateScreen: terminal.screenEmulator?.state.isAlternateScreen ?? terminal.isAlternateScreen,
       activityStatus: this.deriveActivityStatus(panelId),
       lastActivityTime: terminal.lastActivity.toISOString(),
       currentCommand: terminal.currentCommand,
@@ -1673,7 +1670,7 @@ export class TerminalPanelManager extends EventEmitter {
   private ensureAgentStatusPoll(): void {
     if (this.agentStatusPollTimer) return;
     this.agentStatusPollTimer = setInterval(() => {
-      void this.pollAgentStatus();
+      this.pollAgentStatus();
     }, AGENT_STATUS_POLL_MS);
   }
 
@@ -1687,11 +1684,9 @@ export class TerminalPanelManager extends EventEmitter {
   /**
    * Re-derive blocked/working/done for every tracked agent panel from its live
    * screen + OSC title, and emit `panel:agentStatus` on any change. Runs on a
-   * short interval; a guard prevents overlapping passes.
+   * short interval.
    */
-  private async pollAgentStatus(): Promise<void> {
-    if (this.agentStatusPolling) return;
-    this.agentStatusPolling = true;
+  private pollAgentStatus(): void {
     try {
       for (const terminal of this.terminals.values()) {
         if (!this.agentStatusMonitor.isTracked(terminal.panelId)) continue;
@@ -1699,19 +1694,18 @@ export class TerminalPanelManager extends EventEmitter {
         const emulator = terminal.screenEmulator;
         if (!emulator) continue;
 
-        await emulator.waitForIdle();
+        // The pushed screen is at most ~50 ms old, well inside this poll's cadence.
+        const screen = emulator.state;
         const detection = detectAgentState(manifest, {
-          screen: emulator.getScreenText(),
-          oscTitle: emulator.getOscTitle(),
-          oscProgress: emulator.getOscProgress(),
+          screen: screen.screenText,
+          oscTitle: screen.oscTitle,
+          oscProgress: screen.oscProgress,
         });
         const next = this.agentStatusMonitor.update(terminal.panelId, detection, Date.now());
         if (next) this.emitAgentStatus(terminal, next, detection.matchedRuleId);
       }
     } catch (error) {
       console.error('[TerminalPanelManager] agent status poll failed:', error);
-    } finally {
-      this.agentStatusPolling = false;
     }
   }
 
@@ -1916,7 +1910,7 @@ export class TerminalPanelManager extends EventEmitter {
     const terminal = this.terminals.get(panelId);
     if (!terminal) return null;
     return {
-      isAlternateScreen: terminal.screenEmulator?.isAlternateScreen ?? terminal.isAlternateScreen,
+      isAlternateScreen: terminal.screenEmulator?.state.isAlternateScreen ?? terminal.isAlternateScreen,
     };
   }
 

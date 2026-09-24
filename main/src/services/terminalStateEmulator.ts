@@ -7,7 +7,8 @@ const HEADLESS_SCROLLBACK_LINES = 2500;
 /**
  * Maintains an xterm-compatible terminal model for state restoration and
  * local-control screen reads. PTY output parsing is asynchronous, so callers
- * that need a coherent snapshot must await waitForIdle first.
+ * that need a coherent snapshot must await waitForIdle first. The app runs
+ * these on the emulator thread (terminalEmulatorHost.ts), not the main thread.
  */
 export class TerminalStateEmulator {
   private readonly terminal: Terminal;

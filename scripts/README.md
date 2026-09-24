@@ -16,6 +16,21 @@ node --expose-gc scripts/benchmark-session-output.js
 See [the session output audit](../docs/SESSION_OUTPUT_PERFORMANCE.md) for
 results, regression checks, and measurement limits.
 
+## benchmark-terminal-emulation.js
+
+Streams full-screen agent-style frames into 8 headless terminal models at
+60 fps and reports how busy that keeps the calling thread: event-loop busy
+percent and heartbeat lateness (event-loop delay). `inline` parses on the
+calling thread, `worker` uses the terminal emulator thread, and `none` drops
+the output to show the harness's own floor.
+
+```bash
+pnpm build:main
+ELECTRON_RUN_AS_NODE=1 node_modules/.bin/electron scripts/benchmark-terminal-emulation.js
+```
+
+`PANES` and `SECONDS` override the defaults (8 and 10).
+
 ## ci-background.sh
 
 Lets a GitHub Actions job run a command in the background while later steps
