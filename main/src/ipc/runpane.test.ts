@@ -1761,7 +1761,8 @@ describe('runpane IPC handlers', () => {
       if (enters === 0) return terminalSnapshot(`${rule}\n❯ Read and follow brief.md\n${rule}\n`, 'idle', 'claude');
       return terminalSnapshot(`❯ Read and follow brief.md\n✻ Working\n${rule}\n❯\n${rule}\n`, 'active', 'claude');
     });
-    vi.mocked(terminalPanelManager.getLastOutputAt).mockImplementation(() => new Date().toISOString());
+    // Claude can be silent for seconds before its first frame.
+    vi.mocked(terminalPanelManager.getLastOutputAt).mockReturnValue(new Date(Date.now() - 60_000).toISOString());
     vi.mocked(terminalPanelManager.getOutputGeneration).mockImplementation(() => echoPolls);
     const registry = createRegistry();
 
@@ -1780,9 +1781,11 @@ describe('runpane IPC handlers', () => {
   });
 
   it('sends a plain submit when a quiet Claude screen shows no composer', async () => {
-    vi.mocked(terminalPanelManager.getTerminalSnapshot).mockReturnValue(
-      terminalSnapshot('Do you want to proceed?\n ❯ 1. Yes\n   2. No\n', 'idle', 'claude'),
-    );
+    vi.mocked(terminalPanelManager.getTerminalSnapshot).mockReturnValue({
+      ...terminalSnapshot('Do you want to proceed?\n ❯ 1. Yes\n   2. No\n', 'idle', 'claude'),
+      isAlternateScreen: true,
+      alternateScreenBuffer: 'Do you want to proceed?\n ❯ 1. Yes\n   2. No\n',
+    });
     vi.mocked(terminalPanelManager.getLastOutputAt).mockReturnValue(new Date(Date.now() - 60_000).toISOString());
     const registry = createRegistry();
 
