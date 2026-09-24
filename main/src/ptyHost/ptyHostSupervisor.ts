@@ -234,7 +234,7 @@ export class PtyHostSupervisor extends EventEmitter {
   private hostReadyResolve: (() => void) | null = null;
   private hostReadyReject: ((err: Error) => void) | null = null;
 
-  constructor() {
+  constructor(private readonly useConptyDll = false) {
     super();
     // Seed the first ready promise; `start()` replaces these on restart.
     this.readyPromise = new Promise<void>((resolve, reject) => {
@@ -526,7 +526,7 @@ export class PtyHostSupervisor extends EventEmitter {
     if (!this.rpcPort) {
       throw new Error('PTY_HOST_NOT_READY');
     }
-    const req: Omit<PtyHostRequest, 'id'> = { method: 'spawn', args: opts };
+    const req: Omit<PtyHostRequest, 'id'> = { method: 'spawn', args: { ...opts, useConptyDll: this.useConptyDll } };
     const result = await this.dispatcher.send(this.rpcPort, req);
     const spawned = decodeBoundary(result, boundary.object({ ptyId: boundary.string, pid: boundary.number }));
     const handle = new PtyHandle(spawned.ptyId, spawned.pid, this);

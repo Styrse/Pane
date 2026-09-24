@@ -72,6 +72,21 @@ export function AdvancedSettings({ persistence, platform, onDirtyChange }: Advan
             onSave={(value) => persistence.saveConfig('pty-host', { usePtyHost: value })}
           />
         </SettingRow>
+        {platform === 'win32' && (
+          <SettingRow
+            settingId="bundled-conpty"
+            label="Use bundled ConPTY"
+            description="Run terminals on the console host that ships with Pane instead of the one built into Windows. Keystrokes echo faster, but heavy output reaches Pane unthrottled, which costs more CPU. Requires the isolated PTY host. Restart Pane after changing it."
+            saveState={persistence.saveStates['bundled-conpty']}
+          >
+            <ImmediateToggle
+              label="Use bundled ConPTY"
+              value={config.useBundledConpty === true}
+              disabled={config.usePtyHost !== true}
+              onSave={(value) => persistence.saveConfig('bundled-conpty', { useBundledConpty: value })}
+            />
+          </SettingRow>
+        )}
       </SettingsSection>
 
       <SettingsSection title="Environment">

@@ -26,6 +26,9 @@
     "overrides": {
       "prebuild-install>node-abi": "^4.33.0",
       "d3-sankey>d3-array": "^3.2.0"
+    },
+    "patchedDependencies": {
+      "@xterm/addon-webgl@0.20.0-beta.298": "patches/@xterm__addon-webgl@0.20.0-beta.298.patch"
     }
   },
   "scripts": {

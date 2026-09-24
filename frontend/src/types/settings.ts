@@ -61,6 +61,7 @@ export type SettingsSettingId =
   | 'verbose-logging'
   | 'developer-mode'
   | 'pty-host'
+  | 'bundled-conpty'
   | 'additional-paths';
 
 export interface SettingsTarget {
