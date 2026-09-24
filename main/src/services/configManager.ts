@@ -434,11 +434,6 @@ export class ConfigManager extends EventEmitter {
     return this.config.usePtyHost === true;
   }
 
-  /** Windows: spawn PTY-host terminals on node-pty's bundled ConPTY instead of the inbox one. */
-  getUseBundledConpty(): boolean {
-    return this.config.useBundledConpty === true;
-  }
-
   getDatabasePath(): string {
     return path.join(this.configDir, 'sessions.db');
   }
