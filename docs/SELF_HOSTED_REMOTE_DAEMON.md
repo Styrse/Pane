@@ -106,6 +106,47 @@ pnpm remote:setup -- --no-install-service
 pnpm remote:setup -- --no-tailscale-serve
 ```
 
+## Run Pane on a Cloud VM
+
+Pane does not create or manage cloud machines. Create the VM yourself, then set
+it up as a Remote Pane host:
+
+1. Create an Ubuntu 24.04 VM with any provider. Size it for the agents and
+   builds you plan to run. It only needs inbound SSH. The daemon listens on
+   loopback, and you reach it through Tailscale or an SSH tunnel.
+2. SSH in as a regular user with `sudo`, not as `root`.
+3. Install what your agents need on the VM: `git`, Node.js 20 or newer (for
+   `npx`), and the agent CLIs you use, such as Claude Code or Codex. Sign in
+   to each CLI on the VM. Agents run there, not on your laptop.
+4. Install Tailscale and join your tailnet:
+
+   ```bash
+   curl -fsSL https://tailscale.com/install.sh | sh
+   sudo tailscale up
+   ```
+
+5. Install Pane and create a connection code. `--format deb` installs the
+   Debian package, so the host does not need FUSE:
+
+   ```bash
+   npx --yes runpane@latest install daemon --label "Cloud VM" --format deb
+   ```
+
+6. Keep the daemon running after you log out. The daemon runs as a systemd
+   user service, which stops when your SSH session ends unless lingering is on:
+
+   ```bash
+   sudo loginctl enable-linger "$USER"
+   systemctl --user status pane-remote-daemon.service
+   ```
+
+7. Paste the printed `pane-remote://...` code into desktop Pane (see
+   [Import Locally](#import-locally)) or into `https://runpane.com/app/`.
+
+To start, stop, or delete the VM, use your provider's console or CLI. If
+something fails, run `npx --yes runpane@latest doctor --json` on the VM and
+check [Troubleshooting](#troubleshooting).
+
 ## Import Locally
 
 On your local desktop machine:

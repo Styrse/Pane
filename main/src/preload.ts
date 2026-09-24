@@ -32,7 +32,6 @@ import type {
   OrchestrationSessionUpdateInput,
 } from '../../shared/types/orchestrationSession';
 import type { AgentUsageSnapshot } from '../../shared/types/agentUsage';
-import type { CloudVmState } from '../../shared/types/cloud';
 import type { ResourceSnapshot } from '../../shared/types/resourceMonitor';
 import type { SubmitFeedbackRequest } from '../../shared/types/feedback';
 import type {
@@ -1062,24 +1061,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     enable: (sessionId: string): Promise<IPCResponse> => invokeIpc('spotlight:enable', sessionId),
     disable: (sessionId: string): Promise<IPCResponse> => invokeIpc('spotlight:disable', sessionId),
     getStatus: (projectId: number): Promise<IPCResponse> => invokeIpc('spotlight:get-status', projectId),
-  },
-
-  // Cloud VM management
-  cloud: {
-    getState: (): Promise<IPCResponse> => invokeIpc('cloud:get-state'),
-    startVm: (): Promise<IPCResponse> => invokeIpc('cloud:start-vm'),
-    stopVm: (): Promise<IPCResponse> => invokeIpc('cloud:stop-vm'),
-    startTunnel: (): Promise<IPCResponse> => invokeIpc('cloud:start-tunnel'),
-    stopTunnel: (): Promise<IPCResponse> => invokeIpc('cloud:stop-tunnel'),
-    connectWorkspace: (): Promise<IPCResponse> => invokeIpc('cloud:connect-workspace'),
-    disconnectWorkspace: (): Promise<IPCResponse> => invokeIpc('cloud:disconnect-workspace'),
-    startPolling: (): Promise<IPCResponse> => invokeIpc('cloud:start-polling'),
-    stopPolling: (): Promise<IPCResponse> => invokeIpc('cloud:stop-polling'),
-    onStateChanged: (callback: (state: CloudVmState) => void): (() => void) => {
-      const wrappedCallback = (_event: Electron.IpcRendererEvent, state: CloudVmState) => callback(state);
-      ipcRenderer.on('cloud:state-changed', wrappedCallback);
-      return () => ipcRenderer.removeListener('cloud:state-changed', wrappedCallback);
-    },
   },
 
   // Resource monitor
