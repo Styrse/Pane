@@ -97,7 +97,6 @@ import { resourceMonitorService } from './services/resourceMonitorService';
 import { applyAppDirectoryOverrideFromArgs, migrateDataDirectory } from './utils/appDirectory';
 import { getCurrentWorktreeName } from './utils/worktreeUtils';
 import { setupAutoUpdater } from './autoUpdater';
-import { getCloudVmManager } from './ipc/cloud';
 import type { CliManagerFactory } from './services/cliManagerFactory';
 import { setupConsoleWrapper } from './utils/consoleWrapper';
 import * as fs from 'fs';
@@ -228,7 +227,7 @@ let paneDaemonHost: PaneDaemonHost | null = null;
 let powerSaveManager: PowerSaveManager | null = null;
 
 // ptyHost supervisor — forked as an Electron UtilityProcess on app ready,
-// but only when the `usePtyHost` setting is enabled (default: off). When
+// but only when the `usePtyHost` setting is enabled (default: on for Windows). When
 // disabled, the supervisor is never forked and every manager transparently
 // falls through to the legacy in-main `pty.spawn` path.
 let ptyHostSupervisor: PtyHostSupervisor | null = null;
@@ -421,6 +420,17 @@ async function createWindow() {
   // Increase max listeners to prevent warning when many panels are active
   // Each panel can register multiple event listeners
   mainWindow.webContents.setMaxListeners(100);
+
+  // Hand the renderer its per-window ptyHost data port on every load. This must
+  // be registered before loadURL/loadFile below: those promises resolve on
+  // did-finish-load, so a listener added after them never fires and terminals
+  // silently drop all output once they switch to the port. `on` (not `once`)
+  // re-attaches after renderer reloads, which replace the preload's port.
+  mainWindow.webContents.on('did-finish-load', () => {
+    if (ptyHostSupervisor && mainWindow && !mainWindow.isDestroyed()) {
+      ptyHostSupervisor.attachWindow(mainWindow.webContents);
+    }
+  });
 
   // Security hook: strip preload and enforce sandbox on any webview tags
   mainWindow.webContents.on('will-attach-webview', (_event, webPreferences, _params) => {
@@ -992,15 +1002,6 @@ async function createWindow() {
     const focused = mainWindow?.isFocused() ?? false;
     mainWindow?.webContents.send('window:focus-changed', focused);
   });
-
-  // Hand the renderer its per-window ptyHost data port once the preload
-  // listener is guaranteed to be installed. Chunk C: the port is a
-  // passthrough; Chunk D switches `TerminalPanel.tsx` to subscribe on it.
-  mainWindow.webContents.once('did-finish-load', () => {
-    if (ptyHostSupervisor && mainWindow) {
-      ptyHostSupervisor.attachWindow(mainWindow.webContents);
-    }
-  });
 }
 
 async function initializeServices() {
@@ -1165,7 +1166,7 @@ if (launchRemoteSetup) {
 
   // Start the ptyHost supervisor before the window opens so the renderer's
   // preload listener for 'ptyHost-port' has a port to receive when the window
-  // finishes loading. Gated on the `usePtyHost` setting: when off (default),
+  // finishes loading. Gated on the `usePtyHost` setting: when off,
   // the supervisor is never forked and every spawn site falls through to the
   // legacy in-main `pty.spawn` path with zero ptyHost code executing.
   if (configManager.getUsePtyHost()) {
@@ -1498,15 +1499,6 @@ if (launchRemoteSetup) {
 
     // Phase 4: Host/runtime cleanup
     console.log('[Main] Shutting down daemon host services...');
-
-    // Kill IAP tunnel if running
-    const cloudManager = getCloudVmManager();
-    if (cloudManager) {
-      console.log('[Main] Stopping cloud IAP tunnel...');
-      cloudManager.stopTunnel();
-      cloudManager.stopPolling();
-      console.log('[Main] Cloud tunnel stopped');
-    }
 
     if (paneDaemonHost) {
       await paneDaemonHost.shutdown();

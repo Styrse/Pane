@@ -104,17 +104,22 @@ export interface UsageByProject extends UsageTotals {
   label: string;
 }
 
+export const MAX_USAGE_DAY_BUCKETS = 10_000;
+
 export interface UsageReportRequest {
   /** Inclusive epoch-ms range. Defaults to the last 30 days. */
   fromMs?: number;
   toMs?: number;
   bucket?: 'hour' | 'day';
+  /** Viewer-local midnight boundaries, including the exclusive end, for custom calendar charts. */
+  dayBoundariesMs?: number[];
   providers?: UsageProvider[];
 }
 
 /** Health of the background transcript index, surfaced in the page header. */
 export interface UsageIndexStatus {
   lastScanStartedMs: number | null;
+  /** Last successful full scan; failed or canceled passes do not advance it. */
   lastScanFinishedMs: number | null;
   filesTracked: number;
   eventsIndexed: number;

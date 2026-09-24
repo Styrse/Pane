@@ -13,6 +13,7 @@ import {
 } from './daemonClient';
 import { resolveExistingPanePath } from './installers';
 import { detectPlatform, type PanePlatform } from './platform';
+import { RUNPANE_CONTRACT } from './generated/contract';
 import { resolveRelease } from './releases';
 import { getPaneVersion, getWrapperVersion } from './version';
 import type { BoundarySchema } from './boundaryDecoder';
@@ -21,6 +22,12 @@ const DOCTOR_DAEMON_TIMEOUT_MS = 5_000;
 const DOCTOR_RELEASE_TIMEOUT_MS = 5_000;
 const REMOTE_LAUNCHER_MARKER = 'pane-remote-daemon-launcher-v2';
 const REMOTE_DAEMON_UNIT = 'pane-remote-daemon.service';
+const PANE_REPO = 'greenfield-inc/Pane';
+const LEGACY_PANE_REPOS = ['dcouple/Pane', 'Dcouple-Inc/Pane'] as const;
+const ISSUE_URL_PATTERN = new RegExp(
+  `^https://github\\.com/(?:${[PANE_REPO, ...LEGACY_PANE_REPOS].join('|')})/issues/\\d+$`,
+  'i',
+);
 
 type ProcessImageStatus = 'current' | 'replaced' | 'deleted' | 'unknown';
 type RestartStatus = 'ready' | 'broken' | 'unknown';
@@ -179,8 +186,14 @@ interface DoctorReport {
   daemon: DoctorDaemonCheck;
   remoteDaemonService: RemoteDaemonServiceDoctorCheck;
   remoteSetup: RemoteSetupDoctorCheck;
+  watchDefaults: DoctorWatchDefaults;
   nextCommands: string[];
 }
+
+type DoctorWatchDefaults = Omit<
+  typeof RUNPANE_CONTRACT.defaults.watch,
+  'format' | 'agentsOnly' | 'includeHeldInputPresence'
+> & { kinds: 'all' };
 
 interface RemoteDaemonServiceDoctorCheck {
   paneDir: string;
@@ -310,7 +323,7 @@ export function prepareDoctorFailureReport(parsed: ParsedArgs, doctor: DoctorRep
   fs.chmodSync(reportPath, 0o600);
   const sha256 = createHash('sha256').update(redacted.text).digest('hex');
   const proposedCommand = [
-    'gh issue create --repo dcouple/Pane',
+    `gh issue create --repo ${PANE_REPO}`,
     `--title ${shellQuote(title)}`,
     `--body-file ${shellQuote(reportPath)}`,
     '--label bug',
@@ -376,7 +389,7 @@ function readReportEvidence(bodyFile: string): string {
 
 export function fileDoctorFailureReport(prepared: PreparedDoctorReport): void {
   const { title } = prepared;
-  const fallbackUrl = `https://github.com/dcouple/Pane/issues/new?title=${encodeURIComponent(title)}`;
+  const fallbackUrl = `https://github.com/${PANE_REPO}/issues/new?title=${encodeURIComponent(title)}`;
   prepared.fallbackUrl = fallbackUrl;
   const auth = childProcess.spawnSync('gh', ['auth', 'status'], { encoding: 'utf8', timeout: 10_000 });
   if (auth.error || auth.status !== 0) {
@@ -384,12 +397,12 @@ export function fileDoctorFailureReport(prepared: PreparedDoctorReport): void {
     prepared.error = auth.error?.message || auth.stderr?.trim() || 'gh auth status failed';
     return;
   }
-  const baseArgs = ['issue', 'create', '--repo', 'dcouple/Pane', '--title', title, '--body-file', prepared.path];
+  const baseArgs = ['issue', 'create', '--repo', PANE_REPO, '--title', title, '--body-file', prepared.path];
   let created = childProcess.spawnSync('gh', [...baseArgs, '--label', 'bug'], { encoding: 'utf8', timeout: 30_000 });
   if (created.status !== 0 && !created.error && /label|could not add/iu.test(created.stderr ?? '')) {
     created = childProcess.spawnSync('gh', baseArgs, { encoding: 'utf8', timeout: 30_000 });
   }
-  const issueUrl = created.stdout?.trim().split(/\s+/u).find(value => /^https:\/\/github\.com\/dcouple\/Pane\/issues\/\d+$/u.test(value));
+  const issueUrl = created.stdout?.trim().split(/\s+/u).find(value => ISSUE_URL_PATTERN.test(value));
   if (created.error || created.status !== 0 || !issueUrl) {
     prepared.ok = false;
     prepared.error = created.error?.message || created.stderr?.trim() || 'gh issue create did not return an issue URL';
@@ -451,6 +464,7 @@ async function buildDoctorReport(parsed: ParsedArgs, source: 'npm' | 'pip'): Pro
     daemon,
     remoteDaemonService,
     remoteSetup,
+    watchDefaults: watchDefaults(),
     nextCommands: [
       'runpane agent-context --json',
       'runpane agent-context --command "<command>" --json',
@@ -909,6 +923,17 @@ function resolveDaemonRecoveryCommand(endpoint: PaneDaemonEndpoint, message: str
   return 'Open Pane, then rerun runpane doctor --json';
 }
 
+export function watchDefaults(): DoctorWatchDefaults {
+  const { heartbeatSeconds, idleAfterMs, settleMs, blockedSettleMs, minIntervalMs, idleBackoff } = RUNPANE_CONTRACT.defaults.watch;
+  return { heartbeatSeconds, idleAfterMs, settleMs, blockedSettleMs, minIntervalMs, idleBackoff, kinds: 'all' };
+}
+
+export function formatWatchDefaults(defaults: DoctorWatchDefaults): string {
+  return `Watch defaults (--follow): heartbeat ${defaults.heartbeatSeconds}s, idle-after ${defaults.idleAfterMs}ms, `
+    + `settle ${defaults.settleMs}ms, blocked-settle ${defaults.blockedSettleMs}ms, min-interval ${defaults.minIntervalMs}ms, `
+    + `idle-backoff ${defaults.idleBackoff ? 'on' : 'off'}, kinds ${defaults.kinds}`;
+}
+
 function renderDoctorText(report: DoctorReport): void {
   if (report.platform) {
     console.log(`Platform: ${report.platform.os}/${report.platform.arch}`);
@@ -953,6 +978,7 @@ function renderDoctorText(report: DoctorReport): void {
     }
   }
 
+  console.log(formatWatchDefaults(report.watchDefaults));
   console.log('Agent discovery: run "runpane doctor --json" before Pane actions, then "runpane agent-context --json" for full CLI context.');
   console.log('Remote setup: run "runpane setup" for guided setup, or "runpane install daemon --label <name>" for scripting.');
 }

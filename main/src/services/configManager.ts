@@ -1,6 +1,5 @@
 import { EventEmitter } from 'events';
 import type { AnalyticsIdentity, AppConfig } from '../types/config';
-import { normalizeCloudVmConfig } from '../../../shared/types/cloud';
 import { DEFAULT_PANE_CHAT_AGENT, normalizePaneChatAgent } from '../../../shared/types/paneChat';
 import { createDefaultRemoteDaemonConfig, normalizeRemoteDaemonConfig } from '../../../shared/types/remoteDaemon';
 import type { WorktreeFileSyncEntry } from '../../../shared/types/worktreeFileSync';
@@ -8,8 +7,8 @@ import { DEFAULT_WORKTREE_FILE_SYNC_ENTRIES } from '../../../shared/types/worktr
 import fs from 'fs/promises';
 import { watch, type FSWatcher } from 'fs';
 import path from 'path';
-import os from 'os';
 import { randomUUID } from 'crypto';
+import { HOME_GIT_SCAN_WARNING, isHomeDirectory } from '../utils/gitScanSafety';
 import { getAppDirectory } from '../utils/appDirectory';
 import { clearShellPathCache } from '../utils/shellPath';
 import { boundary, decodeBoundary } from '../../../shared/validation/boundaryDecoder';
@@ -47,7 +46,8 @@ export class ConfigManager extends EventEmitter {
     this.configDir = getAppDirectory();
     this.configPath = path.join(this.configDir, 'config.json');
     this.config = {
-      gitRepoPath: defaultGitPath || os.homedir(),
+      gitRepoPath: defaultGitPath || '',
+      usePtyHost: process.platform === 'win32',
       verbose: false,
       anthropicApiKey: undefined,
       falApiKey: undefined,
@@ -194,9 +194,6 @@ export class ConfigManager extends EventEmitter {
         defaultOrchestratorAgent: normalizePaneChatAgent(
           loadedConfig.defaultOrchestratorAgent ?? this.config.defaultOrchestratorAgent,
         ),
-        cloud: loadedConfig.cloud !== undefined
-          ? normalizeCloudVmConfig(loadedConfig.cloud)
-          : this.config.cloud,
         remoteDaemon: normalizeRemoteDaemonConfig(loadedConfig.remoteDaemon),
         // Use !== undefined to distinguish "user cleared all entries" (empty array → preserve)
         // from "field absent in config file" (→ use defaults)
@@ -362,9 +359,6 @@ export class ConfigManager extends EventEmitter {
         defaultOrchestratorAgent: 'defaultOrchestratorAgent' in updates
           ? normalizePaneChatAgent(updates.defaultOrchestratorAgent)
           : this.config.defaultOrchestratorAgent,
-        cloud: 'cloud' in updates
-          ? (updates.cloud === undefined ? undefined : normalizeCloudVmConfig(updates.cloud))
-          : this.config.cloud,
         remoteDaemon: 'remoteDaemon' in updates
           ? normalizeRemoteDaemonConfig(updates.remoteDaemon)
           : this.config.remoteDaemon,
@@ -411,7 +405,12 @@ export class ConfigManager extends EventEmitter {
   }
 
   getGitRepoPath(): string {
-    return this.config.gitRepoPath || '';
+    const repoPath = this.config.gitRepoPath || '';
+    if (isHomeDirectory(repoPath)) {
+      console.warn(`[ConfigManager] ${HOME_GIT_SCAN_WARNING}`);
+      return '';
+    }
+    return repoPath;
   }
 
   isVerbose(): boolean {
@@ -420,7 +419,7 @@ export class ConfigManager extends EventEmitter {
 
   /**
    * Whether PTY spawns should be routed through the isolated ptyHost
-   * `UtilityProcess`. Off by default. The `PANE_USE_PTY_HOST=1` env var is
+   * `UtilityProcess`. On by default on Windows. The `PANE_USE_PTY_HOST=1` env var is
    * honored as a dev override so testing doesn't require flipping the config.
    */
   getUsePtyHost(): boolean {

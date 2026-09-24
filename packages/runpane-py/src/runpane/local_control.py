@@ -44,6 +44,134 @@ def run_repos_add(parsed: Any) -> int:
     return 0
 
 
+def run_sessions_list(parsed: Any) -> int:
+    result = invoke_daemon("runpane:sessions:list", [], pane_dir=parsed.pane_dir)
+    if parsed.json:
+        print_json(result)
+        return 0
+    sessions = result.get("sessions", [])
+    if not sessions:
+        print("No named Sessions.")
+        return 0
+    for session in sessions:
+        print(
+            f"{session.get('id')}\t{session.get('name')}\t{session.get('agent')}\t"
+            f"{len(session.get('associations') or [])} Pane(s)"
+        )
+    return 0
+
+
+def run_sessions_create(parsed: Any) -> int:
+    payload = read_session_payload(parsed, "create")
+    result = invoke_daemon("runpane:sessions:create", [payload], pane_dir=parsed.pane_dir)
+    return print_session_result(result, parsed.json, "Created")
+
+
+def run_sessions_get(parsed: Any) -> int:
+    result = invoke_daemon("runpane:sessions:get", [_session_selector(parsed)], pane_dir=parsed.pane_dir)
+    return print_session_result(result, parsed.json, "")
+
+
+def run_sessions_update(parsed: Any) -> int:
+    payload = read_session_payload(parsed, "update")
+    result = invoke_daemon(
+        "runpane:sessions:update",
+        [{"selector": _session_selector(parsed), "input": payload}],
+        pane_dir=parsed.pane_dir,
+    )
+    return print_session_result(result, parsed.json, "Updated")
+
+
+def run_sessions_set_agent(parsed: Any) -> int:
+    if not parsed.agent:
+        raise ValueError("runpane sessions set-agent requires --agent.")
+    result = invoke_daemon(
+        "runpane:sessions:set-agent",
+        [{"selector": _session_selector(parsed), "agent": parsed.agent}],
+        pane_dir=parsed.pane_dir,
+    )
+    return print_session_result(result, parsed.json, "Updated agent for")
+
+
+def run_sessions_associate(parsed: Any) -> int:
+    if not parsed.pane_id:
+        raise ValueError("runpane sessions associate requires --pane.")
+    association: Dict[str, Any] = {"paneId": parsed.pane_id}
+    if parsed.panel_id:
+        association["panelIds"] = [parsed.panel_id]
+    result = invoke_daemon(
+        "runpane:sessions:associate",
+        [{"selector": _session_selector(parsed), "association": association}],
+        pane_dir=parsed.pane_dir,
+    )
+    return print_session_result(result, parsed.json, "Associated")
+
+
+def run_sessions_detach(parsed: Any) -> int:
+    result = invoke_daemon(
+        "runpane:sessions:detach",
+        [{"selector": _session_selector(parsed), **optional_value("paneId", parsed.pane_id)}],
+        pane_dir=parsed.pane_dir,
+    )
+    return print_session_result(result, parsed.json, "Detached")
+
+
+def run_sessions_overview(parsed: Any) -> int:
+    result = invoke_daemon("runpane:sessions:overview", [_session_selector(parsed)], pane_dir=parsed.pane_dir)
+    if parsed.json:
+        print_json(result)
+        return 0
+    session = result.get("session") or {}
+    print(f"{session.get('name')}: {result.get('status')}")
+    for pane in result.get("panes", []):
+        if pane.get("missing"):
+            details = "missing"
+        elif pane.get("archived"):
+            details = "archived"
+        else:
+            details = ", ".join(
+                f"{panel.get('title')}={panel.get('state')}"
+                for panel in pane.get("panels", [])
+            ) or "no terminal panels"
+        print(f"  {pane.get('name')}: {details}")
+    return 0
+
+
+def _session_selector(parsed: Any) -> Dict[str, str]:
+    session_id = (parsed.session_id or "").strip()
+    if not session_id:
+        raise ValueError("Named Session id or name is required via --session.")
+    return {"sessionId": session_id}
+
+
+def read_session_payload(parsed: Any, command: str) -> Dict[str, Any]:
+    if not parsed.from_json:
+        raise ValueError(f"runpane sessions {command} requires --from-json <path|->.")
+    try:
+        value = json.loads(strip_utf8_bom(read_input_source(parsed.from_json)))
+    except json.JSONDecodeError as error:
+        raise ValueError(f"runpane sessions {command} received invalid JSON: {error}") from error
+    if not isinstance(value, dict):
+        raise ValueError(f"runpane sessions {command} JSON input must be an object.")
+    if command == "create" and not isinstance(value.get("name"), str):
+        raise ValueError("runpane sessions create JSON input requires a string name.")
+    return value
+
+
+def print_session_result(result: Dict[str, Any], as_json: bool, action: str) -> int:
+    if as_json:
+        print_json(result)
+        return 0 if result.get("ok", result.get("success", False)) else 1
+    session = result.get("session") or {}
+    if not result.get("ok", result.get("success", False)):
+        raise ValueError(result.get("error") or "Sessions operation failed")
+    prefix = f"{action} " if action else ""
+    print(f"{prefix}Session {session.get('name')} ({session.get('id')})")
+    if result.get("panelId"):
+        print(f"Panel: {result.get('panelId')}")
+    return 0
+
+
 def run_panes_list(parsed: Any) -> int:
     result = invoke_daemon("runpane:panes:list", [{
         "repo": parsed.repo,
@@ -88,6 +216,11 @@ def run_workspace_state(parsed: Any) -> int:
     return 0
 
 
+def has_cadence_value_flag(parsed: Any) -> bool:
+    """True when any cadence flag that needs a named daemon cursor was given."""
+    return any(value is not None for value in (parsed.settle_ms, parsed.blocked_settle_ms, parsed.min_interval_ms))
+
+
 def run_watch(parsed: Any) -> int:
     if parsed.watch_as and parsed.watch_since is not None:
         raise ValueError("runpane watch accepts either --as or --since, not both.")
@@ -107,7 +240,11 @@ def run_watch(parsed: Any) -> int:
         True if defaults["includeHeldInputPresence"]
         and not parsed.no_held_input and parsed.follow and output_format == "lines" else None
     )
-    watch_as = parsed.watch_as or (os.environ.get("PANE_PANEL_ID") if parsed.follow else None)
+    cadence_value_flag_present = has_cadence_value_flag(parsed)
+    # Cadence state lives in the daemon per named consumer, so an anonymous follower names itself.
+    watch_as = parsed.watch_as
+    if watch_as is None and parsed.follow:
+        watch_as = os.environ.get("PANE_PANEL_ID") or (f"follow-{os.getpid()}" if cadence_value_flag_present else None)
     request: Dict[str, Any] = {
         **optional_value("as", watch_as),
         **optional_value("since", parsed.watch_since),
@@ -124,6 +261,10 @@ def run_watch(parsed: Any) -> int:
         **optional_value("includeHeldInput", include_held_input),
         **optional_value("includeHeldInputPresence", include_held_input_presence),
         "idleAfterMs": idle_after_ms,
+        **optional_value("settleMs", parsed.settle_ms),
+        **optional_value("blockedSettleMs", parsed.blocked_settle_ms),
+        **optional_value("minIntervalMs", parsed.min_interval_ms),
+        **optional_value("idleBackoff", True if parsed.idle_backoff else None),
     }
 
     armed = False

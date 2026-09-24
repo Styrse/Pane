@@ -1,4 +1,3 @@
-import type { CloudVmConfig } from '../../../shared/types/cloud';
 import type { LeaderboardConfig } from '../../../shared/types/leaderboard';
 import type { RemoteDaemonConfig } from '../../../shared/types/remoteDaemon';
 import type { PaneChatAgent } from '../../../shared/types/paneChat';
@@ -116,7 +115,7 @@ export interface AppConfig {
   // Use interactive mode for Claude CLI (persistent process with stdin instead of spawn-per-message)
   useInteractiveMode?: boolean;
   // Route PTY spawns through an isolated ptyHost UtilityProcess for crash isolation.
-  // Off by default. Requires app restart; the supervisor is forked once at `app.whenReady`.
+  // On by default on Windows. Requires app restart; the supervisor is forked once at `app.whenReady`.
   usePtyHost?: boolean;
   // PostHog analytics settings
   analytics?: {
@@ -148,8 +147,6 @@ export interface AppConfig {
   preferredShell?: 'auto' | 'gitbash' | 'powershell' | 'pwsh' | 'cmd';
   // Terminal rendering/power behavior
   terminalPowerMode?: TerminalPowerMode;
-  // Cloud VM settings
-  cloud?: CloudVmConfig;
   // Self-hosted remote daemon settings and saved client profiles
   remoteDaemon?: RemoteDaemonConfig;
   terminalFontFamily?: string;
@@ -209,7 +206,7 @@ export interface UpdateConfigRequest {
   // Use interactive mode for Claude CLI (persistent process with stdin instead of spawn-per-message)
   useInteractiveMode?: boolean;
   // Route PTY spawns through an isolated ptyHost UtilityProcess for crash isolation.
-  // Off by default. Requires app restart to take effect.
+  // On by default on Windows. Requires app restart to take effect.
   usePtyHost?: boolean;
   // PostHog analytics settings
   analytics?: AppConfig['analytics'];
@@ -229,8 +226,6 @@ export interface UpdateConfigRequest {
   preferredShell?: 'auto' | 'gitbash' | 'powershell' | 'pwsh' | 'cmd';
   // Terminal rendering/power behavior
   terminalPowerMode?: TerminalPowerMode;
-  // Cloud VM settings
-  cloud?: CloudVmConfig;
   // Self-hosted remote daemon settings and saved client profiles
   remoteDaemon?: RemoteDaemonConfig;
   terminalFontFamily?: string;

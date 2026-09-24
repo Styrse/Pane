@@ -13,6 +13,7 @@ import type { RunpaneToolSpec } from '../../../shared/types/runpaneOrchestration
 import { RUNPANE_CONTRACT } from '../../../shared/types/generatedRunpaneContract';
 import { panelManager } from '../services/panelManager';
 import { terminalPanelManager } from '../services/terminalPanelManager';
+import { databaseService as panelDatabase } from '../services/database';
 import { ArchiveProgressManager } from '../services/archiveProgressManager';
 import { WorkspaceJournal } from '../services/workspaceJournal';
 import { WorkspaceCursorStore } from '../services/workspaceCursorStore';
@@ -35,8 +36,10 @@ vi.spyOn(terminalPanelManager, 'getTerminalScrollback');
 vi.spyOn(terminalPanelManager, 'writeToTerminal');
 vi.spyOn(terminalPanelManager, 'getLastOutputAt');
 vi.spyOn(terminalPanelManager, 'getOutputGeneration');
+vi.spyOn(terminalPanelManager, 'getInputScreenText');
 vi.spyOn(terminalPanelManager, 'deliverPendingInitialInput');
 vi.spyOn(terminalPanelManager, 'getAgentStatus');
+vi.spyOn(panelDatabase, 'getPanelBuffers');
 vi.spyOn(usageManager, 'getPaneCosts');
 
 const project: Project = {
@@ -293,9 +296,11 @@ describe('runpane IPC handlers', () => {
     vi.mocked(terminalPanelManager.isTerminalInitialized).mockReset();
     vi.mocked(terminalPanelManager.getTerminalSnapshot).mockReset();
     vi.mocked(terminalPanelManager.getTerminalScrollback).mockReset();
+    vi.mocked(panelDatabase.getPanelBuffers).mockReset().mockReturnValue(null);
     vi.mocked(terminalPanelManager.writeToTerminal).mockReset();
     vi.mocked(terminalPanelManager.getLastOutputAt).mockReset();
     vi.mocked(terminalPanelManager.getOutputGeneration).mockReset();
+    vi.mocked(terminalPanelManager.getInputScreenText).mockReset();
     vi.mocked(terminalPanelManager.deliverPendingInitialInput).mockReset();
     vi.mocked(terminalPanelManager.getAgentStatus).mockReset();
     vi.mocked(terminalPanelManager.getOutputGeneration).mockReturnValue(0);
@@ -694,6 +699,141 @@ describe('runpane IPC handlers', () => {
     }]);
     expect(truncated).toMatchObject({ reset: { reason: 'cursor-truncated' }, dropped: 1 });
     expect(truncated.entries).toContainEqual(expect.objectContaining({ kind: 'agent.idle', idleCount: 1 }));
+  });
+
+  describe('workspace wait cadence', () => {
+    const readyEntry = {
+      kind: 'agent.ready' as const,
+      paneId: session.id,
+      paneName: session.name,
+      panelId: terminalPanel.id,
+      agentType: 'codex',
+      source: 'agent' as const,
+      from: 'working' as const,
+      to: 'idle' as const,
+    };
+    const busyEntry = { ...readyEntry, kind: 'agent.busy' as const, from: 'idle' as const, to: 'working' as const };
+    const cadenceRequest = { as: 'cadence', timeoutMs: 0, idleAfterMs: 0, kinds: ['agent.ready'], settleMs: 60_000 };
+
+    function cadenceRegistry(options: { capacity?: number } = {}) {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-01-01T12:00:00.000Z'));
+      const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pane-runpane-cadence-test-'));
+      tempDirs.push(directory);
+      const workspaceJournal = new WorkspaceJournal(options);
+      const workspaceCursorStore = new WorkspaceCursorStore(path.join(directory, 'workspace-cursors.json'));
+      const registry = createRegistry(createServices({ workspaceJournal, workspaceCursorStore }));
+      return { workspaceJournal, workspaceCursorStore, registry };
+    }
+
+    it('keeps a pending READY across a timed-out request and delivers it once settled', async () => {
+      const { workspaceJournal, registry } = cadenceRegistry();
+      await registry.invoke('runpane:workspace:wait', [cadenceRequest]);
+      workspaceJournal.append(readyEntry);
+
+      const held = await registry.invoke('runpane:workspace:wait', [cadenceRequest]);
+      expect(held).toMatchObject({ entries: [], timedOut: true });
+
+      vi.setSystemTime(new Date('2026-01-01T12:01:01.000Z'));
+      const settled = await registry.invoke('runpane:workspace:wait', [cadenceRequest]);
+      expect(settled.entries).toEqual([expect.objectContaining({ kind: 'agent.ready', gen: 1, settledMs: 61_000 })]);
+      expect(await registry.invoke('runpane:workspace:wait', [cadenceRequest])).toMatchObject({ entries: [] });
+    });
+
+    it('resumes a reused instance from its read cursor so held entries are delivered exactly once', async () => {
+      const { workspaceJournal, workspaceCursorStore, registry } = cadenceRegistry();
+      await registry.invoke('runpane:workspace:wait', [cadenceRequest]);
+      workspaceJournal.append(readyEntry);
+      vi.setSystemTime(new Date('2026-01-01T12:00:30.000Z'));
+      workspaceJournal.append({ ...readyEntry, panelId: 'panel-other' });
+      expect((await registry.invoke('runpane:workspace:wait', [cadenceRequest])).entries).toEqual([]);
+      const cursor = workspaceCursorStore.get('cadence');
+      expect(cursor?.pendingGen ?? cursor?.gen).toBe(0);
+
+      vi.setSystemTime(new Date('2026-01-01T12:01:01.000Z'));
+      const first = await registry.invoke('runpane:workspace:wait', [cadenceRequest]);
+      expect(first.entries.map((entry: { gen: number }) => entry.gen)).toEqual([1]);
+      expect(first.generation).toBe(2);
+      vi.setSystemTime(new Date('2026-01-01T12:01:31.000Z'));
+      const second = await registry.invoke('runpane:workspace:wait', [cadenceRequest]);
+      expect(second.entries.map((entry: { gen: number }) => entry.gen)).toEqual([2]);
+      expect((await registry.invoke('runpane:workspace:wait', [cadenceRequest])).entries).toEqual([]);
+    });
+
+    it('drains every page before flushing so a later BUSY still cancels an older READY', async () => {
+      const { workspaceJournal, registry } = cadenceRegistry();
+      await registry.invoke('runpane:workspace:wait', [cadenceRequest]);
+      workspaceJournal.append(readyEntry);
+      vi.setSystemTime(new Date('2026-01-01T12:00:01.000Z'));
+      workspaceJournal.append(busyEntry);
+
+      vi.setSystemTime(new Date('2026-01-01T12:02:00.000Z'));
+      const result = await registry.invoke('runpane:workspace:wait', [{ ...cadenceRequest, limit: 1 }]);
+      expect(result).toMatchObject({ entries: [], generation: 2 });
+      vi.setSystemTime(new Date('2026-01-01T12:05:00.000Z'));
+      expect(await registry.invoke('runpane:workspace:wait', [{ ...cadenceRequest, limit: 1 }])).toMatchObject({ entries: [] });
+    });
+
+    it('never moves the durable cursor past a held READY', async () => {
+      const { workspaceJournal, workspaceCursorStore, registry } = cadenceRegistry();
+      await registry.invoke('runpane:workspace:wait', [cadenceRequest]);
+      workspaceJournal.append({ ...readyEntry, panelId: 'panel-other', paneId: 'session-other', paneName: 'other' });
+      workspaceJournal.append(readyEntry);
+      workspaceJournal.append({ kind: 'pane.created', paneId: 'session-new', paneName: 'new', source: 'session' });
+
+      const held = await registry.invoke('runpane:workspace:wait', [cadenceRequest]);
+      expect(held.entries).toEqual([]);
+      const cursor = workspaceCursorStore.get('cadence');
+      expect(cursor?.pendingGen ?? cursor?.gen).toBe(0);
+
+      const raw = await registry.invoke('runpane:workspace:wait', [{ as: 'cadence', timeoutMs: 0, idleAfterMs: 0, kinds: ['agent.ready'] }]);
+      expect(raw.entries.map((entry: { gen: number }) => entry.gen)).toEqual([1, 2]);
+    });
+
+    it('discards held entries when the consumer changes its filter', async () => {
+      const { workspaceJournal, registry } = cadenceRegistry();
+      const scoped = { ...cadenceRequest, paneIds: [session.id] };
+      await registry.invoke('runpane:workspace:wait', [scoped]);
+      workspaceJournal.append(readyEntry);
+      expect((await registry.invoke('runpane:workspace:wait', [scoped])).entries).toEqual([]);
+
+      vi.setSystemTime(new Date('2026-01-01T12:02:00.000Z'));
+      const rescoped = await registry.invoke('runpane:workspace:wait', [{ ...cadenceRequest, paneIds: ['session-other'] }]);
+      expect(rescoped.entries).toEqual([]);
+      vi.setSystemTime(new Date('2026-01-01T12:04:00.000Z'));
+      expect((await registry.invoke('runpane:workspace:wait', [{ ...cadenceRequest, paneIds: ['session-other'] }])).entries).toEqual([]);
+    });
+
+    it('discards held entries when the consumer changes its idle schedule', async () => {
+      const { workspaceJournal, registry } = cadenceRegistry();
+      await registry.invoke('runpane:workspace:wait', [cadenceRequest]);
+      workspaceJournal.append(readyEntry);
+      expect((await registry.invoke('runpane:workspace:wait', [cadenceRequest])).entries).toEqual([]);
+
+      vi.setSystemTime(new Date('2026-01-01T12:02:00.000Z'));
+      const rescheduled = { ...cadenceRequest, idleBackoff: true };
+      // The rebuilt cadence re-reads the held READY from the capped cursor and settles it afresh.
+      const first = await registry.invoke('runpane:workspace:wait', [rescheduled]);
+      expect(first.entries.map((entry: { kind: string; gen: number }) => [entry.kind, entry.gen])).toEqual([['agent.ready', 1]]);
+    });
+
+    it('discards the cadence on a cursor-truncated reset', async () => {
+      const { workspaceJournal, registry } = cadenceRegistry({ capacity: 2 });
+      await registry.invoke('runpane:workspace:wait', [cadenceRequest]);
+      workspaceJournal.append(readyEntry);
+      expect((await registry.invoke('runpane:workspace:wait', [cadenceRequest])).entries).toEqual([]);
+
+      for (const paneId of ['one', 'two', 'three']) {
+        workspaceJournal.append({ kind: 'pane.created', paneId, paneName: paneId, source: 'session' });
+      }
+      const truncated = await registry.invoke('runpane:workspace:wait', [cadenceRequest]);
+      expect(truncated).toMatchObject({ reset: { reason: 'cursor-truncated' } });
+
+      vi.setSystemTime(new Date('2026-01-01T12:02:00.000Z'));
+      const after = await registry.invoke('runpane:workspace:wait', [cadenceRequest]);
+      expect(after.entries).toEqual([]);
+      expect(after.reset).toBeUndefined();
+    });
   });
 
   it('announces an evicted named workspace cursor as unknown', async () => {
@@ -1315,19 +1455,14 @@ describe('runpane IPC handlers', () => {
   });
 
   it('reads persisted terminal scrollback when the terminal is not live', async () => {
-    const panelWithPersistedScrollback: ToolPanel = {
-      ...terminalPanel,
-      state: {
-        ...terminalPanel.state,
-        customState: {
-          ...terminalPanel.state.customState,
-          scrollbackBuffer: 'persisted one\npersisted two\n',
-          serializedBuffer: undefined,
-        },
-      },
-    };
+    // Persisted bytes live in panel_buffers, never in the panel state.
     vi.mocked(panelManager.getPanel).mockImplementation((panelId: string) =>
-      panelId === terminalPanel.id ? panelWithPersistedScrollback : undefined
+      panelId === terminalPanel.id ? terminalPanel : undefined
+    );
+    vi.mocked(panelDatabase.getPanelBuffers).mockImplementation((panelId: string) =>
+      panelId === terminalPanel.id
+        ? { scrollback: 'persisted one\npersisted two\n', serialized: null, alternate: null }
+        : null
     );
     const services = createServices();
     const registry = createRegistry(services);
@@ -1532,6 +1667,170 @@ describe('runpane IPC handlers', () => {
     });
   });
 
+  it('stages text before submitting a Claude composer', async () => {
+    vi.useFakeTimers();
+    const rule = '─'.repeat(40);
+    vi.mocked(terminalPanelManager.getTerminalSnapshot)
+      .mockReturnValueOnce(terminalSnapshot(`${rule}\n❯ \n${rule}\n`, 'active', 'claude'))
+      .mockReturnValueOnce(terminalSnapshot(`${rule}\n❯ Read and follow brief.md\n${rule}\n`, 'idle', 'claude'))
+      .mockReturnValueOnce(terminalSnapshot(`${rule}\n❯ Read and follow brief.md\n${rule}\n`, 'idle', 'claude'))
+      .mockReturnValue(terminalSnapshot(`❯ Read and follow brief.md\n✻ Working\n${rule}\n❯ \n${rule}\n`, 'active', 'claude'));
+    vi.mocked(terminalPanelManager.getOutputGeneration).mockReturnValueOnce(0).mockReturnValue(1);
+    const registry = createRegistry();
+
+    const pendingResult = registry.invoke('runpane:panels:submit', [{
+      panelId: terminalPanel.id,
+      input: 'Read and follow brief.md\n',
+    }]);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    const result = await pendingResult;
+
+    expect(terminalPanelManager.writeToTerminal).toHaveBeenNthCalledWith(1, terminalPanel.id, 'Read and follow brief.md');
+    expect(terminalPanelManager.writeToTerminal).toHaveBeenNthCalledWith(2, terminalPanel.id, '\r');
+    expect(result).toMatchObject({
+      ok: true,
+      sequenceName: 'enter-cr',
+      verifiedSubmitted: true,
+    });
+  });
+
+  it('does not take a Claude redraw frame as proof that the prompt was submitted', async () => {
+    vi.useFakeTimers();
+    const rule = '─'.repeat(40);
+    let staged = false;
+    let enters = 0;
+    let redrawShown = false;
+    vi.mocked(terminalPanelManager.writeToTerminal).mockImplementation((_panelId, data) => {
+      if (data === '\r') enters += 1;
+      else staged = true;
+    });
+    vi.mocked(terminalPanelManager.getOutputGeneration).mockImplementation(() => (staged ? enters + 1 : 0));
+    vi.mocked(terminalPanelManager.getTerminalSnapshot).mockImplementation(() => {
+      if (!staged) return terminalSnapshot(`${rule}\n❯\n${rule}\n`, 'active', 'claude');
+      if (enters === 1 && !redrawShown) {
+        redrawShown = true;
+        return terminalSnapshot('Claude Code v2.1.281\n', 'active', 'claude');
+      }
+      return terminalSnapshot(`${rule}\n❯ Read and follow brief.md\n${rule}\n`, 'idle', 'claude');
+    });
+    const registry = createRegistry();
+
+    const pendingResult = registry.invoke('runpane:panels:submit', [{
+      panelId: terminalPanel.id,
+      input: 'Read and follow brief.md',
+    }]);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    const result = await pendingResult;
+
+    expect(redrawShown).toBe(true);
+    expect(result).toMatchObject({
+      ok: false,
+      verifiedSubmitted: false,
+      blocked: { kind: 'agent-prompt' },
+    });
+  });
+
+  it('waits for a starting Claude to draw its composer and echo the text before pressing Enter', async () => {
+    vi.useFakeTimers();
+    const rule = '─'.repeat(40);
+    let staged = false;
+    let enters = 0;
+    let startupPolls = 0;
+    let echoPolls = 0;
+    let echoPollsBeforeEnter = -1;
+    vi.mocked(terminalPanelManager.writeToTerminal).mockImplementation((_panelId, data) => {
+      if (data === '\r') {
+        enters += 1;
+        echoPollsBeforeEnter = echoPolls;
+      } else {
+        staged = true;
+      }
+    });
+    vi.mocked(terminalPanelManager.getTerminalSnapshot).mockImplementation(() => {
+      if (startupPolls < 5) {
+        startupPolls += 1;
+        return terminalSnapshot('Claude Code v2.1.281\n', 'active', 'claude');
+      }
+      if (!staged) return terminalSnapshot(`${rule}\n❯\n${rule}\n`, 'active', 'claude');
+      if (echoPolls < 3) {
+        echoPolls += 1;
+        return terminalSnapshot(`${rule}\n❯\n${rule}\n`, 'active', 'claude');
+      }
+      if (enters === 0) return terminalSnapshot(`${rule}\n❯ Read and follow brief.md\n${rule}\n`, 'idle', 'claude');
+      return terminalSnapshot(`❯ Read and follow brief.md\n✻ Working\n${rule}\n❯\n${rule}\n`, 'active', 'claude');
+    });
+    // Claude can be silent for seconds before its first frame.
+    vi.mocked(terminalPanelManager.getLastOutputAt).mockReturnValue(new Date(Date.now() - 60_000).toISOString());
+    vi.mocked(terminalPanelManager.getOutputGeneration).mockImplementation(() => echoPolls);
+    const registry = createRegistry();
+
+    const pendingResult = registry.invoke('runpane:panels:submit', [{
+      panelId: terminalPanel.id,
+      input: 'Read and follow brief.md',
+    }]);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    const result = await pendingResult;
+
+    expect(terminalPanelManager.writeToTerminal).toHaveBeenNthCalledWith(1, terminalPanel.id, 'Read and follow brief.md');
+    expect(startupPolls).toBe(5);
+    expect(echoPollsBeforeEnter).toBe(3);
+    expect(result).toMatchObject({ ok: true, verifiedSubmitted: true });
+  });
+
+  it('sends a plain submit when a quiet Claude screen shows no composer', async () => {
+    vi.mocked(terminalPanelManager.getTerminalSnapshot).mockReturnValue({
+      ...terminalSnapshot('Do you want to proceed?\n ❯ 1. Yes\n   2. No\n', 'idle', 'claude'),
+      isAlternateScreen: true,
+      alternateScreenBuffer: 'Do you want to proceed?\n ❯ 1. Yes\n   2. No\n',
+    });
+    vi.mocked(terminalPanelManager.getLastOutputAt).mockReturnValue(new Date(Date.now() - 60_000).toISOString());
+    const registry = createRegistry();
+
+    const result = await registry.invoke('runpane:panels:submit', [{
+      panelId: terminalPanel.id,
+      input: '1',
+    }]);
+
+    expect(terminalPanelManager.writeToTerminal).toHaveBeenCalledTimes(1);
+    expect(terminalPanelManager.writeToTerminal).toHaveBeenCalledWith(terminalPanel.id, '1\r');
+    expect(result).toMatchObject({ ok: true, verifiedSubmitted: false });
+  });
+
+  it('waits for the staged text itself, not an older draft, before pressing Enter on Claude', async () => {
+    vi.useFakeTimers();
+    const rule = '─'.repeat(40);
+    let staged = false;
+    let generation = 0;
+    let generationAtEnter = -1;
+    vi.mocked(terminalPanelManager.writeToTerminal).mockImplementation((_panelId, data) => {
+      if (data === '\r') generationAtEnter = generation;
+      else staged = true;
+    });
+    vi.mocked(terminalPanelManager.getOutputGeneration).mockImplementation(() => generation);
+    let pollsAfterStage = 0;
+    vi.mocked(terminalPanelManager.getTerminalSnapshot).mockImplementation(() => {
+      if (!staged) return terminalSnapshot(`${rule}\n❯ old draft\n${rule}\n`, 'idle', 'claude');
+      pollsAfterStage += 1;
+      if (pollsAfterStage === 4) generation = 1;
+      if (generationAtEnter >= 0) return terminalSnapshot(`✻ Working\n${rule}\n❯\n${rule}\n`, 'active', 'claude');
+      return terminalSnapshot(`${rule}\n❯ old draft${generation ? ' Continue' : ''}\n${rule}\n`, 'idle', 'claude');
+    });
+    const registry = createRegistry();
+
+    const pendingResult = registry.invoke('runpane:panels:submit', [{
+      panelId: terminalPanel.id,
+      input: ' Continue',
+    }]);
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    await pendingResult;
+
+    expect(generationAtEnter).toBe(1);
+  });
+
   it('does not report success when submitted text remains in an idle Codex composer', async () => {
     vi.useFakeTimers();
     vi.mocked(terminalPanelManager.getTerminalSnapshot)
@@ -1544,7 +1843,7 @@ describe('runpane IPC handlers', () => {
       input: 'Continue the existing task',
     }]);
 
-    await vi.advanceTimersByTimeAsync(4_000);
+    await vi.advanceTimersByTimeAsync(8_000);
     const result = await pendingResult;
 
     expect(result).toMatchObject({
@@ -1714,6 +2013,43 @@ describe('runpane IPC handlers', () => {
     });
   });
 
+  it.each([
+    ['held prompt', `⏺ Done\n${'─'.repeat(40)}\n❯ Read and follow brief.md\n${'─'.repeat(40)}\n  ⏵⏵ bypass permissions on\n`, true, true],
+    ['held paste', `${'─'.repeat(40)}\n❯ [Pasted text #1 +10 lines]\n${'─'.repeat(40)}\n`, true, true],
+    ['held second line', `${'─'.repeat(40)}\n❯ Read the brief\n  then report back\n${'─'.repeat(40)}\n`, true, true],
+    ['empty composer', `${'─'.repeat(40)}\n❯\n${'─'.repeat(40)}\n`, true, false],
+    ['menu choice', 'Quick safety check\n ❯ No, exit\n   Yes, I trust this folder\n', false, false],
+  ])('reports whether the Claude composer has undelivered text: %s', async (_name, text, isPresent, hasUndeliveredText) => {
+    vi.mocked(terminalPanelManager.getTerminalSnapshot).mockReturnValue(
+      terminalSnapshot(text, 'idle', 'claude'),
+    );
+    const registry = createRegistry();
+
+    const result = await registry.invoke('runpane:panels:screen', [{
+      panelId: terminalPanel.id,
+    }]);
+
+    expect(result).toMatchObject({ composer: { isPresent, hasUndeliveredText } });
+  });
+
+  it('does not count a dim Claude placeholder suggestion as undelivered text', async () => {
+    const rule = '─'.repeat(40);
+    vi.mocked(terminalPanelManager.getTerminalSnapshot).mockReturnValue(
+      terminalSnapshot(`${rule}\n❯ Try "fix lint errors"\n${rule}\n`, 'idle', 'claude'),
+    );
+    vi.mocked(terminalPanelManager.getInputScreenText).mockReturnValue(`${rule}\n❯\n${rule}`);
+    const registry = createRegistry();
+
+    const result = await registry.invoke('runpane:panels:screen', [{
+      panelId: terminalPanel.id,
+    }]);
+
+    expect(result).toMatchObject({
+      text: expect.stringContaining('Try "fix lint errors"'),
+      composer: { isPresent: true, hasUndeliveredText: false },
+    });
+  });
+
   it('waits for ready terminal state with bounded screen output', async () => {
     vi.mocked(terminalPanelManager.getTerminalSnapshot).mockReturnValue({
       initialized: true,
@@ -1759,10 +2095,10 @@ describe('runpane IPC handlers', () => {
           ...terminalPanel.state.customState,
           isInitialized: true,
           isCliReady: true,
-          scrollbackBuffer: 'persisted ready\n',
         },
       },
     });
+    vi.mocked(panelDatabase.getPanelBuffers).mockReturnValue({ scrollback: 'persisted ready\n', serialized: null, alternate: null });
     const registry = createRegistry();
 
     const ready = await registry.invoke('runpane:panels:wait', [{

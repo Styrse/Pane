@@ -27,8 +27,23 @@ import type { GitStatus } from "../types/session";
 import {
   boundary,
   decodeBoundary,
+  decodeOptionalBoundary,
   type JsonObject,
 } from "../../../shared/validation/boundaryDecoder";
+import { PanelBufferStore, splitPanelBufferState, type PanelBuffers } from "./panelBuffers";
+import { ensureUsageRollup } from "../services/usage/usageRollup";
+import {
+  migratePanelBuffers,
+  unwrapStringWrappedPanelState,
+  type PanelBufferMigrationResult,
+} from "./panelBufferMigration";
+
+/**
+ * Hard ceiling on one serialized `tool_panels.state` row. Terminal bytes live
+ * in `panel_buffers`, so a state over this size is a new unbounded field, and
+ * the write is refused at the boundary rather than found at the next parse.
+ */
+export const PANEL_STATE_CEILING_BYTES = 256 * 1024;
 
 const loadDatabaseDependency = createRequire(__filename);
 
@@ -77,6 +92,23 @@ interface SessionGitStatusCacheRow {
   session_id: string;
   status_json: string;
   last_checked_ms: number;
+}
+
+/** Decode panel JSON once, including the string-wrapped format used by legacy callers. */
+function parsePanelJson<T extends ToolPanelState | ToolPanelMetadata>(serialized: string | null, fallback: T): T {
+  if (!serialized) return fallback;
+  if (serialized.trimStart().startsWith('"')) {
+    try {
+      const json = decodeBoundary(JSON.parse(serialized), boundary.string);
+      // SAFETY: Legacy callers supplied the same typed panel JSON wrapped in a string.
+      return JSON.parse(json) as T;
+    } catch {
+      // Preserve the manager's recovery for malformed legacy serialized values.
+      return fallback;
+    }
+  }
+  // SAFETY: These columns are written by the typed panel state and metadata serializers.
+  return JSON.parse(serialized) as T;
 }
 
 const DEBUG_DB_PANEL_STATE = process.env.PANE_DEBUG_DB_PANEL_STATE === "1";
@@ -171,15 +203,54 @@ const toolAnalyticsMessageSchema = boundary.object({
   })),
 });
 
+/** A panel state write was refused because the serialized JSON would exceed the ceiling. */
+class PanelStateCeilingError extends Error {
+  constructor(
+    readonly panelId: string,
+    readonly bytes: number,
+    readonly largestKey: string,
+  ) {
+    super(
+      `Refused panel state write for ${panelId}: ${bytes} bytes exceeds the ` +
+      `${PANEL_STATE_CEILING_BYTES} byte ceiling; largest key ${largestKey}`,
+    );
+    this.name = "PanelStateCeilingError";
+  }
+}
+
+export interface PanelBufferMigrationOutcome {
+  result: PanelBufferMigrationResult | null;
+  error: Error | null;
+}
+
 export class DatabaseService {
   private db: Database.Database;
+  private readonly dbPath: string;
+  private readonly panelBuffers: PanelBufferStore;
+  private panelBufferMigration: PanelBufferMigrationOutcome = { result: null, error: null };
 
   constructor(dbPath: string) {
     // Ensure the directory exists before creating the database
     const dir = dirname(dbPath);
     mkdirSync(dir, { recursive: true });
 
+    this.dbPath = dbPath;
     this.db = new Database(dbPath);
+    // WAL lets reads run during a write and commits append to the -wal file
+    // instead of syncing the main file. NORMAL is WAL's recommended pairing:
+    // an app crash loses nothing, and a power loss can drop only the last
+    // commits without corrupting the file. The size limit shrinks the -wal
+    // file back after a big write such as a retention sweep. All are no-ops
+    // on :memory:.
+    this.db.pragma("journal_mode = WAL");
+    this.db.pragma("synchronous = NORMAL");
+    this.db.pragma(`journal_size_limit = ${64 * 1024 * 1024}`);
+    // Reads the main file through a memory map instead of copying pages in,
+    // which speeds up the usage reports and terminal buffer loads. Writes
+    // still go through the WAL. scripts/benchmark-db.js measures this and
+    // the pragmas left at their defaults.
+    this.db.pragma(`mmap_size = ${256 * 1024 * 1024}`);
+    this.panelBuffers = new PanelBufferStore(this.db);
   }
 
   /**
@@ -225,6 +296,25 @@ export class DatabaseService {
   initialize(): void {
     this.initializeSchema();
     this.runMigrations();
+    // Runs before any pane opens: services/database.ts initializes at module
+    // load. A failure here must not keep the app from starting, so it is
+    // captured and logged by the daemon bootstrap instead of thrown.
+    try {
+      this.panelBufferMigration = {
+        result: migratePanelBuffers(this.db, this.dbPath, this.panelBuffers),
+        error: null,
+      };
+    } catch (error) {
+      this.panelBufferMigration = {
+        result: null,
+        error: error instanceof Error ? error : new Error(String(error)),
+      };
+    }
+  }
+
+  /** Outcome of the startup terminal-buffer migration, for the bootstrap logger. */
+  getPanelBufferMigration(): PanelBufferMigrationOutcome {
+    return this.panelBufferMigration;
   }
 
   private initializeSchema(): void {
@@ -2443,6 +2533,8 @@ export class DatabaseService {
       console.log("[Database] Added credit and limit-state columns to usage_rate_limits table");
     }
 
+    ensureUsageRollup(this.db);
+
     // Keep this ownership migration after legacy table-rebuild migrations above,
     // since those intentionally reconstruct sessions from an older column set.
     // SAFETY: SQLite PRAGMA table_info returns the SqliteTableInfo projection.
@@ -3236,6 +3328,12 @@ export class DatabaseService {
     return result !== undefined;
   }
 
+  checkActiveSessionNameExists(name: string, projectId: number): boolean {
+    return this.db.prepare(
+      "SELECT id FROM sessions WHERE name = ? AND project_id = ? AND (archived = 0 OR archived IS NULL) LIMIT 1",
+    ).get(name, projectId) !== undefined;
+  }
+
   updateSession(id: string, data: UpdateSessionData): Session | undefined {
     console.log(`[Database] Updating session ${id} with data:`, data);
 
@@ -3482,6 +3580,14 @@ export class DatabaseService {
     `,
       )
       .run(sessionId, type, data);
+  }
+
+  getSessionOutputCount(sessionId: string): number {
+    // SAFETY: COUNT always returns one row with a numeric count, including zero for an empty session.
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS count FROM session_outputs WHERE session_id = ?")
+      .get(sessionId) as { count: number };
+    return row.count;
   }
 
   getSessionOutputs(sessionId: string, limit?: number): SessionOutput[] {
@@ -4401,108 +4507,218 @@ export class DatabaseService {
   }
 
   // Panel operations
+
+  /**
+   * Insert a panel row. Terminal byte buffers in `state.customState` go to
+   * `panel_buffers`; the remaining state must fit under the ceiling or the
+   * insert is rolled back and PanelStateCeilingError thrown.
+   */
+  private insertPanelRow(data: {
+    id: string;
+    sessionId: string;
+    type: string;
+    title: string;
+    state?: ToolPanelState;
+    metadata?: ToolPanelMetadata;
+  }): void {
+    const split = data.state ? splitPanelBufferState(data.state) : null;
+    const stateJson = split ? JSON.stringify(split.state) : null;
+    const metadataJson = data.metadata ? JSON.stringify(data.metadata) : null;
+
+    this.db
+      .prepare(
+        `
+      INSERT INTO tool_panels (id, session_id, type, title, state, metadata)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `,
+      )
+      .run(
+        data.id,
+        data.sessionId,
+        data.type,
+        data.title,
+        stateJson,
+        metadataJson,
+      );
+    if (split?.patch) {
+      this.panelBuffers.apply(data.id, split.patch);
+    }
+    this.assertPanelStateWithinCeiling(data.id);
+  }
+
+  /** Insert a panel; throws PanelStateCeilingError (already logged) when the state is over the ceiling. */
   createPanel(data: {
     id: string;
     sessionId: string;
     type: string;
     title: string;
-    state?: unknown;
-    metadata?: unknown;
+    state?: ToolPanelState;
+    metadata?: ToolPanelMetadata;
   }): void {
-    this.transaction(() => {
-      const stateJson = data.state ? JSON.stringify(data.state) : null;
-      const metadataJson = data.metadata ? JSON.stringify(data.metadata) : null;
-
-      this.db
-        .prepare(
-          `
-        INSERT INTO tool_panels (id, session_id, type, title, state, metadata)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `,
-        )
-        .run(
-          data.id,
-          data.sessionId,
-          data.type,
-          data.title,
-          stateJson,
-          metadataJson,
-        );
-    });
+    this.transaction(() => this.insertPanelRow(data));
   }
 
+  private jsonPath(segments: readonly string[]): string {
+    return `$${segments.map((segment) => `."${segment.replace(/"/g, '\\"')}"`).join("")}`;
+  }
+
+  /**
+   * Merge a partial state into the stored JSON inside SQLite, one key at a
+   * time, so the main process never parses or re-serializes the whole blob.
+   * A key set to `undefined` is removed, matching the object spread this
+   * replaces; `customState` keys merge one level deep, also as before.
+   */
+  private mergePanelState(panelId: string, state: ToolPanelState): void {
+    // A row created without state is NULL; older builds wrapped the object in
+    // a JSON string. json_set needs an object to merge into.
+    unwrapStringWrappedPanelState(this.db, panelId);
+    this.db
+      .prepare(
+        `UPDATE tool_panels SET state = '{}'
+         WHERE id = ? AND (state IS NULL OR json_valid(state) = 0 OR json_type(state) <> 'object')`,
+      )
+      .run(panelId);
+
+    const removePaths: string[] = [];
+    const setPaths: string[] = [];
+    const setValues: string[] = [];
+    for (const [key, value] of Object.entries(state)) {
+      if (key === "customState") continue;
+      const path = this.jsonPath([key]);
+      if (value === undefined) {
+        removePaths.push(path);
+      } else {
+        setPaths.push(path);
+        setValues.push(JSON.stringify(value));
+      }
+    }
+    if (state.customState) {
+      this.db
+        .prepare(
+          `UPDATE tool_panels SET state = json_set(state, '$.customState', json('{}'))
+           WHERE id = ? AND json_type(state, '$.customState') IS NOT 'object'`,
+        )
+        .run(panelId);
+      for (const [key, value] of Object.entries(state.customState)) {
+        const path = this.jsonPath(["customState", key]);
+        if (value === undefined) {
+          removePaths.push(path);
+        } else {
+          setPaths.push(path);
+          setValues.push(JSON.stringify(value));
+        }
+      }
+    }
+
+    let expression = "state";
+    const params: string[] = [];
+    if (removePaths.length > 0) {
+      expression = `json_remove(${expression}, ${removePaths.map(() => "?").join(", ")})`;
+      params.push(...removePaths);
+    }
+    if (setPaths.length > 0) {
+      expression = `json_set(${expression}, ${setPaths.map(() => "?, json(?)").join(", ")})`;
+      setPaths.forEach((path, index) => params.push(path, setValues[index]));
+    }
+    this.db
+      .prepare(`UPDATE tool_panels SET state = ${expression}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+      .run(...params, panelId);
+  }
+
+  /** Name the largest leaf value in the state (e.g. `$.customState.initialInput`) for a refusal log line. */
+  private largestPanelStateKey(panelId: string): string {
+    const largest = decodeOptionalBoundary(
+      this.db
+        .prepare(
+          `SELECT fullkey AS key, octet_length(value) AS bytes
+           FROM json_tree((SELECT state FROM tool_panels WHERE id = ?))
+           WHERE atom IS NOT NULL
+           ORDER BY bytes DESC LIMIT 1`,
+        )
+        .get(panelId),
+      boundary.object({ key: boundary.string, bytes: boundary.number }),
+    );
+    return largest ? `${largest.key} (${largest.bytes} bytes)` : "unknown";
+  }
+
+  /**
+   * Log and throw PanelStateCeilingError when the stored state is over the
+   * ceiling; the caller's transaction rolls the write back.
+   */
+  private assertPanelStateWithinCeiling(panelId: string): void {
+    const row = decodeOptionalBoundary(
+      this.db
+        .prepare("SELECT COALESCE(octet_length(state), 0) AS bytes FROM tool_panels WHERE id = ?")
+        .get(panelId),
+      boundary.object({ bytes: boundary.number }),
+    );
+    if (!row || row.bytes <= PANEL_STATE_CEILING_BYTES) return;
+    const error = new PanelStateCeilingError(panelId, row.bytes, this.largestPanelStateKey(panelId));
+    console.error(`[Database] ${error.message}`);
+    throw error;
+  }
+
+  /**
+   * Update a panel. Returns false when the resulting state would exceed the
+   * ceiling (the refusal is logged with the panel, the size and the largest
+   * key); nothing is written in that case.
+   */
   updatePanel(
     panelId: string,
     updates: {
       title?: string;
-      state?: unknown;
-      metadata?: unknown;
+      state?: ToolPanelState;
+      metadata?: ToolPanelMetadata;
     },
-  ): void {
-    // Get existing panel first to merge state
-    const existingPanel = this.getPanel(panelId);
+  ): boolean {
+    try {
+      this.transaction(() => {
+        const setClauses: string[] = [];
+        const values: string[] = [];
 
-    this.transaction(() => {
-      const setClauses: string[] = [];
-      const values: (string | number | boolean | null)[] = [];
-
-      if (updates.title !== undefined) {
-        setClauses.push("title = ?");
-        values.push(updates.title);
-      }
-
-      if (updates.state !== undefined) {
-        // Merge with existing state instead of replacing
-        const existingState: ToolPanelState = existingPanel?.state || { isActive: false };
-        const stateUpdates: Partial<ToolPanelState> = updates.state || {};
-        const mergedState: ToolPanelState = {
-          ...existingState,
-          ...stateUpdates,
-        };
-
-        // If there's a customState in either, merge that too.
-        const existingCustomState = existingState.customState;
-        const updatesCustomState = stateUpdates.customState;
-        if (existingCustomState !== undefined || updatesCustomState !== undefined) {
-          mergedState.customState = {
-            ...existingCustomState,
-            ...updatesCustomState,
-          };
+        if (updates.title !== undefined) {
+          setClauses.push("title = ?");
+          values.push(updates.title);
         }
 
-        if (DEBUG_DB_PANEL_STATE) {
-          console.log("[DB-DEBUG] updatePanel state merge:", {
-            panelId,
-            updates: sanitizePanelStateForLog(stateUpdates),
-            existing: sanitizePanelStateForLog(existingState),
-            merged: sanitizePanelStateForLog(mergedState),
-          });
+        if (updates.metadata !== undefined) {
+          setClauses.push("metadata = ?");
+          values.push(JSON.stringify(updates.metadata));
         }
 
-        setClauses.push("state = ?");
-        values.push(JSON.stringify(mergedState));
-      }
+        if (setClauses.length > 0) {
+          setClauses.push("updated_at = CURRENT_TIMESTAMP");
+          this.db
+            .prepare(`UPDATE tool_panels SET ${setClauses.join(", ")} WHERE id = ?`)
+            .run(...values, panelId);
+        }
 
-      if (updates.metadata !== undefined) {
-        setClauses.push("metadata = ?");
-        values.push(JSON.stringify(updates.metadata));
-      }
+        if (updates.state !== undefined) {
+          const { state, patch } = splitPanelBufferState(updates.state);
+          if (DEBUG_DB_PANEL_STATE) {
+            console.log("[DB-DEBUG] updatePanel state merge:", {
+              panelId,
+              updates: sanitizePanelStateForLog(state),
+              buffers: patch ? Object.keys(patch) : [],
+            });
+          }
+          if (patch) {
+            this.panelBuffers.apply(panelId, patch);
+          }
+          this.mergePanelState(panelId, state);
+          this.assertPanelStateWithinCeiling(panelId);
+        }
+      });
+      return true;
+    } catch (error) {
+      if (error instanceof PanelStateCeilingError) return false;
+      throw error;
+    }
+  }
 
-      if (setClauses.length > 0) {
-        setClauses.push("updated_at = CURRENT_TIMESTAMP");
-        values.push(panelId);
-
-        this.db
-          .prepare(
-            `
-          UPDATE tool_panels
-          SET ${setClauses.join(", ")}
-          WHERE id = ?
-        `,
-          )
-          .run(...values);
-      }
-    });
+  /** Persisted terminal bytes for a panel, or null when none are stored. */
+  getPanelBuffers(panelId: string): PanelBuffers | null {
+    return this.panelBuffers.get(panelId);
   }
 
   deletePanel(panelId: string): void {
@@ -4519,29 +4735,11 @@ export class DatabaseService {
     sessionId: string;
     type: string;
     title: string;
-    state?: unknown;
-    metadata?: unknown;
+    state?: ToolPanelState;
+    metadata?: ToolPanelMetadata;
   }): void {
     this.transaction(() => {
-      // Create the panel
-      const stateJson = data.state ? JSON.stringify(data.state) : null;
-      const metadataJson = data.metadata ? JSON.stringify(data.metadata) : null;
-
-      this.db
-        .prepare(
-          `
-        INSERT INTO tool_panels (id, session_id, type, title, state, metadata)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `,
-        )
-        .run(
-          data.id,
-          data.sessionId,
-          data.type,
-          data.title,
-          stateJson,
-          metadataJson,
-        );
+      this.insertPanelRow(data);
 
       // Set as active panel
       this.db
@@ -4566,10 +4764,7 @@ export class DatabaseService {
     const isActive = activePanel?.active_panel_id === panelId;
 
     // SAFETY: Panel state JSON is written from ToolPanelState by createPanel/updatePanel.
-    const state = row.state
-      // SAFETY: Persisted JSON in this column is produced by the matching typed serializer.
-      ? (JSON.parse(row.state) as ToolPanelState)
-      : { isActive: false, hasBeenViewed: false, customState: {} };
+    const state = parsePanelJson<ToolPanelState>(row.state, { isActive: false, hasBeenViewed: false, customState: {} });
     // Update isActive based on whether this panel is the active one
     state.isActive = isActive;
 
@@ -4581,23 +4776,20 @@ export class DatabaseService {
       type: row.type as ToolPanelType,
       title: row.title,
       state,
-      metadata: row.metadata
-        // SAFETY: Persisted JSON in this column is produced by the matching typed serializer.
-        ? (JSON.parse(row.metadata) as ToolPanelMetadata)
-        : {
-            createdAt: row.created_at,
-            lastActiveAt: row.created_at,
-            position: 0,
-          },
+      metadata: parsePanelJson<ToolPanelMetadata>(row.metadata, {
+        createdAt: row.created_at,
+        lastActiveAt: row.created_at,
+        position: 0,
+      }),
     };
   }
 
+  // Panel rows never carry terminal bytes (see panel_buffers), so one query
+  // serves both startup summaries and full restoration reads.
   getPanelsForSession(sessionId: string): ToolPanel[] {
     // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const rows = this.db
-      .prepare(
-        "SELECT * FROM tool_panels WHERE session_id = ? ORDER BY created_at",
-      )
+      .prepare("SELECT * FROM tool_panels WHERE session_id = ? ORDER BY created_at")
       .all(sessionId) as ToolPanelRow[];
 
     // Get the active panel ID for this session
@@ -4609,10 +4801,7 @@ export class DatabaseService {
 
     return rows.map((row) => {
       // SAFETY: Panel state JSON is written from ToolPanelState by createPanel/updatePanel.
-      const state = row.state
-        // SAFETY: Persisted JSON in this column is produced by the matching typed serializer.
-        ? (JSON.parse(row.state) as ToolPanelState)
-        : { isActive: false, hasBeenViewed: false, customState: {} };
+      const state = parsePanelJson<ToolPanelState>(row.state, { isActive: false, hasBeenViewed: false, customState: {} });
       // Update isActive based on whether this panel is the active one
       state.isActive = row.id === activePanelId;
 
@@ -4624,22 +4813,21 @@ export class DatabaseService {
         type: row.type as ToolPanelType,
         title: row.title,
         state,
-        metadata: row.metadata
-          // SAFETY: Persisted JSON in this column is produced by the matching typed serializer.
-          ? (JSON.parse(row.metadata) as ToolPanelMetadata)
-          : {
-              createdAt: row.created_at,
-              lastActiveAt: row.created_at,
-              position: 0,
-            },
+        metadata: parsePanelJson<ToolPanelMetadata>(row.metadata, {
+          createdAt: row.created_at,
+          lastActiveAt: row.created_at,
+          position: 0,
+        }),
       };
     });
   }
 
-  getAllPanels(): ToolPanel[] {
+  // Only these panel types need restart cleanup. Terminal history stays on disk
+  // until its session is opened, including stopped and archived sessions.
+  getPanelsForStartup(): ToolPanel[] {
     // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const rows = this.db
-      .prepare("SELECT * FROM tool_panels ORDER BY created_at")
+      .prepare("SELECT * FROM tool_panels WHERE type IN ('logs', 'browser') ORDER BY created_at")
       .all() as ToolPanelRow[];
 
     // SAFETY: Panel state and metadata JSON are written by the matching typed panel serializers.
@@ -4649,18 +4837,12 @@ export class DatabaseService {
       // SAFETY: The panel type column is constrained to values written from ToolPanelType.
       type: row.type as ToolPanelType,
       title: row.title,
-      state: row.state
-        // SAFETY: Persisted JSON in this column is produced by the matching typed serializer.
-        ? (JSON.parse(row.state) as ToolPanelState)
-        : { isActive: false },
-      metadata: row.metadata
-        // SAFETY: Persisted JSON in this column is produced by the matching typed serializer.
-        ? (JSON.parse(row.metadata) as ToolPanelMetadata)
-        : {
-            createdAt: row.created_at,
-            lastActiveAt: row.created_at,
-            position: 0,
-          },
+      state: parsePanelJson<ToolPanelState>(row.state, { isActive: false }),
+      metadata: parsePanelJson<ToolPanelMetadata>(row.metadata, {
+        createdAt: row.created_at,
+        lastActiveAt: row.created_at,
+        position: 0,
+      }),
     }));
   }
 
@@ -4684,18 +4866,12 @@ export class DatabaseService {
       // SAFETY: The panel type column is constrained to values written from ToolPanelType.
       type: row.type as ToolPanelType,
       title: row.title,
-      state: row.state
-        // SAFETY: Persisted JSON in this column is produced by the matching typed serializer.
-        ? (JSON.parse(row.state) as ToolPanelState)
-        : { isActive: false },
-      metadata: row.metadata
-        // SAFETY: Persisted JSON in this column is produced by the matching typed serializer.
-        ? (JSON.parse(row.metadata) as ToolPanelMetadata)
-        : {
-            createdAt: row.created_at,
-            lastActiveAt: row.created_at,
-            position: 0,
-          },
+      state: parsePanelJson<ToolPanelState>(row.state, { isActive: false }),
+      metadata: parsePanelJson<ToolPanelMetadata>(row.metadata, {
+        createdAt: row.created_at,
+        lastActiveAt: row.created_at,
+        position: 0,
+      }),
     }));
   }
 
@@ -4736,10 +4912,7 @@ export class DatabaseService {
     if (!row) return null;
 
     // SAFETY: Panel state JSON is written from ToolPanelState by createPanel/updatePanel.
-    const state = row.state
-      // SAFETY: Persisted JSON in this column is produced by the matching typed serializer.
-      ? (JSON.parse(row.state) as ToolPanelState)
-      : { isActive: true, hasBeenViewed: false };
+    const state = parsePanelJson<ToolPanelState>(row.state, { isActive: true, hasBeenViewed: false });
     // This panel is the active one by definition (we joined on active_panel_id)
     state.isActive = true;
 
@@ -4751,14 +4924,11 @@ export class DatabaseService {
       type: row.type as ToolPanelType,
       title: row.title,
       state,
-      metadata: row.metadata
-        // SAFETY: Persisted JSON in this column is produced by the matching typed serializer.
-        ? (JSON.parse(row.metadata) as ToolPanelMetadata)
-        : {
-            createdAt: row.created_at,
-            lastActiveAt: row.created_at,
-            position: 0,
-          },
+      metadata: parsePanelJson<ToolPanelMetadata>(row.metadata, {
+        createdAt: row.created_at,
+        lastActiveAt: row.created_at,
+        position: 0,
+      }),
     };
   }
 

@@ -38,15 +38,15 @@ export interface TerminalPanelState {
   initialInputSentAt?: string;   // Set after initialInput has been written once
   initialInputError?: string;    // Best-effort error if initialInput could not be written
   
-  // Enhanced persistence (can be added incrementally)
+  // Terminal bytes. On the way to the database these three keys are split out
+  // of the state JSON into the bounded panel_buffers table; they only appear
+  // here on the live terminal:getState path and in write patches.
   scrollbackBuffer?: string | string[];   // Full terminal output history (string for new format, array for legacy)
   alternateScreenBuffer?: string;         // Recent TUI/alternate-screen output, kept separate from shell scrollback
   isAlternateScreen?: boolean;            // Whether the live terminal is currently in alternate-screen/TUI mode
   serializedBuffer?: string;             // xterm.js serialized terminal state (includes full visual buffer)
-  commandHistory?: string[];     // Commands entered by user
   environmentVars?: Record<string, string>; // Modified env vars
   dimensions?: { cols: number; rows: number }; // Terminal size
-  lastActiveCommand?: string;    // Command running when closed
   cursorPosition?: { x: number; y: number }; // Cursor location
   selectionText?: string;        // Any selected text
   lastActivityTime?: string;     // For "idle since" indicators
@@ -60,6 +60,8 @@ export interface TerminalPanelState {
   hasClaudeSessionId?: boolean;      // Whether --session-id was already passed to Claude (use --resume next time)
   agentType?: 'claude' | 'codex' | 'cursor'; // CLI agent type for panel-local resume behavior
   agentSessionId?: string;           // Agent-generated session ID for resuming conversations
+  /** Stable orchestration identity for resumed Session terminals. */
+  orchestrationSessionId?: string;
 
   // CLI tool init state
   isCliPanel?: boolean;              // True if this terminal runs a CLI tool (claude/codex)

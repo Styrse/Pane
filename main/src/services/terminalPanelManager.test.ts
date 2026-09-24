@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ConfigManager } from './configManager';
 import { resetPaneRuntimeForTests, setPaneRuntime } from '../core/runtime';
 import { createFlowControlRecord, disposeFlowControlRecord, type FlowControlRecord } from '../ptyHost/flowControl';
-import { TerminalStateEmulator } from './terminalStateEmulator';
+import type { RemoteTerminalEmulator } from './terminalEmulatorClient';
+import { inProcessEmulatorHost } from '../test/inProcessEmulatorHost';
 import type { TerminalPanelState } from '../../../shared/types/panels';
 
 import { TerminalPanelManager } from './terminalPanelManager';
@@ -27,7 +28,7 @@ type TerminalUnderTest = {
   sessionId: string;
   scrollbackBuffer: string;
   alternateScreenBuffer: string;
-  screenEmulator?: TerminalStateEmulator;
+  screenEmulator?: RemoteTerminalEmulator;
   commandHistory: string[];
   currentCommand: string;
   lastActivity: Date;
@@ -149,6 +150,21 @@ function createTerminal(overrides: Partial<TerminalUnderTest> = {}): TerminalUnd
     ...overrides,
   };
 }
+
+describe('TerminalPanelManager keyboard input', () => {
+  it.each([
+    '\x1b[1;3A', '\x1b[1;2D', '\x1b[1;2A', '\x1b[17~',
+    '\x1b[38;72;0;1;258;1_', '\x1b[37;75;0;1;272;1_',
+    '\x1b[38;72;0;1;272;1_', '\x1b[117;64;0;1;0;1_',
+  ])('writes each complete input message exactly once: %j', (data) => {
+    const manager = new TerminalPanelManager();
+    const terminal = createTerminal();
+    testAccess<SnapshotAccess>(manager).terminals.set(terminal.panelId, terminal);
+    manager.writeToTerminal(terminal.panelId, data);
+    expect(terminal.pty.write.mock.calls).toEqual([[data]]);
+    disposeFlowControlRecord(terminal.flowControl);
+  });
+});
 
 describe('TerminalPanelManager terminal resize', () => {
   afterEach(() => {
@@ -435,9 +451,9 @@ describe('TerminalPanelManager hidden output delivery', () => {
 
   it('returns emulated live screen and restore state for daemon and renderer reads', async () => {
     const manager = testAccess<SnapshotAccess>(new TerminalPanelManager());
-    const screenEmulator = new TerminalStateEmulator(40, 5);
+    const screenEmulator = inProcessEmulatorHost().createEmulator(40, 5);
     screenEmulator.write('\x1b[?1049h\x1b[Hagent screen');
-    await screenEmulator.waitForIdle();
+    await screenEmulator.refresh();
     const terminal = createTerminal({
       scrollbackBuffer: 'scrollback',
       alternateScreenBuffer: 'screen',
@@ -494,7 +510,7 @@ describe('TerminalPanelManager hidden output delivery', () => {
 
   it('serves normal-buffer restore content from the rendered emulator, not the raw append log', async () => {
     const manager = testAccess<SnapshotAccess>(new TerminalPanelManager());
-    const screenEmulator = new TerminalStateEmulator(40, 5);
+    const screenEmulator = inProcessEmulatorHost().createEmulator(40, 5);
     const frame = 'PR #363 state unchanged';
     // Live stream: the frame prints once, then forced-redraw repaints re-emit it
     // after cursor-home — the traffic that duplicated rows when the raw log was
@@ -504,7 +520,6 @@ describe('TerminalPanelManager hidden output delivery', () => {
     screenEmulator.write(initial);
     screenEmulator.write(repaint);
     screenEmulator.write(repaint);
-    await screenEmulator.waitForIdle();
     const terminal = createTerminal({
       scrollbackBuffer: initial + repaint + repaint,
       screenEmulator,

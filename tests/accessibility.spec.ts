@@ -1,7 +1,14 @@
-import { expect, test, type Locator, type Page } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { expectNoAxeViolations } from './axeTest';
 import { installElectronApiMock } from './electronApiMock';
 import type { JsonValue } from '../shared/validation/boundaryDecoder';
+
+test.beforeEach(async ({ page }) => {
+  // Font CDN availability must not block loading the application stylesheet.
+  await page.route('https://fonts.googleapis.com/**', route => route.fulfill({
+    contentType: 'text/css', body: '',
+  }));
+});
 
 const project = {
   id: 1,
@@ -157,17 +164,25 @@ async function openConnectedRemote(page: Page): Promise<void> {
   await page.addInitScript((profile) => {
     window.localStorage.setItem('pane.remotePwa.savedProfiles', JSON.stringify([profile]));
 
-    class MockEventSource {
+    class MockEventSource extends EventTarget {
       onopen: ((event: Event) => void) | null = null;
       onerror: ((event: Event) => void) | null = null;
 
+      private readonly emitTestEvent = (event: Event) => {
+        if (event instanceof CustomEvent) {
+          this.dispatchEvent(new MessageEvent('daemon-event', { data: JSON.stringify(event.detail) }));
+        }
+      };
+
       constructor(readonly url: string) {
+        super();
+        window.addEventListener('pane-test-daemon-event', this.emitTestEvent);
         window.setTimeout(() => this.onopen?.(new Event('open')), 0);
       }
 
-      addEventListener(): void {}
-      removeEventListener(): void {}
-      close(): void {}
+      close(): void {
+        window.removeEventListener('pane-test-daemon-event', this.emitTestEvent);
+      }
     }
 
     Object.defineProperty(window, 'EventSource', {
@@ -314,6 +329,25 @@ test('seeded Create Pane dialog is keyboard reachable and axe-clean', async ({ p
   await expectNoAxeViolations(page);
 });
 
+test('queued pane creation failures show a dismissible accessible error', async ({ page }) => {
+  await openDesktop(page);
+  await page.evaluate(() => {
+    // SAFETY: installElectronApiMock installs this test event bridge before navigation.
+    const mock = (window as typeof window & { __paneTestElectronMock: {
+      emitSessionCreationFailed(name: string, error: string): void;
+    } }).__paneTestElectronMock;
+    mock.emitSessionCreationFailed('Feature', 'Git could not create the worktree.');
+  });
+  const dialog = page.getByRole('dialog', { name: 'Failed to Create Pane' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText('Git could not create the worktree.')).toBeVisible();
+  await expect(dialog.getByText('Pane: Feature')).toBeVisible();
+  await expectNoAxeViolations(page);
+  await page.screenshot({ path: 'test-results/pane-creation-error.png' });
+  await dialog.getByRole('button', { name: 'Close', exact: true }).click();
+  await expect(dialog).toBeHidden();
+});
+
 test('seeded pane exposes separate compound actions and arrow-keyed panel tabs', async ({ page }) => {
   await openDesktop(page);
 
@@ -373,40 +407,14 @@ test('seeded pane exposes separate compound actions and arrow-keyed panel tabs',
   await expectNoAxeViolations(page, { include: '.pane-session-shell' });
 });
 
-async function pressAgentChoice(page: Page, aimAt: Locator, key: string, expected: Locator): Promise<void> {
-  await expect(async () => {
-    await aimAt.focus();
-    await page.keyboard.press(key);
-    await expect(expected).toBeFocused({ timeout: 1_000 });
-    await expect(expected).toBeChecked({ timeout: 2_000 });
-  }).toPass({ timeout: 10_000 });
-}
-
-test('Pane Chat agent choice uses native radio semantics', async ({ page }) => {
-  await openDesktop(page, { paneChatAgentChangeDelayMs: 200 });
+test('Pane Chat legacy fallback exposes a static agent badge', async ({ page }) => {
+  await openDesktop(page);
 
   await page.getByRole('button', { name: 'Pane Chat' }).click();
-  const radios = page.getByRole('radio');
-  await expect(radios).toHaveCount(3);
-  await expect(page.getByRole('radio', { checked: true })).toHaveCount(1);
-
-  await pressAgentChoice(page, radios.first(), 'ArrowRight', radios.nth(1));
-  await pressAgentChoice(page, radios.nth(2), 'Space', radios.nth(2));
-  const cursorState = await page.evaluate(async () => window.electronAPI.paneChat.getOrCreate());
-  expect(cursorState.data?.panel.id).toBe('__pane_chat_terminal_cursor__');
-  expect(cursorState.data?.panel.state.customState?.initialCommand).toBe('cursor-agent --force --trust');
+  const shell = page.locator('.pane-chat-shell');
+  await expect(shell.getByTestId('pane-chat-agent-badge')).toHaveText('Claude');
+  await expect(shell.getByRole('radio')).toHaveCount(0);
   await expectNoAxeViolations(page, { include: '.pane-chat-shell' });
-});
-
-test('Windows hides unsupported Cursor choices from Pane Chat', async ({ page }) => {
-  await page.addInitScript(() => {
-    Object.defineProperty(navigator, 'platform', { configurable: true, get: () => 'Win32' });
-  });
-  await openDesktop(page, { platform: 'win32' });
-
-  await page.getByRole('button', { name: 'Pane Chat' }).click();
-  await expect(page.getByRole('radio')).toHaveCount(2);
-  await expect(page.getByRole('radio', { name: 'Cursor' })).toHaveCount(0);
 });
 
 test('disconnected Remote Pane screen is axe-clean', async ({ page }) => {
@@ -421,6 +429,29 @@ test('disconnected Remote Pane screen is axe-clean', async ({ page }) => {
   await expect(page.getByRole('alert')).not.toContainText('Tailscale');
   await expect(codeInput).toHaveAttribute('aria-invalid', 'true');
   await expectNoAxeViolations(page);
+});
+
+test('Remote pane creation failures remain visible across later daemon events', async ({ page }) => {
+  await openConnectedRemote(page);
+  await page.evaluate(() => {
+    window.dispatchEvent(new CustomEvent('pane-test-daemon-event', { detail: {
+      channel: 'session:creation-failed',
+      args: [{ name: 'Feature', error: 'Git could not create the worktree.' }],
+      timestamp: new Date().toISOString(),
+    } }));
+  });
+  const dialog = page.getByRole('dialog', { name: 'Failed to Create Pane' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText('Git could not create the worktree.')).toBeVisible();
+  await page.evaluate(() => {
+    window.dispatchEvent(new CustomEvent('pane-test-daemon-event', { detail: {
+      channel: 'project:updated', args: [], timestamp: new Date().toISOString(),
+    } }));
+  });
+  await expect(dialog).toBeVisible();
+  await expectNoAxeViolations(page);
+  await dialog.getByRole('button', { name: 'Close', exact: true }).click();
+  await expect(dialog).toBeHidden();
 });
 
 test('connected Remote Create Pane keeps its dialog open on branch Escape and is axe-clean', async ({ page }) => {

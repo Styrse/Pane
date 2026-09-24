@@ -27,6 +27,7 @@ export interface ParsedArgs {
   paneDir?: string;
   repo?: string;
   paneId?: string;
+  sessionId?: string;
   panelId?: string;
   repoPath?: string;
   folder?: string;
@@ -72,6 +73,10 @@ export interface ParsedArgs {
   watchFormat?: 'lines' | 'json';
   heartbeatSeconds?: number;
   idleAfterMs?: number;
+  settleMs?: number;
+  blockedSettleMs?: number;
+  minIntervalMs?: number;
+  idleBackoff?: boolean;
   allManaged?: boolean;
   includeShells?: boolean;
   noHeldInput?: boolean;
@@ -93,7 +98,7 @@ const targetSchema = boundary.enumeration(...RUNPANE_CONTRACT.enums.installTarge
 const formatSchema = boundary.enumeration(...RUNPANE_CONTRACT.enums.artifactFormats);
 const channelSchema = boundary.enumeration(...RUNPANE_CONTRACT.enums.channels);
 const agentSchema = boundary.enumeration(...RUNPANE_CONTRACT.enums.agents);
-const COMMAND_GROUP_HELP_TOPICS = new Set(['panes', 'panels', 'workspace']);
+const COMMAND_GROUP_HELP_TOPICS = new Set(['panes', 'panels', 'sessions', 'workspace']);
 
 const REMOTE_VALUE_FLAGS = new Set<string>(RUNPANE_CONTRACT.flags.remoteValue.map((flag) => flag.name));
 const REMOTE_BOOLEAN_FLAGS = new Set<string>(RUNPANE_CONTRACT.flags.remoteBoolean.map((flag) => flag.name));
@@ -173,6 +178,13 @@ export function parseRunpaneArgs(argv: string[]): ParsedArgs {
   }
   if (parsed.command === 'watch' && parsed.json && parsed.watchFormat === 'lines') {
     throw new Error('runpane watch accepts either --json or --format lines, not both.');
+  }
+  const cadenceValueFlagPresent = hasCadenceValueFlag(parsed);
+  if (parsed.command === 'watch' && !parsed.follow && (cadenceValueFlagPresent || parsed.idleBackoff)) {
+    throw new Error('--settle, --blocked-settle, --min-interval, and --idle-backoff require --follow.');
+  }
+  if (parsed.command === 'watch' && parsed.watchSince !== undefined && cadenceValueFlagPresent) {
+    throw new Error('runpane watch accepts either --since or --settle/--blocked-settle/--min-interval, not both (cadence needs a named cursor).');
   }
   return parsed;
 }
@@ -319,6 +331,10 @@ function parseLocalBooleanFlag(flag: string, parsed: ParsedArgs): void {
     parsed.follow = true;
     return;
   }
+  if (flag === '--idle-backoff') {
+    parsed.idleBackoff = true;
+    return;
+  }
   if (flag === '--ack-now') {
     parsed.ackNow = true;
     return;
@@ -370,6 +386,10 @@ function parseLocalValueFlag(flag: string, value: string, parsed: ParsedArgs): v
     } else {
       parsed.paneId = value;
     }
+    return;
+  }
+  if (flag === '--session') {
+    parsed.sessionId = value;
     return;
   }
   if (flag === '--exclude-pane') {
@@ -542,19 +562,23 @@ function parseLocalValueFlag(flag: string, value: string, parsed: ParsedArgs): v
     return;
   }
   if (flag === '--heartbeat') {
-    const heartbeatSeconds = Number(value);
-    if (!Number.isInteger(heartbeatSeconds) || heartbeatSeconds < 0) {
-      throw new Error('--heartbeat must be a non-negative integer.');
-    }
-    parsed.heartbeatSeconds = heartbeatSeconds;
+    parsed.heartbeatSeconds = parseNonNegativeIntegerFlag(flag, value);
     return;
   }
   if (flag === '--idle-after') {
-    const idleAfterMs = Number(value);
-    if (!Number.isInteger(idleAfterMs) || idleAfterMs < 0) {
-      throw new Error('--idle-after must be a non-negative integer.');
-    }
-    parsed.idleAfterMs = idleAfterMs;
+    parsed.idleAfterMs = parseNonNegativeIntegerFlag(flag, value);
+    return;
+  }
+  if (flag === '--settle') {
+    parsed.settleMs = parseNonNegativeIntegerFlag(flag, value);
+    return;
+  }
+  if (flag === '--blocked-settle') {
+    parsed.blockedSettleMs = parseNonNegativeIntegerFlag(flag, value);
+    return;
+  }
+  if (flag === '--min-interval') {
+    parsed.minIntervalMs = parseNonNegativeIntegerFlag(flag, value);
     return;
   }
   if (flag === '--body-file') {
@@ -563,6 +587,19 @@ function parseLocalValueFlag(flag: string, value: string, parsed: ParsedArgs): v
   }
 
   throw new Error(`Unknown option for ${parsed.command}: ${flag}`);
+}
+
+function parseNonNegativeIntegerFlag(flag: string, value: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`${flag} must be a non-negative integer.`);
+  }
+  return parsed;
+}
+
+/** True when any cadence flag that needs a named daemon cursor was given. */
+export function hasCadenceValueFlag(parsed: ParsedArgs): boolean {
+  return [parsed.settleMs, parsed.blockedSettleMs, parsed.minIntervalMs].some(value => value !== undefined);
 }
 
 function isRunpaneLocalCommand(command: RunpaneCommand): boolean {
@@ -578,6 +615,14 @@ function isRunpaneLocalCommand(command: RunpaneCommand): boolean {
     || command === 'panes pin'
     || command === 'panes unpin'
     || command === 'panes rename'
+    || command === 'sessions list'
+    || command === 'sessions create'
+    || command === 'sessions get'
+    || command === 'sessions update'
+    || command === 'sessions set-agent'
+    || command === 'sessions associate'
+    || command === 'sessions detach'
+    || command === 'sessions overview'
     || command === 'panels create'
     || command === 'panels list'
     || command === 'panels output'

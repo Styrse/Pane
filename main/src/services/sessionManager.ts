@@ -15,6 +15,7 @@ import type { Session, SessionUpdate, SessionOutput } from '../types/session';
 import type { DatabaseService } from '../database/database';
 import type { Session as DbSession, CreateSessionData, UpdateSessionData, ConversationMessage, PromptMarker, ExecutionDiff, CreateExecutionDiffData, Project } from '../database/models';
 import { getShellPath } from '../utils/shellPath';
+import { inheritedProcessEnv } from '../utils/inheritedProcessEnv';
 import { TerminalSessionManager } from './terminalSessionManager';
 import type { ToolPanelState, ResumableSession } from '../../../shared/types/panels';
 import { formatForDisplay } from '../utils/timestampUtils';
@@ -733,8 +734,8 @@ export class SessionManager extends EventEmitter {
       
       if (promptText) {
         // Get current output count to use as index
-        const outputs = this.db.getSessionOutputs(id);
-        this.db.addPromptMarker(id, promptText, outputs.length - 1);
+        const outputCount = this.db.getSessionOutputCount(id);
+        this.db.addPromptMarker(id, promptText, outputCount - 1);
         // Also add to conversation messages for continuation support
         this.db.addConversationMessage(id, 'user', promptText);
       }
@@ -1104,8 +1105,8 @@ export class SessionManager extends EventEmitter {
       
       // Add a prompt marker for this continued conversation
       // Get current output count to use as index
-      const outputs = this.db.getSessionOutputs(id);
-      this.db.addPromptMarker(id, userMessage, outputs.length);
+      const outputCount = this.db.getSessionOutputCount(id);
+      this.db.addPromptMarker(id, userMessage, outputCount);
       
       // Emit event for the Claude Code manager to handle
       this.emit('conversation-continue', { sessionId: id, message: userMessage });
@@ -1246,7 +1247,7 @@ export class SessionManager extends EventEmitter {
       stdio: 'pipe',
       detached: true, // Create a new process group
       env: {
-        ...process.env,
+        ...inheritedProcessEnv(),
         PATH: shellPath
       }
     });
