@@ -34,6 +34,7 @@ import type {
 import type { AgentUsageSnapshot } from '../../shared/types/agentUsage';
 import type { ResourceSnapshot } from '../../shared/types/resourceMonitor';
 import type { SubmitFeedbackRequest } from '../../shared/types/feedback';
+import type { RunpanePaneFocusRequestedEvent } from '../../shared/types/runpaneOrchestration';
 import type {
   PanePermissionRequest as PermissionRequest,
   PanePermissionResponse as PermissionResponse,
@@ -744,6 +745,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
       const wrappedCallback = (_event: Electron.IpcRendererEvent, session: Session) => callback(session);
       ipcRenderer.on('session:updated', wrappedCallback);
       return () => ipcRenderer.removeListener('session:updated', wrappedCallback);
+    },
+    onPaneFocusRequested: (callback: (data: RunpanePaneFocusRequestedEvent) => void) => {
+      const wrappedCallback = (_event: Electron.IpcRendererEvent, data: RunpanePaneFocusRequestedEvent) => callback(data);
+      ipcRenderer.on('pane:focus-requested', wrappedCallback);
+      return () => ipcRenderer.removeListener('pane:focus-requested', wrappedCallback);
     },
     onSessionDeleted: (callback: (session: Pick<Session, 'id'>) => void) => {
       const wrappedCallback = (_event: Electron.IpcRendererEvent, session: Pick<Session, 'id'>) => callback(session);
