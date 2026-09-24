@@ -640,20 +640,13 @@ export class TerminalPanelManager extends EventEmitter {
       return;
     }
 
-    // Send batched output to renderer. Legacy path: IPC send via
-    // `terminal:output`. Flag-on ptyHost path: post the filtered bytes over
-    // the per-window MessagePort so `electronAPI.ptyHost.onData` subscribers
-    // fire. Both paths continue to run; the renderer short-circuits the
-    // legacy handler once a `ptyId` is set to avoid double-delivery.
+    // Send batched output to the renderer and daemon subscribers. This is the
+    // only byte path for every PTY, ptyHost or not.
     this.sendRendererEvent('terminal:output', {
       sessionId: terminal.sessionId,
       panelId: terminal.panelId,
       output: data
     });
-    if (terminal.isPtyHost && terminal.ptyId) {
-      const supervisor = getPtyHostRuntime();
-      supervisor?.postDataToRenderers(terminal.ptyId, data);
-    }
 
     // Update flow-control bookkeeping with the bytes just flushed. The record
     // owns the HIGH/LOW watermark check, the `pauseRpcInFlight` gate, and the
@@ -1044,10 +1037,9 @@ export class TerminalPanelManager extends EventEmitter {
     // Begin at-a-glance status detection for AI/CLI agent panels.
     this.registerAgentStatusPanel(terminalProcess);
 
-    // Tell the renderer which `ptyId` to subscribe to for this panel so
-    // `TerminalPanel.tsx` can use `electronAPI.ptyHost.onData(ptyId, ...)`
-    // under the flag. Flag-off path skips this: the renderer keeps using
-    // the legacy `terminal:output` channel.
+    // Tell the renderer which `ptyId` backs this panel so `TerminalPanel.tsx`
+    // can ack flow-control bytes over the ptyHost port. Flag-off path skips
+    // this: the renderer acks over IPC.
     if (usePtyHost && ptyHostId) {
       this.sendRendererEvent('terminal:ptyReady', {
         sessionId: panel.sessionId,
@@ -1521,19 +1513,14 @@ export class TerminalPanelManager extends EventEmitter {
     const restorationMsg = `\r\n[Session Restored from ${state.lastActivityTime || 'previous session'}]\r\n`;
     terminal.pty.write(restorationMsg);
     
-    // Send scrollback to frontend. Dual-path mirrors `flushOutputBuffer`:
-    // `terminal:output` IPC for legacy subscribers, ptyHost port for flag-on.
-    // Cap the renderer replay at the formal ceiling; main's own buffer (set above) keeps full content.
+    // Send scrollback to frontend. Cap the renderer replay at the formal
+    // ceiling; main's own buffer (set above) keeps full content.
     const output = trimAnsiSafe(scrollback, MAX_RESTORE_PAYLOAD_SIZE) + restorationMsg;
     this.sendRendererEvent('terminal:output', {
       sessionId: panel.sessionId,
       panelId: panel.id,
       output,
     });
-    if (terminal.isPtyHost && terminal.ptyId) {
-      const supervisor = getPtyHostRuntime();
-      supervisor?.postDataToRenderers(terminal.ptyId, output);
-    }
   }
   
   async getTerminalState(panelId: string): Promise<TerminalPanelState | null> {
