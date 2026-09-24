@@ -15,8 +15,6 @@ const ExplorerPanel: React.FC<ExplorerPanelProps> = ({
   panel, 
   isActive 
 }) => {
-  const [isInitialized, setIsInitialized] = useState(false);
-  
   // Extract explorer state each render to ensure we get updates
   const explorerState = React.useMemo(() =>
     // SAFETY: The panel type discriminator determines the corresponding custom-state shape.
@@ -42,14 +40,6 @@ const ExplorerPanel: React.FC<ExplorerPanelProps> = ({
       });
     }
   }, [isActive, panel.id, panel.state]);
-  
-  // Initialize the editor panel
-  useEffect(() => {
-    if (isActive && !isInitialized) {
-      setIsInitialized(true);
-      // If there's a file path in state, it will be loaded by FileEditor
-    }
-  }, [isActive, isInitialized]);
   
   const [debouncedUpdate] = useState(() => debounce((panelId: string, sessionId: string, newState: Partial<ExplorerPanelState>) => {
     devLog.debug('[ExplorerPanel] Saving state to database:', {
@@ -132,40 +122,17 @@ const ExplorerPanel: React.FC<ExplorerPanelProps> = ({
     debouncedUpdate(panel.id, panel.sessionId, newState);
   }, [debouncedUpdate, panel.id, panel.sessionId]);
   
-  // Update panel title when file changes
-  const handleFileChange = useCallback((filePath: string | undefined, isDirty: boolean) => {
-    if (filePath) {
-      const filename = filePath.split('/').pop() || 'Explorer';
-      const title = isDirty ? `${filename} *` : filename;
-      panelApi.updatePanel(panel.id, { title });
-      
-      // Also update state
-      handleStateChange({ filePath, isDirty });
-    }
-  }, [panel.id, handleStateChange]);
-
-  // Only render when active. Explorer is cheap to initialize and should not
-  // keep Monaco, file tree loading, or git file-status checks alive in the
-  // background while the user is working in another panel.
-  if (!isActive) {
-    return (
-      <div className="flex-1 flex items-center justify-center text-text-secondary">
-        <div className="text-center">
-          <div className="text-sm">Explorer panel not active</div>
-          <div className="text-xs mt-1 text-text-tertiary">Click to activate</div>
-        </div>
-      </div>
-    );
-  }
-  
+  // The tree stays mounted while its inspector tab is hidden (the host hides
+  // it with display:none) so loaded directories, scroll and selection survive
+  // switching between Files and Changes. Its window-level shortcuts (⌘F,
+  // rename, delete, clipboard) only apply while it is the visible panel.
   return (
     <div className="h-full w-full">
       <FileEditor
         sessionId={panel.sessionId}
-        initialFilePath={explorerState?.filePath}
         initialState={explorerState}
-        onFileChange={handleFileChange}
         onStateChange={handleStateChange}
+        shortcutsActive={isActive}
       />
     </div>
   );

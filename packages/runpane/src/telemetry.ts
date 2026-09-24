@@ -117,7 +117,10 @@ export function createInitialTelemetryContext(argv: string[]): WrapperTelemetryC
     return { command: argv[1] === 'add' ? 'repos add' : 'repos list' };
   }
   if (first === 'panes') {
-    return { command: argv[1] === 'list' ? 'panes list' : 'panes create' };
+    if (argv[1] === 'list') return { command: 'panes list' };
+    if (argv[1] === 'cost') return { command: 'panes cost' };
+    if (argv[1] === 'adopt') return { command: 'panes adopt' };
+    return { command: 'panes create' };
   }
   if (first === 'panels') {
     if (argv[1] === 'output') return { command: 'panels output' };

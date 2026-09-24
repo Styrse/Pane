@@ -61,7 +61,7 @@
   --detail-panel-width: 17.5rem;     /* 280px */
   --detail-panel-min-width: 12.5rem; /* 200px */
   --detail-panel-max-width: 31.25rem; /* 500px */
-  --panel-tab-height: 2.25rem;       /* 36px */
+  --panel-tab-height: 2rem;          /* 32px — every theme */
   --app-frame-padding: 0;
   --app-frame-gap: 0;
   --panel-shell-gap: 0;
@@ -77,184 +77,116 @@
 
 /* Dusk Theme — Compact density (Emdash-inspired) */
 :root.dusk {
-  --panel-tab-height: 1.75rem;       /* 28px (was 36px) */
   --header-height: 2.5rem;           /* 40px (was 56px) */
   --button-padding-x: var(--space-3);     /* 12px (was 16px) */
   --button-padding-y: var(--space-1-5);   /* 6px (was 8px) */
   --card-padding: var(--space-2);         /* 8px (was 12px) */
   --card-padding-lg: var(--space-4);      /* 16px (was 24px) */
-  --app-frame-padding: var(--space-2-5);
-  --app-frame-gap: var(--space-2-5);
-  --panel-shell-gap: var(--space-2-5);
 }
 
 /* Forge Theme — Medium density (IntelliJ-inspired) */
 :root.forge {
-  --panel-tab-height: 2.5rem;        /* 40px (was 36px) */
   --button-padding-x: var(--space-4);     /* 16px (same) */
   --button-padding-y: var(--space-2);     /* 8px (same) */
   --card-padding: var(--space-3);         /* 12px (same) */
-  --app-frame-padding: var(--space-2);
-  --app-frame-gap: var(--space-2);
-  --panel-shell-gap: var(--space-2);
 }
 
 /* Ember Theme — warm editorial density */
 :root.ember {
-  --panel-tab-height: 2rem;
   --button-padding-x: var(--space-3-5);
   --button-padding-y: var(--space-1-5);
   --card-padding: var(--space-3);
-  --app-frame-padding: var(--space-2-5);
-  --app-frame-gap: var(--space-2-5);
-  --panel-shell-gap: var(--space-2-5);
 }
 
 /* Aurora Theme — spacious luminous density */
 :root.aurora {
-  --panel-tab-height: 2.25rem;
   --button-padding-x: var(--space-4);
   --button-padding-y: var(--space-2);
   --card-padding: var(--space-3);
-  --app-frame-padding: var(--space-3);
-  --app-frame-gap: var(--space-3);
-  --panel-shell-gap: var(--space-3);
 }
 
 /* Synthwave Theme — medium density */
 :root.synthwave {
-  --panel-tab-height: 2rem;
   --button-padding-x: var(--space-3-5);
   --button-padding-y: var(--space-1-5);
   --card-padding: var(--space-3);
-  --app-frame-padding: var(--space-2-5);
-  --app-frame-gap: var(--space-2-5);
-  --panel-shell-gap: var(--space-2-5);
 }
 
 /* Acid Terminal Theme — compact terminal density */
 :root.acid {
-  --panel-tab-height: 1.75rem;
   --button-padding-x: var(--space-3);
   --button-padding-y: var(--space-1-5);
   --card-padding: var(--space-2);
   --card-padding-lg: var(--space-4);
-  --app-frame-padding: var(--space-2);
-  --app-frame-gap: var(--space-2);
-  --panel-shell-gap: var(--space-2);
 }
 
 /* Tokyo Rain Theme — spacious density */
 :root.tokyo-rain {
-  --panel-tab-height: 2.25rem;
   --button-padding-x: var(--space-4);
   --button-padding-y: var(--space-2);
   --card-padding: var(--space-3);
-  --app-frame-padding: var(--space-3);
-  --app-frame-gap: var(--space-3);
-  --panel-shell-gap: var(--space-3);
 }
 
 /* Light Rounded — light palette with islanded shell layout */
 :root.light-rounded {
-  --panel-tab-height: 2.5rem;
   --button-padding-x: var(--space-4);
   --button-padding-y: var(--space-2);
   --card-padding: var(--space-3);
-  --app-frame-padding: var(--space-2-5);
-  --app-frame-gap: var(--space-2-5);
-  --panel-shell-gap: var(--space-2-5);
 }
 
 /* Amber CRT — medium density, islanded shells */
 :root.amber-crt {
-  --panel-tab-height: 2.25rem;
   --button-padding-x: var(--space-4);
   --button-padding-y: var(--space-2);
   --card-padding: var(--space-3);
-  --app-frame-padding: var(--space-2-5);
-  --app-frame-gap: var(--space-2-5);
-  --panel-shell-gap: var(--space-2-5);
 }
 
 /* Teletype — roomy paper margins */
 :root.teletype {
-  --panel-tab-height: 2.5rem;
   --button-padding-x: var(--space-4);
   --button-padding-y: var(--space-2);
   --card-padding: var(--space-3);
-  --app-frame-padding: var(--space-2-5);
-  --app-frame-gap: var(--space-2-5);
-  --panel-shell-gap: var(--space-2-5);
 }
 
 /* Dot Matrix — compact LCD density */
 :root.dot-matrix {
-  --panel-tab-height: 1.875rem;      /* 30px */
   --button-padding-x: var(--space-3);
   --button-padding-y: var(--space-1-5);
   --card-padding: var(--space-2);
-  --app-frame-padding: var(--space-2);
-  --app-frame-gap: var(--space-2);
-  --panel-shell-gap: var(--space-2);
 }
 
 /* Haar — airy fog spacing, islanded shells */
 :root.haar {
-  --panel-tab-height: 2.5rem;
   --button-padding-x: var(--space-4);
   --button-padding-y: var(--space-2);
   --card-padding: var(--space-3);
-  --app-frame-padding: var(--space-2-5);
-  --app-frame-gap: var(--space-2-5);
-  --panel-shell-gap: var(--space-2-5);
 }
 
 /* Abyss — medium density, islanded shells */
 :root.abyss {
-  --panel-tab-height: 2.25rem;
   --button-padding-x: var(--space-4);
   --button-padding-y: var(--space-2);
   --card-padding: var(--space-3);
-  --app-frame-padding: var(--space-2-5);
-  --app-frame-gap: var(--space-2-5);
-  --panel-shell-gap: var(--space-2-5);
 }
 
 /* Understory — medium density, islanded shells */
 :root.understory {
-  --panel-tab-height: 2.25rem;
   --button-padding-x: var(--space-4);
   --button-padding-y: var(--space-2);
   --card-padding: var(--space-3);
-  --app-frame-padding: var(--space-2-5);
-  --app-frame-gap: var(--space-2-5);
-  --panel-shell-gap: var(--space-2-5);
 }
 
 /* Colorblind Safe — standard density with islanded shells */
 :root.colorblind-safe {
-  --panel-tab-height: 2.25rem;
-  --app-frame-padding: var(--space-2-5);
-  --app-frame-gap: var(--space-2-5);
-  --panel-shell-gap: var(--space-2-5);
 }
 
 /* Low Fatigue — slightly relaxed density; taller tabs and more breathing room */
 :root.low-fatigue {
-  --panel-tab-height: 2.5rem;
   --button-padding-x: var(--space-4);
   --button-padding-y: var(--space-2);
   --card-padding: var(--space-3);
-  --app-frame-padding: var(--space-3);
-  --app-frame-gap: var(--space-3);
-  --panel-shell-gap: var(--space-3);
 }
 
 /* High Legibility — standard density; larger tab targets */
 :root.high-legibility {
-  --panel-tab-height: 2.5rem;
-  --app-frame-padding: var(--space-2-5);
-  --app-frame-gap: var(--space-2-5);
-  --panel-shell-gap: var(--space-2-5);
 }

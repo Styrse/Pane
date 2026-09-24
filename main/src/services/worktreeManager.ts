@@ -7,13 +7,14 @@ import { PathResolver } from '../utils/pathResolver';
 import { CommandRunner } from '../utils/commandRunner';
 import { getGitAttributionEnv } from '../utils/attribution';
 import { worktreePoolManager } from './worktreePoolManager';
+import { ensureFastGitConfig, forceRemoveWorktree } from './gitPerformanceConfig';
 import { boundary, decodeBoundary } from '../../../shared/validation/boundaryDecoder';
 
 type WorktreeAuditSource = 'session-delete' | 'project-delete' | 'create-cleanup';
 
 interface WorktreeEntry {
   path: string;
-  branch: string;
+  branch?: string;
 }
 
 export interface WorktreeAuditContext {
@@ -214,8 +215,9 @@ export class WorktreeManager {
     return this.projectsCache.get(cacheKey)!;
   }
 
-  async initializeProject(projectPath: string, worktreeFolder: string | undefined, pathResolver: PathResolver, _commandRunner: CommandRunner): Promise<void> {
+  async initializeProject(projectPath: string, worktreeFolder: string | undefined, pathResolver: PathResolver, commandRunner: CommandRunner): Promise<void> {
     const { baseDir } = this.getProjectPaths(projectPath, worktreeFolder, pathResolver);
+    void ensureFastGitConfig(projectPath, commandRunner);
     try {
       await mkdir(pathResolver.toFileSystem(baseDir), { recursive: true });
     } catch (error) {
@@ -223,11 +225,14 @@ export class WorktreeManager {
     }
   }
 
+  getWorktreePath(projectPath: string, name: string, worktreeFolder: string | undefined, pathResolver: PathResolver): string {
+    return pathResolver.join(this.getProjectPaths(projectPath, worktreeFolder, pathResolver).baseDir, name);
+  }
+
   async createWorktree(projectPath: string, name: string, branch: string | undefined, baseBranch: string | undefined, worktreeFolder: string | undefined, pathResolver: PathResolver, commandRunner: CommandRunner): Promise<{ worktreePath: string; baseCommit: string; baseBranch: string }> {
     return await withLock(`worktree-create-${projectPath}-${name}`, async () => {
 
-      const { baseDir } = this.getProjectPaths(projectPath, worktreeFolder, pathResolver);
-      const worktreePath = pathResolver.join(baseDir, name);
+      const worktreePath = this.getWorktreePath(projectPath, name, worktreeFolder, pathResolver);
       const branchName = branch || name;
     
 
@@ -256,7 +261,7 @@ export class WorktreeManager {
             worktreeName: name,
             worktreePath,
           });
-          await commandRunner.execAsync(`git worktree remove "${worktreePath}" --force`, projectPath);
+          await forceRemoveWorktree(worktreePath, projectPath, commandRunner);
           logWorktreeAudit('remove_succeeded', {
             source: 'create-cleanup',
             projectPath,
@@ -291,6 +296,8 @@ export class WorktreeManager {
         }
         await commandRunner.execAsync('git commit -m "Initial commit" --allow-empty', projectPath, { env: getGitAttributionEnv(this.configManager?.getConfig()) });
       }
+
+      await ensureFastGitConfig(projectPath, commandRunner);
 
       // Check if branch already exists
       const checkBranchCmd = `git show-ref --verify --quiet refs/heads/${branchName}`;
@@ -430,7 +437,7 @@ export class WorktreeManager {
 
       try {
         logWorktreeAudit('remove_started', auditDetails);
-        await commandRunner.execAsync(`git worktree remove "${worktreePath}" --force`, projectPath);
+        await forceRemoveWorktree(worktreePath, projectPath, commandRunner);
         logWorktreeAudit('remove_succeeded', auditDetails);
 
         // Track worktree cleanup
@@ -477,11 +484,8 @@ export class WorktreeManager {
       
       for (const line of lines) {
         if (line.startsWith('worktree ')) {
-          if (currentWorktree.path && currentWorktree.branch) {
-            worktrees.push({ 
-              path: currentWorktree.path, 
-              branch: currentWorktree.branch 
-            });
+          if (currentWorktree.path) {
+            worktrees.push({ ...currentWorktree, path: currentWorktree.path });
           }
           currentWorktree = { path: line.substring(9) };
         } else if (line.startsWith('branch ')) {
@@ -489,11 +493,8 @@ export class WorktreeManager {
         }
       }
       
-      if (currentWorktree.path && currentWorktree.branch) {
-        worktrees.push({ 
-          path: currentWorktree.path, 
-          branch: currentWorktree.branch 
-        });
+      if (currentWorktree.path) {
+        worktrees.push({ ...currentWorktree, path: currentWorktree.path });
       }
       
       return worktrees;
@@ -525,7 +526,7 @@ export class WorktreeManager {
 
       // Get all worktrees to identify which branches have worktrees
       const worktrees = await this.listWorktrees(projectPath, commandRunner);
-      const worktreeBranches = new Set(worktrees.map(w => w.branch));
+      const worktreeBranches = new Set(worktrees.flatMap(w => w.branch ? [w.branch] : []));
 
       // Parse local branches
       const localBranches: Array<{ name: string; isCurrent: boolean; hasWorktree: boolean; isRemote: boolean }> = [];

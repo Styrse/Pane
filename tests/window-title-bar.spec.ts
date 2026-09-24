@@ -101,6 +101,17 @@ test.describe('window title bar', () => {
     await expect(titleBarLabel(page)).toHaveText(project.name);
   });
 
+  test('clears the macOS traffic lights before app controls', async ({ page }) => {
+    await openDesktop(page);
+
+    const controls = page.getByTestId('window-title-bar-controls');
+    await expect(controls).toHaveCSS('left', '88px');
+
+    const collapse = page.getByRole('button', { name: 'Collapse sidebar' });
+    const collapseBox = await collapse.boundingBox();
+    expect(collapseBox?.x).toBeGreaterThanOrEqual(88);
+  });
+
   test('badges the PR and merge readiness without moving the title', async ({ page }) => {
     await openDesktop(page);
     await page.getByRole('button', { name: worktreeSession.name, exact: true }).click();

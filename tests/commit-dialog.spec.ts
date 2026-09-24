@@ -1,4 +1,5 @@
 import { expect, test, type Page, type TestInfo } from '@playwright/test';
+import type { DiffManifest } from '../shared/types/gitDiff';
 import { installElectronApiMock } from './electronApiMock';
 
 const project = {
@@ -47,18 +48,12 @@ function createSession(overrides: Partial<typeof baseSession> & { isMainRepo?: b
   return { ...baseSession, ...overrides };
 }
 
-const combinedDiff = {
-  diff: [
-    'diff --git a/src/example.ts b/src/example.ts',
-    'index 1111111..2222222 100644',
-    '--- a/src/example.ts',
-    '+++ b/src/example.ts',
-    '@@ -1 +1 @@',
-    '-export const value = 1;',
-    '+export const value = 2;',
-  ].join('\n'),
+const manifest: DiffManifest = {
+  scope: { kind: 'session' },
+  files: [{ path: 'src/example.ts', kind: 'modified', additions: 1, deletions: 1, isBinary: false }],
+  resolvedBase: { kind: 'comparison-base', ref: 'main', hash: '1111111111111111111111111111111111111111' },
+  resolvedTarget: { kind: 'working-tree' },
   stats: { additions: 1, deletions: 1, filesChanged: 1 },
-  changedFiles: ['src/example.ts'],
 };
 
 async function capture(page: Page, testInfo: TestInfo, name: string): Promise<void> {
@@ -142,7 +137,7 @@ test('review commit dialog keeps its default title and submits the composed mess
     initialSessions: [session],
     initialPanels: panels,
     initialExecutions: executions,
-    initialCombinedDiff: combinedDiff,
+    diffManifests: { session: manifest },
     initialUiState: { expandedProjects: [project.id] },
     activeProjectId: project.id,
   });

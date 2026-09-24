@@ -1,6 +1,6 @@
 {
   "name": "Pane",
-  "version": "2.4.70",
+  "version": "2.4.123",
   "private": true,
   "description": "Pane - Terminal-first AI code assistant manager with Windows support",
   "author": {
@@ -24,7 +24,11 @@
       "electron-winstaller"
     ],
     "overrides": {
-      "prebuild-install>node-abi": "^4.33.0"
+      "prebuild-install>node-abi": "^4.33.0",
+      "d3-sankey>d3-array": "^3.2.0"
+    },
+    "patchedDependencies": {
+      "@xterm/addon-webgl@0.20.0-beta.298": "patches/@xterm__addon-webgl@0.20.0-beta.298.patch"
     }
   },
   "scripts": {
@@ -35,6 +39,10 @@
     "electron-dev:custom": "concurrently \"pnpm run --filter frontend dev\" \"wait-on http-get://localhost:${VITE_PORT:-${PORT:-4521}} && electron .\"",
     "build": "pnpm run build:frontend && pnpm run build:main && pnpm run build:electron",
     "build:frontend": "pnpm run --filter frontend build",
+    "mobile:build:web": "pnpm --filter mobile build:web",
+    "mobile:sync": "pnpm --filter mobile sync",
+    "mobile:build:ios": "pnpm --filter mobile build:ios",
+    "mobile:build:android": "pnpm --filter mobile build:android",
     "build:main": "pnpm run --filter main build",
     "build:electron": "electron-builder --publish never",
     "build:mac": "pnpm run build:frontend && pnpm run build:main && pnpm run inject-build-info && pnpm run generate-notices && node scripts/configure-build.js && electron-builder --mac --publish never && node scripts/verify-mac-universal-binaries.js",
@@ -161,10 +169,13 @@
       "target": [
         {
           "target": "default",
-          "arch": "universal"
+          "arch": [
+            "arm64",
+            "x64"
+          ]
         }
       ],
-      "artifactName": "${productName}-${version}-macOS-universal.${ext}",
+      "artifactName": "${productName}-${version}-macOS-${arch}.${ext}",
       "x64ArchFiles": "Contents/Resources/app.asar.unpacked/node_modules/{**/*.node,**/*.dylib,**/spawn-helper}"
     },
     "linux": {
@@ -230,7 +241,7 @@
     },
     "publish": {
       "provider": "github",
-      "owner": "dcouple",
+      "owner": "greenfield-inc",
       "repo": "Pane"
     }
   },

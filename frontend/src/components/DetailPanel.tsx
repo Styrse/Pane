@@ -9,13 +9,19 @@ import { Button } from './ui/Button';
 import { Dropdown, DropdownMenuItem } from './ui/Dropdown';
 import { Tooltip } from './ui/Tooltip';
 import { useScrollSurface } from '../hooks/useScrollSurface';
+import { InspectorTabs, type InspectorTab } from './InspectorTabs';
+import { PanelContainer } from './panels/PanelContainer';
+import type { ToolPanel } from '../../../shared/types/panels';
+import { OuterResizeSeparator, type OuterResizeSeparatorProps } from './ui/OuterResizeSeparator';
 
 interface DetailPanelProps {
   isVisible: boolean;
   onToggle: () => void;
   width: number;
   height?: number;
-  onResize: (event: React.MouseEvent) => void;
+  availableHeight?: number;
+  resizeSeparator?: OuterResizeSeparatorProps;
+  bodyActive?: boolean;
   mergeError?: string | null;
   orientation?: 'vertical' | 'horizontal';
   isCollapsed?: boolean;
@@ -23,6 +29,13 @@ interface DetailPanelProps {
   onSwapLayout?: () => void;
   terminalShortcuts?: React.ReactNode;
   onCommitClick?: (hash: string) => void;
+  /** Inspector tab state; Files and Changes host the Explorer and Review panels. */
+  inspectorTab?: InspectorTab;
+  onInspectorTabChange?: (tab: InspectorTab) => void;
+  filesPanel?: ToolPanel;
+  changesPanel?: ToolPanel;
+  changesCount?: number;
+  isMainRepo?: boolean;
 }
 
 const sidebarButtonClass = 'w-full justify-start text-sm !px-2';
@@ -45,7 +58,9 @@ export function DetailPanel({
   isVisible,
   width,
   height,
-  onResize,
+  availableHeight,
+  resizeSeparator,
+  bodyActive = true,
   mergeError,
   orientation,
   isCollapsed,
@@ -53,6 +68,12 @@ export function DetailPanel({
   onSwapLayout,
   terminalShortcuts,
   onCommitClick,
+  inspectorTab = 'details',
+  onInspectorTabChange,
+  filesPanel,
+  changesPanel,
+  changesCount,
+  isMainRepo = false,
 }: DetailPanelProps) {
   const sessionContext = useSession();
   const immersiveMode = useNavigationStore(state => state.immersiveMode);
@@ -60,7 +81,7 @@ export function DetailPanel({
   const detailScrollSurfaceRef = useScrollSurface<HTMLDivElement>({
     id: `detail:${sessionContext?.session.id ?? 'unavailable'}`,
     sessionId: sessionContext?.session.id,
-    enabled: Boolean(sessionContext && isVisible && !immersiveMode && orientation !== 'horizontal'),
+    enabled: Boolean(sessionContext && bodyActive && isVisible && !immersiveMode && orientation !== 'horizontal'),
     priority: 30,
     ownerElement: () => detailPanelRef.current,
   });
@@ -83,16 +104,27 @@ export function DetailPanel({
     return (
       <HorizontalDetailPanel
         height={height}
-        onResize={onResize}
+        availableHeight={availableHeight}
+        resizeSeparator={resizeSeparator}
+        bodyActive={bodyActive}
         mergeError={mergeError}
         isCollapsed={isCollapsed}
         onToggleCollapse={onToggleCollapse}
         onSwapLayout={onSwapLayout}
         terminalShortcuts={terminalShortcuts}
         onCommitClick={onCommitClick}
+        inspectorTab={inspectorTab}
+        onInspectorTabChange={onInspectorTabChange}
+        filesPanel={filesPanel}
+        changesPanel={changesPanel}
+        changesCount={changesCount}
+        isMainRepo={isMainRepo}
       />
     );
   }
+
+  const hostedPanel = inspectorTab === 'files' ? filesPanel : inspectorTab === 'changes' ? changesPanel : undefined;
+  const showDetails = inspectorTab === 'details' || !hostedPanel;
 
   const {
     session,
@@ -107,18 +139,44 @@ export function DetailPanel({
   } = sessionContext;
   const gitStatus = session.gitStatus;
   const gitUnavailable = !!session.isMainRepo && gitStatus?.state === 'unknown';
+  const contentActive = bodyActive && isVisible && !immersiveMode;
 
   return (
     <div
       ref={detailPanelRef}
-      className={`pane-detail-panel pane-detail-panel-vertical flex-shrink-0 min-w-0 bg-surface-primary flex flex-col overflow-hidden relative transition-[width] duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] ${isVisible && !immersiveMode ? 'border-l border-border-primary' : ''}`}
+      className={`pane-detail-panel pane-detail-panel-vertical flex-shrink-0 min-w-0 bg-surface-primary flex flex-col overflow-visible relative ${isVisible && !immersiveMode && width > 0 ? 'border-l border-border-primary' : ''}`}
       style={{ width: isVisible && !immersiveMode ? `${width}px` : '0px' }}
     >
-      <div className="absolute top-0 left-0 w-1 h-full cursor-col-resize group z-10" onMouseDown={onResize}>
-        <div className="absolute -left-2 right-0 top-0 bottom-0" />
-      </div>
+      {resizeSeparator && !immersiveMode && <OuterResizeSeparator {...resizeSeparator} />}
 
-      <div className="pane-detail-panel-inner flex flex-col h-full min-h-0">
+      <div
+        className="pane-detail-panel-inner flex flex-col h-full min-h-0 overflow-hidden"
+        aria-hidden={!contentActive}
+        inert={!contentActive ? true : undefined}
+      >
+        {onInspectorTabChange && (
+          <InspectorTabs
+            tab={showDetails ? 'details' : inspectorTab}
+            onTabChange={onInspectorTabChange}
+            filesPanel={filesPanel}
+            changesPanel={changesPanel}
+            changesCount={changesCount}
+          />
+        )}
+        {/* Both hosted panels stay mounted so their state (expanded diffs,
+            open file, scroll) survives switching tabs; only one is shown. */}
+        {[filesPanel, changesPanel].map(panel => panel && (
+          <div
+            key={panel.id}
+            className="pane-inspector-host flex-1 min-h-0 relative"
+            style={{ display: panel === hostedPanel && !showDetails ? 'flex' : 'none' }}
+            aria-hidden={panel !== hostedPanel || showDetails}
+            inert={panel !== hostedPanel || showDetails ? true : undefined}
+          >
+            <PanelContainer panel={panel} isActive={contentActive && panel === hostedPanel && !showDetails} isMainRepo={isMainRepo} autoFocus={false} />
+          </div>
+        ))}
+        {showDetails && (<>
         <div className="flex-shrink-0 overflow-hidden">
           <div className="flex items-center gap-2 px-3 py-2 border-b border-border-primary min-w-0">
             <GitBranch className="w-3.5 h-3.5 text-text-tertiary flex-shrink-0" />
@@ -255,6 +313,7 @@ export function DetailPanel({
             </div>
           </div>
         )}
+        </>)}
       </div>
     </div>
   );

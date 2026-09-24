@@ -208,6 +208,68 @@ function markNativeRebuildComplete(root) {
 }
 
 /**
+ * Detect whether main/dist/main/src/preload.js is the esbuild bundle (safe for
+ * the sandboxed preload) or the plain tsc emit, which still `require`s
+ * ../../shared/... and fails to load inside the sandbox — leaving the renderer
+ * without window.electronAPI and stuck on the browser fallback screen.
+ */
+function preloadIsBundled(root) {
+  const preloadPath = path.join(root, 'main', 'dist', 'main', 'src', 'preload.js');
+  if (!fs.existsSync(preloadPath)) return false;
+  const source = fs.readFileSync(preloadPath, 'utf8');
+  const runtimeRequires = [...source.matchAll(/\brequire\((['"])([^'"]+)\1\)/g)].map((m) => m[2]);
+  return runtimeRequires.length > 0 && runtimeRequires.every((specifier) => specifier === 'electron');
+}
+
+/**
+ * Re-run esbuild for the preload. `tsc -w` overwrites the bundle with a plain
+ * emit on its initial pass and whenever preload.ts (or a shared import) changes.
+ */
+function bundlePreload(root) {
+  console.log('[preload] Bundling sandboxed preload...');
+  try {
+    execSync('pnpm run --filter main bundle:preload', { cwd: root, stdio: 'inherit', shell: true });
+    return true;
+  } catch (error) {
+    console.error('[preload] ❌ Failed to bundle preload; the renderer will fall back to browser mode until this is fixed.');
+    return false;
+  }
+}
+
+/**
+ * Watch the tsc output directory and re-bundle whenever tsc drops an
+ * unbundled preload.js there.
+ */
+function watchPreloadEmit(root) {
+  const distDir = path.join(root, 'main', 'dist', 'main', 'src');
+  if (!fs.existsSync(distDir)) return null;
+  let timer = null;
+  let bundling = false;
+  const check = () => {
+    timer = null;
+    if (bundling || preloadIsBundled(root)) return;
+    bundling = true;
+    try {
+      bundlePreload(root);
+    } finally {
+      bundling = false;
+    }
+  };
+  try {
+    const watcher = fs.watch(distDir, (_event, filename) => {
+      if (filename && String(filename) !== 'preload.js') return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(check, 500);
+    });
+    watcher.on('error', () => {});
+    return watcher;
+  } catch (error) {
+    console.warn(`[preload] Could not watch ${distDir}: ${error.message}`);
+    return null;
+  }
+}
+
+/**
  * Check if build is needed
  */
 function needsBuild(root) {
@@ -353,14 +415,34 @@ async function main() {
   const children = [];
 
   // 1. Start TypeScript watcher for main process
+  // stdout is piped (and mirrored) so we can tell when tsc's initial emit has
+  // landed: it overwrites the bundled preload.js, and Electron must not load
+  // the window until that emit has been re-bundled.
   const tscWatch = spawn('pnpm', ['run', '--filter', 'main', 'dev'], {
     cwd: projectRoot,
     env,
-    stdio: ['ignore', 'inherit', 'inherit'],
+    stdio: ['ignore', 'pipe', 'inherit'],
     shell: true
   });
   children.push(tscWatch);
   console.log('[tsc] TypeScript watch started');
+
+  const tscInitialEmit = new Promise((resolve) => {
+    let settled = false;
+    tscWatch.stdout.on('data', (chunk) => {
+      process.stdout.write(chunk);
+      if (!settled && /Watching for file changes/.test(chunk.toString())) {
+        settled = true;
+        resolve();
+      }
+    });
+    tscWatch.on('exit', () => {
+      if (!settled) {
+        settled = true;
+        resolve();
+      }
+    });
+  });
 
   // 2. Start Vite dev server with the correct port
   const vite = spawn('pnpm', ['run', '--filter', 'frontend', 'dev', '--', '--port', port.toString()], {
@@ -372,15 +454,44 @@ async function main() {
   children.push(vite);
   console.log(`[vite] Frontend dev server starting on port ${port}`);
 
-  // 3. Wait for Vite to be ready, then launch Electron
-  const waitAndLaunch = spawn('npx', ['wait-on', `http-get://localhost:${port}`, '&&', 'npx', 'electron', '.'], {
+  // 3. Wait for Vite and tsc's initial emit, re-bundle the preload that emit
+  //    just clobbered, then launch Electron.
+  const waitOn = spawn('npx', ['wait-on', `http-get://localhost:${port}`], {
     cwd: projectRoot,
     env,
     stdio: ['ignore', 'inherit', 'inherit'],
     shell: true
   });
-  children.push(waitAndLaunch);
-  console.log(`[electron] Waiting for http-get://localhost:${port} then launching Electron`);
+  children.push(waitOn);
+  console.log(`[electron] Waiting for http-get://localhost:${port} and the main-process build, then launching Electron`);
+
+  const viteReady = new Promise((resolve, reject) => {
+    waitOn.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`wait-on exited with code ${code}`))));
+  });
+
+  let electron = null;
+  const preloadWatcher = watchPreloadEmit(projectRoot);
+  Promise.all([viteReady, tscInitialEmit])
+    .then(() => {
+      if (!preloadIsBundled(projectRoot)) {
+        bundlePreload(projectRoot);
+      }
+      electron = spawn('npx', ['electron', '.'], {
+        cwd: projectRoot,
+        env,
+        stdio: ['ignore', 'inherit', 'inherit'],
+        shell: true
+      });
+      children.push(electron);
+      electron.on('exit', (code) => {
+        console.log(`\n📋 Electron exited with code ${code}`);
+        cleanup();
+      });
+    })
+    .catch((error) => {
+      console.error(`\n❌ ${error.message}`);
+      cleanup();
+    });
 
   // Handle cleanup on exit
   let cleanedUp = false;
@@ -388,6 +499,7 @@ async function main() {
     if (cleanedUp) return;
     cleanedUp = true;
     console.log('\n\n🛑 Shutting down dev server...');
+    if (preloadWatcher) preloadWatcher.close();
 
     for (const child of children) {
       if (child.pid) {
@@ -412,10 +524,6 @@ async function main() {
       console.log(`\n📋 Vite exited with code ${code}`);
       cleanup();
     }
-  });
-  waitAndLaunch.on('exit', (code) => {
-    console.log(`\n📋 Electron exited with code ${code}`);
-    cleanup();
   });
 }
 

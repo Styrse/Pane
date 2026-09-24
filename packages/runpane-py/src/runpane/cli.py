@@ -20,6 +20,7 @@ from .installers import (
     spawn_pane_captured,
 )
 from .local_control import (
+    has_cadence_value_flag,
     run_agents_doctor,
     run_panels_create,
     run_panels_input,
@@ -31,11 +32,22 @@ from .local_control import (
     run_panels_wait,
     run_panes_archive,
     run_panes_create,
+    run_panes_cost,
     run_panes_list,
     run_panes_pin,
     run_panes_rename,
     run_repos_add,
     run_repos_list,
+    run_sessions_associate,
+    run_sessions_create,
+    run_sessions_detach,
+    run_sessions_get,
+    run_sessions_list,
+    run_sessions_overview,
+    run_sessions_set_agent,
+    run_sessions_update,
+    run_watch,
+    run_workspace_state,
 )
 from .platforms import detect_platform
 from .releases import resolve_release
@@ -60,7 +72,8 @@ TARGETS = set(RUNPANE_CONTRACT["enums"]["installTargets"])
 FORMATS = set(RUNPANE_CONTRACT["enums"]["artifactFormats"])
 CHANNELS = set(RUNPANE_CONTRACT["enums"]["channels"])
 AGENTS = set(RUNPANE_CONTRACT["enums"]["agents"])
-COMMAND_GROUP_HELP_TOPICS = {"panes", "panels"}
+COMMAND_GROUP_HELP_TOPICS = {"panes", "panels", "workspace"}
+COMMAND_GROUP_HELP_TOPICS.add("sessions")
 
 REMOTE_VALUE_FLAGS = {flag["name"] for flag in RUNPANE_CONTRACT["flags"]["remoteValue"]}
 REMOTE_BOOLEAN_FLAGS = {flag["name"] for flag in RUNPANE_CONTRACT["flags"]["remoteBoolean"]}
@@ -94,6 +107,7 @@ class ParsedArgs:
     pane_dir: Optional[str] = None
     repo: Optional[str] = None
     pane_id: Optional[str] = None
+    session_id: Optional[str] = None
     panel_id: Optional[str] = None
     repo_path: Optional[str] = None
     name: Optional[str] = None
@@ -122,6 +136,30 @@ class ParsedArgs:
     no_pinned: bool = False
     composer_strategy: Optional[str] = None
     force: bool = False
+    watch_as: Optional[str] = None
+    watch_since: Optional[int] = None
+    watch_from: Optional[str] = None
+    watch_kinds: List[str] = field(default_factory=list)
+    watch_pane_ids: List[str] = field(default_factory=list)
+    watch_exclude_pane_ids: List[str] = field(default_factory=list)
+    name_contains: Optional[str] = None
+    follow: bool = False
+    agents_only: bool = False
+    ack_now: bool = False
+    include_held_input: bool = False
+    watch_format: Optional[str] = None
+    heartbeat_seconds: Optional[int] = None
+    idle_after_ms: Optional[int] = None
+    settle_ms: Optional[int] = None
+    blocked_settle_ms: Optional[int] = None
+    min_interval_ms: Optional[int] = None
+    idle_backoff: bool = False
+    all_managed: bool = False
+    include_shells: bool = False
+    no_held_input: bool = False
+    self_test: bool = False
+    report: bool = False
+    body_file: Optional[str] = None
     help_topic: Optional[str] = None
     remote_setup_args: List[str] = field(default_factory=list)
 
@@ -153,6 +191,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             lambda: dispatch_parsed_command(parsed, telemetry_context),
         )
     except Exception as error:
+        if effective_argv and effective_argv[0] == "watch":
+            line = f"WATCH ERROR {type(error).__name__}: {error}"
+            print(line, flush=True)
+            print(line, file=sys.stderr, flush=True)
+            return 2
         print(str(error), file=sys.stderr)
         return 1
 
@@ -175,8 +218,30 @@ def dispatch_parsed_command(parsed: ParsedArgs, telemetry_context: WrapperTeleme
         return run_repos_list(parsed)
     if parsed.command == "repos add":
         return run_repos_add(parsed)
+    if parsed.command == "sessions list":
+        return run_sessions_list(parsed)
+    if parsed.command == "sessions create":
+        return run_sessions_create(parsed)
+    if parsed.command == "sessions get":
+        return run_sessions_get(parsed)
+    if parsed.command == "sessions update":
+        return run_sessions_update(parsed)
+    if parsed.command == "sessions set-agent":
+        return run_sessions_set_agent(parsed)
+    if parsed.command == "sessions associate":
+        return run_sessions_associate(parsed)
+    if parsed.command == "sessions detach":
+        return run_sessions_detach(parsed)
+    if parsed.command == "sessions overview":
+        return run_sessions_overview(parsed)
     if parsed.command == "panes list":
         return run_panes_list(parsed)
+    if parsed.command == "panes cost":
+        return run_panes_cost(parsed)
+    if parsed.command == "workspace state":
+        return run_workspace_state(parsed)
+    if parsed.command == "watch":
+        return run_watch(parsed)
     if parsed.command == "panes create":
         return run_panes_create(parsed)
     if parsed.command == "panes archive":
@@ -390,6 +455,27 @@ def parse_args(argv: List[str]) -> ParsedArgs:
         parsed.target = "client"
 
     parse_flags(args, parsed)
+    if parsed.command == "watch" and parsed.all_managed and parsed.watch_pane_ids:
+        raise ValueError("runpane watch accepts either --all-managed or --pane, not both.")
+    if parsed.command == "watch" and parsed.json and parsed.watch_format == "lines":
+        raise ValueError("runpane watch accepts either --json or --format lines, not both.")
+    cadence_value_flag_present = has_cadence_value_flag(parsed)
+    if parsed.command == "watch" and not parsed.follow and (cadence_value_flag_present or parsed.idle_backoff):
+        raise ValueError("--settle, --blocked-settle, --min-interval, and --idle-backoff require --follow.")
+    if parsed.command == "watch" and parsed.watch_since is not None and cadence_value_flag_present:
+        raise ValueError(
+            "runpane watch accepts either --since or --settle/--blocked-settle/--min-interval, not both (cadence needs a named cursor)."
+        )
+    return parsed
+
+
+def parse_non_negative_int_flag(flag: str, value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise ValueError(f"{flag} must be a non-negative integer.") from error
+    if parsed < 0:
+        raise ValueError(f"{flag} must be a non-negative integer.")
     return parsed
 
 
@@ -488,6 +574,36 @@ def parse_local_boolean_flag(parsed: ParsedArgs, flag: str) -> None:
     if flag == "--force":
         parsed.force = True
         return
+    if flag == "--follow":
+        parsed.follow = True
+        return
+    if flag == "--idle-backoff":
+        parsed.idle_backoff = True
+        return
+    if flag == "--ack-now":
+        parsed.ack_now = True
+        return
+    if flag == "--include-held-input":
+        parsed.include_held_input = True
+        return
+    if flag == "--agents-only":
+        parsed.agents_only = True
+        return
+    if flag == "--all-managed":
+        parsed.all_managed = True
+        return
+    if flag == "--include-shells":
+        parsed.include_shells = True
+        return
+    if flag == "--no-held-input":
+        parsed.no_held_input = True
+        return
+    if flag == "--self-test":
+        parsed.self_test = True
+        return
+    if flag == "--report":
+        parsed.report = True
+        return
     raise ValueError(f"Unknown option for {parsed.command}: {flag}")
 
 
@@ -499,7 +615,16 @@ def parse_local_value_flag(parsed: ParsedArgs, flag: str, value: str) -> None:
         parsed.repo = value
         return
     if flag == "--pane":
-        parsed.pane_id = value
+        if parsed.command == "watch":
+            parsed.watch_pane_ids.append(value)
+        else:
+            parsed.pane_id = value
+        return
+    if flag == "--session":
+        parsed.session_id = value
+        return
+    if flag == "--exclude-pane":
+        parsed.watch_exclude_pane_ids.append(value)
         return
     if flag == "--panel":
         parsed.panel_id = value
@@ -547,8 +672,8 @@ def parse_local_value_flag(parsed: ParsedArgs, flag: str, value: str) -> None:
             timeout_ms = float(value)
         except ValueError as error:
             raise ValueError("--timeout-ms must be a positive number.") from error
-        if timeout_ms <= 0:
-            raise ValueError("--timeout-ms must be a positive number.")
+        if timeout_ms < 0 or (timeout_ms == 0 and parsed.command != "watch"):
+            raise ValueError("--timeout-ms must be a positive number (watch also accepts 0).")
         parsed.timeout_ms = timeout_ms
         return
     if flag == "--ready-timeout-ms":
@@ -605,6 +730,57 @@ def parse_local_value_flag(parsed: ParsedArgs, flag: str, value: str) -> None:
             raise ValueError("--strategy must be one of: auto, codex-ctrl-enter, enter.")
         parsed.composer_strategy = value
         return
+    if flag == "--as":
+        parsed.watch_as = value
+        return
+    if flag == "--since":
+        try:
+            since = int(value)
+        except ValueError as error:
+            raise ValueError("--since must be a non-negative integer.") from error
+        if since < 0:
+            raise ValueError("--since must be a non-negative integer.")
+        parsed.watch_since = since
+        return
+    if flag == "--from":
+        if value not in {"now", "earliest"}:
+            raise ValueError("--from must be now or earliest.")
+        parsed.watch_from = value
+        return
+    if flag == "--kinds":
+        parsed.watch_kinds = [kind.strip() for kind in value.split(",") if kind.strip()]
+        return
+    if flag == "--name-contains":
+        parsed.name_contains = value
+        return
+    if flag == "--format":
+        if parsed.command == "watch":
+            if value not in {"lines", "json"}:
+                raise ValueError("--format for watch must be lines or json.")
+            parsed.watch_format = value
+            return
+        if value not in FORMATS:
+            raise ValueError(f"Invalid --format {value}. Expected one of: {', '.join(sorted(FORMATS))}")
+        parsed.format = value
+        return
+    if flag == "--heartbeat":
+        parsed.heartbeat_seconds = parse_non_negative_int_flag(flag, value)
+        return
+    if flag == "--idle-after":
+        parsed.idle_after_ms = parse_non_negative_int_flag(flag, value)
+        return
+    if flag == "--settle":
+        parsed.settle_ms = parse_non_negative_int_flag(flag, value)
+        return
+    if flag == "--blocked-settle":
+        parsed.blocked_settle_ms = parse_non_negative_int_flag(flag, value)
+        return
+    if flag == "--min-interval":
+        parsed.min_interval_ms = parse_non_negative_int_flag(flag, value)
+        return
+    if flag == "--body-file":
+        parsed.body_file = value
+        return
     raise ValueError(f"Unknown option for {parsed.command}: {flag}")
 
 
@@ -614,7 +790,18 @@ def is_runpane_local_command(command: str) -> bool:
         "daemon repair",
         "repos list",
         "repos add",
+        "sessions list",
+        "sessions create",
+        "sessions get",
+        "sessions update",
+        "sessions set-agent",
+        "sessions associate",
+        "sessions detach",
+        "sessions overview",
+        "workspace state",
+        "watch",
         "panes list",
+        "panes cost",
         "panes create",
         "panes archive",
         "panes pin",

@@ -1,3 +1,5 @@
+![Pane — a pixel-art terminal workshop with separate agent workspaces](docs/assets/pane-banner.png)
+
 <p align="center">
   <img src="frontend/src/assets/pane-logo.png" alt="Pane" width="120" height="120">
 </p>
@@ -13,10 +15,12 @@
   <img src="assets/readme-remote-pane.png" alt="Pane desktop app and Remote Pane mobile browser app" title="Pane desktop app and Remote Pane mobile browser app" width="100%">
 </a>
 
+Appearance follows your OS — see [Appearance](docs/APPEARANCE.md).
+
 [![AGPL-3.0 License](https://img.shields.io/badge/License-AGPL--3.0-555555.svg?labelColor=333333&color=666666)](./LICENSE)
-[![Downloads](https://img.shields.io/endpoint?url=https://runpane.com/api/badge/downloads&labelColor=333333&color=666666)](https://github.com/dcouple/Pane/releases)
-[![GitHub](https://img.shields.io/badge/GitHub-source-555555?labelColor=333333&color=666666&logo=github&logoColor=white)](https://github.com/dcouple/Pane)
-[![Latest Release](https://img.shields.io/badge/Release-latest-555555?labelColor=333333&color=666666)](https://github.com/dcouple/Pane/releases/latest)
+[![Downloads](https://img.shields.io/endpoint?url=https://runpane.com/api/badge/downloads&labelColor=333333&color=666666)](https://github.com/greenfield-inc/Pane/releases)
+[![GitHub](https://img.shields.io/badge/GitHub-source-555555?labelColor=333333&color=666666&logo=github&logoColor=white)](https://github.com/greenfield-inc/Pane)
+[![Latest Release](https://img.shields.io/badge/Release-latest-555555?labelColor=333333&color=666666)](https://github.com/greenfield-inc/Pane/releases/latest)
 [![Changelog](https://img.shields.io/badge/Changelog-runpane.com-555555?labelColor=333333&color=666666)](https://runpane.com/changelog)
 [![Active Users](https://img.shields.io/endpoint?url=https://runpane.com/api/badge/installs&labelColor=333333)](https://runpane.com)
 [![Discord](https://img.shields.io/badge/Discord-join-%235462eb?labelColor=%235462eb&logo=discord&logoColor=%23f5f5f5)](https://discord.gg/BdMyubeAZn)
@@ -25,8 +29,8 @@
 
 **Made possible by our amazing contributors**
 
-<a href="https://github.com/dcouple/Pane/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=dcouple/Pane" alt="Pane contributors">
+<a href="https://github.com/greenfield-inc/Pane/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=greenfield-inc/Pane" alt="Pane contributors">
 </a>
 
 <sub><a href="./CONTRIBUTING.md">Join them</a> and help make Pane better.</sub>
@@ -233,6 +237,8 @@ See [Runpane CLI Contract](docs/RUNPANE_CLI_CONTRACT.md) for the full schema and
 
 ## How It Works
 
+![A saved repository opens into a Pane with a worktree and branch; terminal panels in that Pane share the worktree](docs/assets/pane-workspaces.png)
+
 Two primitives: **panes** and **tabs**. One pane per feature, one worktree each. Inside every pane, everything lives in tabs — agents, diff viewer, file explorer, git tree, logs, multiple terminals. Create a pane, get an isolated workspace. Delete a pane, everything cleans up. Your agents never step on each other, and every tab persists across restarts.
 
 Your agents already talk to Linear, Jira, GitHub, and Slack through MCPs and CLI tools. The terminal is the universal integration layer. Pane doesn't re-integrate what your agents already access — it gives them a place to run.
@@ -306,13 +312,14 @@ irm https://runpane.com/install.ps1 | iex
 
 ### Direct Download
 
-> **[Download the Latest Release](https://github.com/dcouple/Pane/releases/latest)**
+> **[Download the Latest Release](https://github.com/greenfield-inc/Pane/releases/latest)**
 
 | Platform | File |
 |----------|------|
 | Windows (x64) | `Pane-x.x.x-Windows-x64.exe` |
 | Windows (ARM64) | `Pane-x.x.x-Windows-arm64.exe` |
-| macOS (Universal) | `Pane-x.x.x-macOS-universal.dmg` |
+| macOS (Apple Silicon) | `Pane-x.x.x-macOS-arm64.dmg` |
+| macOS (Intel) | `Pane-x.x.x-macOS-x64.dmg` |
 | Linux (x64) | `Pane-x.x.x-linux-x86_64.AppImage` or `.deb` |
 | Linux (ARM64) | `Pane-x.x.x-linux-arm64.AppImage` or `.deb` |
 
@@ -336,6 +343,11 @@ irm https://runpane.com/install.ps1 | iex
 4. **Work in parallel** — create multiple panes for different approaches
 5. **Review diffs** — see what changed with the built-in diff viewer
 6. **Ship** — commit, rebase, and merge from keyboard shortcuts
+
+You can reuse an archived or deleted pane's name. Pane keeps any old worktree
+identity and Git branches separate, choosing a free worktree name for the new
+pane. Creation errors appear in a dismissible error dialog on desktop and Remote
+Pane even if the creation dialog has already closed.
 
 ---
 
@@ -416,7 +428,7 @@ Pane uses xterm.js, the same terminal engine that powers VS Code's integrated te
 ## Building from Source
 
 ```bash
-git clone https://github.com/dcouple/Pane.git
+git clone https://github.com/greenfield-inc/Pane.git
 cd Pane
 pnpm run setup
 pnpm run electron-dev
@@ -427,7 +439,7 @@ pnpm run electron-dev
 ```bash
 pnpm build:win:x64    # Windows (x64)
 pnpm build:win:arm64  # Windows (ARM64)
-pnpm build:mac        # macOS (Universal)
+pnpm build:mac        # macOS (Apple Silicon + Intel)
 pnpm build:linux  # Linux (x64 + ARM64)
 ```
 

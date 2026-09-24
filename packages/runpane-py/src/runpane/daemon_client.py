@@ -44,6 +44,7 @@ def invoke_daemon(
     args: Optional[List[Any]] = None,
     pane_dir: Optional[str] = None,
     timeout_ms: Optional[float] = None,
+    event_include: Optional[List[str]] = None,
 ) -> Any:
     endpoint = get_pane_daemon_endpoint(resolve_pane_directory(pane_dir))
     request = {
@@ -52,7 +53,15 @@ def invoke_daemon(
         "channel": channel,
         "args": args or [],
     }
-    encoded = encode_frame(request)
+    encoded = b""
+    if event_include is not None:
+        encoded += encode_frame({
+            "type": "request",
+            "id": 0,
+            "channel": "daemon:events",
+            "args": [{"include": event_include}],
+        })
+    encoded += encode_frame(request)
 
     if endpoint["transport"] == "pipe":
         return invoke_windows_pipe(endpoint["path"], encoded, timeout_ms or DEFAULT_TIMEOUT_MS)
@@ -66,7 +75,10 @@ def invoke_unix_socket(socket_path: str, encoded_request: bytes, timeout_ms: flo
         try:
             client.connect(socket_path)
         except OSError as error:
-            raise PaneDaemonClientError(f"Could not connect to Pane daemon at {socket_path}: {error}") from error
+            raise PaneDaemonClientError(
+                f"Could not connect to Pane daemon at {socket_path}: {error}",
+                "ERR_RUNPANE_DAEMON_CONNECT_FAILED",
+            ) from error
 
         client.sendall(encoded_request)
         while True:
@@ -97,7 +109,10 @@ def invoke_windows_pipe(pipe_path: str, encoded_request: bytes, timeout_ms: floa
                 if response is not None:
                     return response
     except OSError as error:
-        raise PaneDaemonClientError(f"Could not connect to Pane daemon at {pipe_path}: {error}") from error
+        raise PaneDaemonClientError(
+            f"Could not connect to Pane daemon at {pipe_path}: {error}",
+            "ERR_RUNPANE_DAEMON_CONNECT_FAILED",
+        ) from error
 
 
 def first_matching_response(frames: List[Dict[str, Any]]) -> Optional[Any]:

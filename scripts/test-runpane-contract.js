@@ -2,13 +2,16 @@
 const assert = require('assert');
 const childProcess = require('child_process');
 const fs = require('fs');
+const net = require('net');
 const os = require('os');
 const path = require('path');
 
 const rootDir = path.resolve(__dirname, '..');
 const npmCli = path.join(rootDir, 'packages', 'runpane', 'dist', 'cli.js');
 const pythonSource = path.join(rootDir, 'packages', 'runpane-py', 'src');
+const contractPath = path.join(rootDir, 'contracts', 'runpane', 'contract.json');
 const contractFixturePath = path.join(rootDir, 'scripts', 'fixtures', 'runpane-contract.json');
+const contract = JSON.parse(fs.readFileSync(contractPath, 'utf8'));
 const contractFixture = JSON.parse(fs.readFileSync(contractFixturePath, 'utf8'));
 const parserSamples = contractFixture.parserSamples;
 
@@ -34,7 +37,7 @@ const artifactRelease = {
   tag_name: 'v2.2.8',
   name: 'v2.2.8',
   body: '',
-  html_url: 'https://github.com/dcouple/Pane/releases/tag/v2.2.8',
+  html_url: 'https://github.com/greenfield-inc/Pane/releases/tag/v2.2.8',
   published_at: '2026-01-01T00:00:00Z',
   prerelease: false,
   draft: false,
@@ -43,8 +46,10 @@ const artifactRelease = {
     { name: 'Pane-2.2.8-linux-arm64.AppImage', browser_download_url: 'https://example.test/linux-arm64.AppImage' },
     { name: 'Pane-2.2.8-linux-x86_64.deb', browser_download_url: 'https://example.test/linux-x64.deb' },
     { name: 'Pane-2.2.8-linux-arm64.deb', browser_download_url: 'https://example.test/linux-arm64.deb' },
-    { name: 'Pane-2.2.8-macOS-universal.dmg', browser_download_url: 'https://example.test/macos.dmg' },
-    { name: 'Pane-2.2.8-macOS-universal.zip', browser_download_url: 'https://example.test/macos.zip' },
+    { name: 'Pane-2.2.8-macOS-arm64.dmg', browser_download_url: 'https://example.test/macos-arm64.dmg' },
+    { name: 'Pane-2.2.8-macOS-arm64.zip', browser_download_url: 'https://example.test/macos-arm64.zip' },
+    { name: 'Pane-2.2.8-macOS-x64.dmg', browser_download_url: 'https://example.test/macos-x64.dmg' },
+    { name: 'Pane-2.2.8-macOS-x64.zip', browser_download_url: 'https://example.test/macos-x64.zip' },
     { name: 'Pane-2.2.8-Windows-x64.exe', browser_download_url: 'https://example.test/win-x64.exe' },
     { name: 'Pane-2.2.8-Windows-arm64.exe', browser_download_url: 'https://example.test/win-arm64.exe' }
   ]
@@ -71,7 +76,7 @@ const platformEdgeRelease = {
   tag_name: 'v2.2.8',
   name: 'v2.2.8',
   body: '',
-  html_url: 'https://github.com/dcouple/Pane/releases/tag/v2.2.8',
+  html_url: 'https://github.com/greenfield-inc/Pane/releases/tag/v2.2.8',
   published_at: '2026-01-01T00:00:00Z',
   prerelease: false,
   draft: false,
@@ -123,6 +128,405 @@ function assertIncludes(text, expected) {
   assert.ok(text.includes(expected), `Expected output to include: ${expected}`);
 }
 
+function matchesJsonSchema(value, schema) {
+  if (schema.oneOf) {
+    return schema.oneOf.filter((candidate) => matchesJsonSchema(value, candidate)).length === 1;
+  }
+  if (Object.prototype.hasOwnProperty.call(schema, 'const') && value !== schema.const) {
+    return false;
+  }
+  if (schema.type === 'string') {
+    return Object.prototype.toString.call(value) === '[object String]' && (!schema.minLength || value.length >= schema.minLength);
+  }
+  if (schema.type === 'number') {
+    return Object.prototype.toString.call(value) === '[object Number]' && Number.isFinite(value);
+  }
+  if (schema.type === 'object') {
+    if (Object.prototype.toString.call(value) !== '[object Object]') return false;
+    const properties = schema.properties ?? {};
+    const required = schema.required ?? [];
+    if (required.some((key) => !Object.prototype.hasOwnProperty.call(value, key))) return false;
+    if (schema.additionalProperties === false && Object.keys(value).some((key) => !Object.prototype.hasOwnProperty.call(properties, key))) return false;
+    return Object.entries(properties).every(([key, propertySchema]) => (
+      !Object.prototype.hasOwnProperty.call(value, key) || matchesJsonSchema(value[key], propertySchema)
+    ));
+  }
+  return true;
+}
+
+function assertMatchesJsonSchema(value, schema, label) {
+  assert.ok(matchesJsonSchema(value, schema), `${label} does not match its JSON schema: ${JSON.stringify(value)}`);
+}
+
+function checkWatchFormatterGoldens() {
+  const lines = require(path.join(rootDir, 'packages', 'runpane', 'dist', 'watchLines.js'));
+  assert.strictEqual(lines.effectiveWatchHeartbeatMs(180), 120_000);
+  assert.strictEqual(lines.effectiveWatchHeartbeatMs(60), 60_000);
+  const pythonHeartbeat = JSON.parse(runPythonSnippet(`
+import json
+from runpane.local_control import effective_watch_heartbeat_ms
+print(json.dumps([effective_watch_heartbeat_ms(180), effective_watch_heartbeat_ms(60)]))
+`));
+  assert.deepStrictEqual(pythonHeartbeat, [120_000, 60_000]);
+  const base = {
+    gen: 7,
+    at: '2026-08-28T00:00:00.000Z',
+    paneId: 'pane-1',
+    paneName: 'Issue\n538',
+    panelId: 'panel-1',
+  };
+  const expected = [
+    ['agent.ready', 'READY Issue 538 pane pane-1 panel panel-1'],
+    ['agent.busy', 'BUSY Issue 538 pane pane-1 panel panel-1'],
+    ['agent.blocked', 'BLOCKED Issue 538 pane pane-1 panel panel-1'],
+    ['agent.unknown', 'UNKNOWN Issue 538 pane pane-1 panel panel-1'],
+    ['agent.idle', 'IDLE Issue 538 10m pane pane-1 panel panel-1', { idleMs: 600000, idleCount: 1 }],
+    ['pane.created', 'NEW Issue 538 pane pane-1'],
+    ['pane.gone', 'GONE Issue 538 pane pane-1'],
+    ['panel.exited', 'EXIT Issue 538 pane pane-1 panel panel-1 code 3', { exitCode: 3 }],
+  ];
+  for (const [kind, line, extra = {}] of expected) {
+    assert.deepStrictEqual(
+      lines.formatWaitResult({ epoch: 'epoch-1', generation: 7, entries: [{ ...base, kind, ...extra }] }, 'lines'),
+      [line],
+    );
+  }
+  assert.deepStrictEqual(
+    lines.formatWaitResult({ epoch: 'epoch-1', generation: 7, entries: [{ ...base, kind: 'agent.ready', baseline: true }] }, 'lines'),
+    [],
+  );
+  assert.deepStrictEqual(
+    lines.formatWaitResult({
+      epoch: 'epoch-1',
+      generation: 7,
+      entries: [{ ...base, kind: 'agent.ready', baseline: true, changedWhileAway: true }],
+    }, 'lines'),
+    ['CHANGED Issue 538 pane pane-1 panel panel-1'],
+  );
+  const result = {
+    epoch: 'epoch-1',
+    generation: 7,
+    reset: { reason: 'cursor-truncated' },
+    dropped: 2,
+    entries: [{ ...base, kind: 'agent.ready', heldInput: '[REDACTED]' }],
+  };
+  assert.deepStrictEqual(lines.formatWaitResult(result, 'lines'), [
+    'RESET cursor-truncated epoch epoch-1',
+    'DROPPED 2',
+    'READY Issue 538 pane pane-1 panel panel-1',
+    'STUCK Issue 538 pane pane-1 panel panel-1 held-input-present',
+  ]);
+  const jsonLines = lines.formatWaitResult(result, 'json').map(JSON.parse);
+  assert.deepStrictEqual(jsonLines[0], { kind: '_reset', reason: 'cursor-truncated', epoch: 'epoch-1' });
+  assert.deepStrictEqual(jsonLines[1], { kind: '_dropped', count: 2 });
+  assert.deepStrictEqual(jsonLines[2], result.entries[0], 'JSON mode must preserve structured fields');
+  assert.strictEqual(lines.formatNonEntry('_ok', { generation: 7, epoch: 'epoch-1' }, 'lines'), 'WATCH OK gen 7 epoch epoch-1');
+  assert.strictEqual(lines.formatNonEntry('_heartbeat', { generation: 7, at: 'T' }, 'lines'), 'HEARTBEAT gen 7 at T');
+  assert.strictEqual(lines.formatNonEntry('_reconnected', { generation: 8 }, 'lines'), 'WATCH RECONNECTED gen 8');
+  assert.strictEqual(
+    lines.formatNonEntry('_error', { code: 'E_BAD\nCODE', message: 'unsafe\nmessage' }, 'lines'),
+    'WATCH ERROR E_BAD CODE: unsafe message',
+  );
+}
+
+function watchResult(generation) {
+  return {
+    ok: true,
+    epoch: 'test-epoch',
+    generation,
+    entries: [],
+    timedOut: true,
+    nextCommand: `runpane watch --since ${generation}`,
+  };
+}
+
+function isExpectedClientDisconnect(error, socket) {
+  if (error === null || error === undefined) return false;
+  if (error.code === 'EPIPE' && error.syscall === 'write') return true;
+  if (error.code === 'ECONNRESET' && error.syscall === 'read') return true;
+  return error.code === 'ERR_STREAM_DESTROYED' && socket.destroyed;
+}
+
+async function withFakeDaemon(paneDir, onRequest, action) {
+  const { getPaneDaemonEndpoint } = require(path.join(rootDir, 'packages', 'runpane', 'dist', 'daemonClient.js'));
+  const endpoint = getPaneDaemonEndpoint(paneDir);
+  if (endpoint.transport === 'unix') {
+    fs.mkdirSync(path.dirname(endpoint.path), { recursive: true });
+    fs.rmSync(endpoint.path, { force: true });
+  }
+  const pendingResponseTimers = new Map();
+  const unexpectedSocketErrors = [];
+  const rememberSocketError = (error, socket) => {
+    if (isExpectedClientDisconnect(error, socket)) return;
+    unexpectedSocketErrors.push(error);
+  };
+  const clearResponseTimers = (socket) => {
+    const timers = pendingResponseTimers.get(socket);
+    if (!timers) return;
+    for (const timer of timers) clearTimeout(timer);
+    pendingResponseTimers.delete(socket);
+  };
+  const server = net.createServer((socket) => {
+    let buffer = '';
+    socket.on('error', (error) => rememberSocketError(error, socket));
+    socket.once('close', () => clearResponseTimers(socket));
+    socket.on('data', (chunk) => {
+      buffer += chunk.toString('utf8');
+      while (buffer.includes('\n')) {
+        const index = buffer.indexOf('\n');
+        const raw = buffer.slice(0, index);
+        buffer = buffer.slice(index + 1);
+        if (!raw.trim()) continue;
+        const frame = JSON.parse(raw);
+        if (frame.type !== 'request' || frame.id !== 1) continue;
+        const response = onRequest(frame);
+        if (response.destroy) {
+          socket.destroy();
+          continue;
+        }
+        const timer = setTimeout(() => {
+          const timers = pendingResponseTimers.get(socket);
+          timers?.delete(timer);
+          if (timers?.size === 0) pendingResponseTimers.delete(socket);
+          if (!socket.destroyed) {
+            socket.end(`${JSON.stringify({ type: 'response', id: 1, ok: true, result: response.result })}\n`, (error) => {
+              if (error) rememberSocketError(error, socket);
+            });
+          }
+        }, response.delayMs || 0);
+        const timers = pendingResponseTimers.get(socket) ?? new Set();
+        timers.add(timer);
+        pendingResponseTimers.set(socket, timers);
+      }
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(endpoint.path, resolve);
+  });
+  let actionResult;
+  let actionError;
+  let actionFailed = false;
+  try {
+    actionResult = await action();
+  } catch (error) {
+    actionFailed = true;
+    actionError = error;
+  } finally {
+    for (const timers of pendingResponseTimers.values()) {
+      for (const timer of timers) clearTimeout(timer);
+    }
+    pendingResponseTimers.clear();
+    await new Promise((resolve) => server.close(resolve));
+    if (endpoint.transport === 'unix') {
+      fs.rmSync(endpoint.path, { force: true });
+      fs.rmSync(path.dirname(endpoint.path), { recursive: true, force: true });
+    }
+  }
+  if (actionFailed) throw actionError;
+  if (unexpectedSocketErrors.length > 0) throw unexpectedSocketErrors[0];
+  return actionResult;
+}
+
+function runWatchCli(runtime, args, paneDir, until, timeoutMs = 8_000) {
+  const python = runtime === 'pip' ? findPython() : undefined;
+  const command = runtime === 'npm' ? process.execPath : python;
+  const commandArgs = runtime === 'npm' ? [npmCli, ...args] : ['-m', 'runpane', ...args];
+  const env = {
+    ...process.env,
+    PANE_DIR: paneDir,
+    PYTHONDONTWRITEBYTECODE: '1',
+    PYTHONPATH: pythonSource,
+    RUNPANE_TELEMETRY_DISABLED: '1',
+  };
+  delete env.PANE_PANEL_ID;
+  return new Promise((resolve, reject) => {
+    const child = childProcess.spawn(command, commandArgs, { cwd: rootDir, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    let matched = false;
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`${runtime} watch timed out. stdout=${stdout} stderr=${stderr}`));
+    }, timeoutMs);
+    const inspect = () => {
+      if (!matched && until(stdout, stderr)) {
+        matched = true;
+        child.kill();
+      }
+    };
+    child.stdout.on('data', chunk => { stdout += chunk.toString('utf8'); inspect(); });
+    child.stderr.on('data', chunk => { stderr += chunk.toString('utf8'); inspect(); });
+    child.once('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once('close', (code, signal) => {
+      clearTimeout(timer);
+      if (!matched && !until(stdout, stderr)) {
+        reject(new Error(`${runtime} watch exited before expected output (${code}/${signal}). stdout=${stdout} stderr=${stderr}`));
+        return;
+      }
+      resolve({ stdout, stderr, code, signal });
+    });
+  });
+}
+
+async function checkWatchStreamParity() {
+  for (const runtime of ['npm', 'pip']) {
+    const paneDir = fs.mkdtempSync(path.join(os.tmpdir(), `runpane-watch-${runtime}-`));
+    const requests = [];
+    try {
+      const selfTest = await withFakeDaemon(
+        paneDir,
+        (frame) => {
+          requests.push(frame.args[0]);
+          return { result: watchResult(5) };
+        },
+        () => runWatchCli(runtime, ['watch', '--self-test', '--as', 'named-backlog'], paneDir, stdout => stdout.includes('WATCH OK gen 5 epoch test-epoch')),
+      );
+      assertIncludes(selfTest.stdout, 'WATCH OK gen 5 epoch test-epoch');
+      assert.strictEqual(requests.length, 1);
+      assert.strictEqual(requests[0].as, undefined, 'self-test must not use or advance a named cursor');
+      assert.strictEqual(requests[0].since, undefined);
+      assert.strictEqual(requests[0].from, 'now');
+      assert.strictEqual(requests[0].timeoutMs, 0);
+      assert.strictEqual(requests[0].idleAfterMs, 0);
+
+      const oneShot = await withFakeDaemon(
+        paneDir,
+        () => ({ result: {
+          ...watchResult(6),
+          entries: [{
+            gen: 6,
+            at: '2026-08-28T00:00:00.000Z',
+            kind: 'agent.ready',
+            paneId: 'pane-1',
+            paneName: 'One',
+            panelId: 'panel-1',
+            source: 'agent',
+          }],
+        } }),
+        () => runWatchCli(runtime, ['watch', '--json', '--timeout-ms', '0'], paneDir, stdout => stdout.includes('"kind":"agent.ready"')),
+      );
+      assert.ok(!oneShot.stdout.includes('"kind":"_ok"'), 'one-shot JSON must retain its legacy entry-only shape');
+
+      const healthyTimeouts = [];
+      const healthy = await withFakeDaemon(
+        paneDir,
+        frame => {
+          healthyTimeouts.push(frame.args[0].timeoutMs);
+          return { result: watchResult(7), delayMs: Math.min(700, frame.args[0].timeoutMs) };
+        },
+        () => runWatchCli(
+          runtime,
+          ['watch', '--follow', '--heartbeat', '1', '--idle-after', '0', '--no-held-input'],
+          paneDir,
+          stdout => stdout.includes('HEARTBEAT gen 7 at '),
+        ),
+      );
+      assertIncludes(healthy.stdout, 'HEARTBEAT gen 7 at ');
+      assert.ok(healthyTimeouts.length >= 2, 'healthy follow must issue a second wait after the early response');
+      assert.ok(healthyTimeouts[1] <= 600, 'second wait must use the remaining heartbeat deadline');
+
+      let requestCount = 0;
+      const followRequests = [];
+      const follow = await withFakeDaemon(
+        paneDir,
+        (frame) => {
+          followRequests.push(frame.args[0]);
+          requestCount += 1;
+          if (requestCount === 2) return { destroy: true };
+          return { result: watchResult(requestCount === 1 ? 1 : 2), delayMs: requestCount >= 3 ? 1_100 : 0 };
+        },
+        () => runWatchCli(
+          runtime,
+          ['watch', '--follow', '--heartbeat', '1', '--idle-after', '0', '--no-held-input', '--timeout-ms', '1000'],
+          paneDir,
+          stdout => stdout.includes('WATCH RECONNECTED gen 2') && stdout.includes('HEARTBEAT gen 2 at '),
+        ),
+      );
+      const markers = follow.stdout.split(/\r?\n/).filter(Boolean).map((line) => {
+        if (line.startsWith('WATCH OK')) return 'OK';
+        if (line.startsWith('WATCH ERROR')) return 'ERROR';
+        if (line.startsWith('WATCH RECONNECTED')) return 'RECONNECTED';
+        if (line.startsWith('HEARTBEAT')) return 'HEARTBEAT';
+        return line;
+      });
+      assert.deepStrictEqual(markers.slice(0, 4), ['OK', 'ERROR', 'RECONNECTED', 'HEARTBEAT']);
+      assert.strictEqual(followRequests[0].idleWindowStartMs, 0);
+      assert.ok(followRequests[1].idleWindowStartMs > 0, 'anonymous follow must advance its idle window');
+
+      const cadenceRequests = [];
+      await withFakeDaemon(
+        paneDir,
+        (frame) => {
+          cadenceRequests.push(frame.args[0]);
+          return { result: watchResult(3), delayMs: 0 };
+        },
+        () => runWatchCli(
+          runtime,
+          ['watch', '--follow', '--heartbeat', '1', '--idle-after', '0', '--no-held-input', '--timeout-ms', '1000',
+            '--kinds', 'agent.ready,agent.blocked', '--settle', '180000', '--blocked-settle', '30000', '--min-interval', '600000', '--idle-backoff'],
+          paneDir,
+          stdout => stdout.includes('WATCH OK gen 3'),
+        ),
+      );
+      assert.deepStrictEqual(
+        {
+          settleMs: cadenceRequests[0].settleMs,
+          blockedSettleMs: cadenceRequests[0].blockedSettleMs,
+          minIntervalMs: cadenceRequests[0].minIntervalMs,
+          idleBackoff: cadenceRequests[0].idleBackoff,
+          kinds: cadenceRequests[0].kinds,
+        },
+        { settleMs: 180000, blockedSettleMs: 30000, minIntervalMs: 600000, idleBackoff: true, kinds: ['agent.ready', 'agent.blocked'] },
+      );
+      assert.ok(String(cadenceRequests[0].as).startsWith('follow-'), 'cadence follow must name its consumer');
+
+      const selfTestRequests = [];
+      await withFakeDaemon(
+        paneDir,
+        (frame) => {
+          selfTestRequests.push(frame.args[0]);
+          return { result: watchResult(4) };
+        },
+        () => runWatchCli(
+          runtime,
+          ['watch', '--follow', '--self-test', '--settle', '180000', '--min-interval', '600000', '--idle-backoff'],
+          paneDir,
+          stdout => stdout.includes('WATCH OK gen 4'),
+        ),
+      );
+      assert.strictEqual(selfTestRequests[0].as, undefined, 'self-test must stay anonymous so the daemon applies no cadence');
+
+      for (const badWatchArgs of [
+        ['watch', '--heartbeat', 'nope'],
+        ['watch', '--follow', '--settle', 'nope'],
+        ['watch', '--settle', '5'],
+        ['watch', '--follow', '--since', '42', '--settle', '180000'],
+      ]) {
+        const badWatch = spawnWatchCli(runtime, badWatchArgs);
+        assert.strictEqual(badWatch.status, 2, `${badWatchArgs.join(' ')} must fail`);
+        assertIncludes(badWatch.stdout, 'WATCH ERROR');
+        assertIncludes(badWatch.stderr, 'WATCH ERROR');
+      }
+    } finally {
+      fs.rmSync(paneDir, { recursive: true, force: true });
+    }
+  }
+}
+
+function spawnWatchCli(runtime, args) {
+  return runtime === 'npm'
+    ? childProcess.spawnSync(process.execPath, [npmCli, ...args], { encoding: 'utf8', env: { ...process.env, RUNPANE_TELEMETRY_DISABLED: '1' } })
+    : childProcess.spawnSync(findPython(), ['-m', 'runpane', ...args], {
+      encoding: 'utf8',
+      cwd: rootDir,
+      env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1', PYTHONPATH: pythonSource, RUNPANE_TELEMETRY_DISABLED: '1' },
+    });
+}
+
 function compareParserParity() {
   const { parseRunpaneArgs } = require(path.join(rootDir, 'packages', 'runpane', 'dist', 'commands.js'));
   const nodeOutput = parserSamples.map((args) => {
@@ -171,6 +575,30 @@ function compareParserParity() {
       pinned: parsed.pinned ?? false,
       noPinned: parsed.noPinned ?? false,
       composerStrategy: parsed.composerStrategy ?? null,
+      watchAs: parsed.watchAs ?? null,
+      watchSince: parsed.watchSince ?? null,
+      watchFrom: parsed.watchFrom ?? null,
+      watchKinds: parsed.watchKinds ?? [],
+      watchPaneIds: parsed.watchPaneIds ?? [],
+      watchExcludePaneIds: parsed.watchExcludePaneIds ?? [],
+      nameContains: parsed.nameContains ?? null,
+      follow: parsed.follow ?? false,
+      agentsOnly: parsed.agentsOnly ?? false,
+      ackNow: parsed.ackNow ?? false,
+      includeHeldInput: parsed.includeHeldInput ?? false,
+      watchFormat: parsed.watchFormat ?? null,
+      heartbeatSeconds: parsed.heartbeatSeconds ?? null,
+      idleAfterMs: parsed.idleAfterMs ?? null,
+      settleMs: parsed.settleMs ?? null,
+      blockedSettleMs: parsed.blockedSettleMs ?? null,
+      minIntervalMs: parsed.minIntervalMs ?? null,
+      idleBackoff: parsed.idleBackoff ?? false,
+      allManaged: parsed.allManaged ?? false,
+      includeShells: parsed.includeShells ?? false,
+      noHeldInput: parsed.noHeldInput ?? false,
+      selfTest: parsed.selfTest ?? false,
+      report: parsed.report ?? false,
+      bodyFile: parsed.bodyFile ?? null,
       remoteSetupArgs: parsed.remoteSetupArgs
     };
   });
@@ -228,6 +656,30 @@ for args in samples:
         "pinned": parsed.pinned,
         "noPinned": parsed.no_pinned,
         "composerStrategy": parsed.composer_strategy,
+        "watchAs": parsed.watch_as,
+        "watchSince": parsed.watch_since,
+        "watchFrom": parsed.watch_from,
+        "watchKinds": parsed.watch_kinds,
+        "watchPaneIds": parsed.watch_pane_ids,
+        "watchExcludePaneIds": parsed.watch_exclude_pane_ids,
+        "nameContains": parsed.name_contains,
+        "follow": parsed.follow,
+        "agentsOnly": parsed.agents_only,
+        "ackNow": parsed.ack_now,
+        "includeHeldInput": parsed.include_held_input,
+        "watchFormat": parsed.watch_format,
+        "heartbeatSeconds": parsed.heartbeat_seconds,
+        "idleAfterMs": parsed.idle_after_ms,
+        "settleMs": parsed.settle_ms,
+        "blockedSettleMs": parsed.blocked_settle_ms,
+        "minIntervalMs": parsed.min_interval_ms,
+        "idleBackoff": parsed.idle_backoff,
+        "allManaged": parsed.all_managed,
+        "includeShells": parsed.include_shells,
+        "noHeldInput": parsed.no_held_input,
+        "selfTest": parsed.self_test,
+        "report": parsed.report,
+        "bodyFile": parsed.body_file,
         "remoteSetupArgs": parsed.remote_setup_args,
     })
 print(json.dumps(normalized))
@@ -1245,6 +1697,246 @@ print(json.dumps({"calls": calls, "stdout": stdout.getvalue().splitlines(), "ref
   assert.strictEqual(python.pinConflictRefused, true);
 }
 
+async function checkPanesCostParity() {
+  const daemonClient = require(path.join(rootDir, 'packages', 'runpane', 'dist', 'daemonClient.js'));
+  const { parseRunpaneArgs } = require(path.join(rootDir, 'packages', 'runpane', 'dist', 'commands.js'));
+  const { runPanesCost } = require(path.join(rootDir, 'packages', 'runpane', 'dist', 'localControl.js'));
+  const totals = {
+    inputTokens: 100,
+    outputTokens: 20,
+    cacheReadTokens: 50,
+    cacheCreationTokens: 0,
+    totalTokens: 170,
+    messageCount: 1,
+    estimatedCostUsd: 0.004,
+    costIncomplete: false,
+    cacheSavingsUsd: 0.0001,
+  };
+  const model = { ...totals, model: 'claude-sonnet-5', provider: 'claude' };
+  const payload = {
+    ok: true,
+    fromMs: 1,
+    toMs: 2,
+    pricingAsOf: 'test',
+    panes: [{
+      ...totals,
+      paneId: 'p1',
+      paneName: 'Pane one',
+      worktreePath: '/tmp/p1',
+      repoId: 1,
+      archived: false,
+      createdAtMs: 1,
+      uncachedCostUsd: 0.003,
+      uncachedInputTokens: 100,
+      cacheHitRate: 0.25,
+      byModel: [model],
+    }],
+    unattributed: {
+      ...totals,
+      uncachedCostUsd: 0.003,
+      uncachedInputTokens: 100,
+      cacheHitRate: 0.25,
+      byModel: [model],
+    },
+    totals,
+  };
+  const incompleteModel = { ...model, estimatedCostUsd: 0, costIncomplete: true };
+  const incompletePayload = {
+    ...payload,
+    panes: payload.panes.map((pane) => ({
+      ...pane,
+      estimatedCostUsd: 0,
+      costIncomplete: true,
+      byModel: [incompleteModel],
+    })),
+    unattributed: {
+      ...payload.unattributed,
+      estimatedCostUsd: 0,
+      costIncomplete: true,
+      byModel: [incompleteModel],
+    },
+    totals: { ...totals, estimatedCostUsd: 0, costIncomplete: true },
+  };
+  const originalInvokeDaemon = daemonClient.invokeDaemon;
+  const originalConsoleLog = console.log;
+  const calls = [];
+  const jsonOutputs = [];
+  const textOutput = [];
+  const incompleteTextOutput = [];
+  daemonClient.invokeDaemon = async (channel, args) => {
+    calls.push({ channel, request: args[0] });
+    return calls.length === 5 ? incompletePayload : payload;
+  };
+  try {
+    for (const args of [
+      ['panes', 'cost', '--json'],
+      ['panes', 'cost', '--pane', 'p1', '--json'],
+      ['panes', 'cost', '--repo', 'active', '--json'],
+    ]) {
+      console.log = line => jsonOutputs.push(String(line));
+      await runPanesCost(parseRunpaneArgs(args));
+    }
+    console.log = line => textOutput.push(String(line));
+    await runPanesCost(parseRunpaneArgs(['panes', 'cost']));
+    console.log = line => incompleteTextOutput.push(String(line));
+    await runPanesCost(parseRunpaneArgs(['panes', 'cost']));
+  } finally {
+    daemonClient.invokeDaemon = originalInvokeDaemon;
+    console.log = originalConsoleLog;
+  }
+
+  const python = JSON.parse(runPythonSnippet(`
+import contextlib
+import io
+import json
+import runpane.local_control as local_control
+from runpane.cli import parse_args
+
+payload = json.loads(${JSON.stringify(JSON.stringify(payload))})
+incomplete_payload = json.loads(${JSON.stringify(JSON.stringify(incompletePayload))})
+calls = []
+def fake_invoke(channel, args, **kwargs):
+    calls.append({"channel": channel, "request": args[0]})
+    return incomplete_payload if len(calls) == 5 else payload
+
+local_control.invoke_daemon = fake_invoke
+json_outputs = []
+for args in [
+    ["panes", "cost", "--json"],
+    ["panes", "cost", "--pane", "p1", "--json"],
+    ["panes", "cost", "--repo", "active", "--json"],
+]:
+    stdout = io.StringIO()
+    with contextlib.redirect_stdout(stdout):
+        local_control.run_panes_cost(parse_args(args))
+    json_outputs.append(stdout.getvalue().rstrip("\\n"))
+
+stdout = io.StringIO()
+with contextlib.redirect_stdout(stdout):
+    local_control.run_panes_cost(parse_args(["panes", "cost"]))
+incomplete_stdout = io.StringIO()
+with contextlib.redirect_stdout(incomplete_stdout):
+    local_control.run_panes_cost(parse_args(["panes", "cost"]))
+print(json.dumps({"calls": calls, "jsonOutputs": json_outputs, "textOutput": stdout.getvalue().splitlines(), "incompleteTextOutput": incomplete_stdout.getvalue().splitlines()}))
+`));
+
+  assert.strictEqual(calls.length, 5);
+  assert.ok(calls.every(call => call.channel === 'runpane:panes:cost'));
+  const nodeCalls = JSON.parse(JSON.stringify(calls));
+  assert.deepStrictEqual(nodeCalls.slice(0, 3), [
+    { channel: 'runpane:panes:cost', request: {} },
+    { channel: 'runpane:panes:cost', request: { paneId: 'p1' } },
+    { channel: 'runpane:panes:cost', request: { repo: 'active' } },
+  ]);
+  assert.deepStrictEqual(python.calls, nodeCalls);
+  const paneCostRequestSchema = contract.jsonSchemas.paneCostRequest;
+  for (const [index, call] of [...nodeCalls, ...python.calls].entries()) {
+    assertMatchesJsonSchema(call.request, paneCostRequestSchema, `panes cost request ${index + 1}`);
+  }
+  assertMatchesJsonSchema({ repo: { active: true } }, paneCostRequestSchema, 'object repo selector');
+  assert.strictEqual(matchesJsonSchema({ repo: 1 }, paneCostRequestSchema), false);
+  assert.deepStrictEqual(python.jsonOutputs, jsonOutputs);
+  assert.ok(textOutput.some(line => line.includes('p1\tPane one')));
+  assert.ok(textOutput.some(line => line.includes('  claude-sonnet-5')));
+  assert.deepStrictEqual(python.textOutput, textOutput);
+  assert.ok(incompleteTextOutput.some(line => line.includes('p1\tPane one\tn/a uncached\tn/a total')));
+  assert.ok(incompleteTextOutput.some(line => line.includes('Unattributed\tn/a uncached\tn/a total')));
+  assert.ok(incompleteTextOutput.some(line => line.includes('Total\tn/a\t')));
+  assert.deepStrictEqual(python.incompleteTextOutput, incompleteTextOutput);
+}
+
+async function checkPaneArchiveDryRunParity() {
+  const daemonClient = require(path.join(rootDir, 'packages', 'runpane', 'dist', 'daemonClient.js'));
+  const { parseRunpaneArgs } = require(path.join(rootDir, 'packages', 'runpane', 'dist', 'commands.js'));
+  const { runPanesArchive } = require(path.join(rootDir, 'packages', 'runpane', 'dist', 'localControl.js'));
+  const result = {
+    ok: true,
+    paneId: 'session-1',
+    dryRun: true,
+    wouldArchive: false,
+    forced: false,
+    safetyCheck: {
+      performed: true,
+      hasUpstream: true,
+      upstream: 'origin/main',
+      upstreamRefreshed: true,
+      unpushedCommits: 1,
+      unpushedCommitDetails: [{ sha: 'abc123', subject: 'local change' }],
+    },
+    blocked: {
+      code: 'unpushed-commits',
+      message: 'Pane has 1 commit not pushed to any remote.',
+      safetyCheck: {
+        performed: true,
+        hasUpstream: true,
+        upstream: 'origin/main',
+        upstreamRefreshed: true,
+        unpushedCommits: 1,
+        unpushedCommitDetails: [{ sha: 'abc123', subject: 'local change' }],
+      },
+    },
+  };
+  const originalInvokeDaemon = daemonClient.invokeDaemon;
+  const originalConsoleLog = console.log;
+  const calls = [];
+  const stdout = [];
+  daemonClient.invokeDaemon = async (channel, args) => {
+    calls.push({ channel, request: args[0] });
+    return result;
+  };
+  console.log = line => stdout.push(String(line));
+
+  try {
+    await runPanesArchive(parseRunpaneArgs(['panes', 'archive', '--pane', 'session-1', '--dry-run', '--json']));
+    await runPanesArchive(parseRunpaneArgs(['panes', 'archive', '--pane', 'session-1', '--dry-run']));
+  } finally {
+    daemonClient.invokeDaemon = originalInvokeDaemon;
+    console.log = originalConsoleLog;
+  }
+
+  assert.deepStrictEqual(calls, [{
+    channel: 'runpane:panes:archive',
+    request: { paneId: 'session-1', dryRun: true },
+  }, {
+    channel: 'runpane:panes:archive',
+    request: { paneId: 'session-1', dryRun: true },
+  }]);
+  assert.deepStrictEqual(JSON.parse(stdout[0]), result);
+  assertIncludes(stdout.slice(1).join('\n'), 'Would refuse to archive pane session-1.');
+  assertIncludes(stdout.slice(1).join('\n'), 'Upstream: origin/main (refreshed)');
+  assertIncludes(stdout.slice(1).join('\n'), 'Unpushed: abc123 local change');
+
+  const pythonOutput = runPythonSnippet(`
+import contextlib
+import io
+import json
+import runpane.local_control as local_control
+from runpane.cli import parse_args
+
+result = json.loads(${JSON.stringify(JSON.stringify(result))})
+calls = []
+def fake_invoke(channel, args, **kwargs):
+    calls.append({"channel": channel, "request": args[0]})
+    return result
+
+local_control.invoke_daemon = fake_invoke
+stdout = io.StringIO()
+with contextlib.redirect_stdout(stdout):
+    local_control.run_panes_archive(parse_args(["panes", "archive", "--pane", "session-1", "--dry-run", "--json"]))
+    local_control.run_panes_archive(parse_args(["panes", "archive", "--pane", "session-1", "--dry-run"]))
+print(json.dumps({"calls": calls, "stdout": stdout.getvalue().splitlines()}))
+`);
+  const python = JSON.parse(pythonOutput);
+  assert.deepStrictEqual(python.calls, JSON.parse(JSON.stringify(calls)));
+  const humanOutputIndex = python.stdout.indexOf('Would refuse to archive pane session-1.');
+  assert.ok(humanOutputIndex > 0);
+  assert.deepStrictEqual(JSON.parse(python.stdout.slice(0, humanOutputIndex).join('\n')), result);
+  const pythonHumanOutput = python.stdout.slice(humanOutputIndex).join('\n');
+  assertIncludes(pythonHumanOutput, 'Would refuse to archive pane session-1.');
+  assertIncludes(pythonHumanOutput, 'Upstream: origin/main (refreshed)');
+  assertIncludes(pythonHumanOutput, 'Unpushed: abc123 local change');
+}
+
 async function checkPaneRenameParity() {
   const daemonClient = require(path.join(rootDir, 'packages', 'runpane', 'dist', 'daemonClient.js'));
   const { parseRunpaneArgs } = require(path.join(rootDir, 'packages', 'runpane', 'dist', 'commands.js'));
@@ -1378,6 +2070,7 @@ function checkHelpOutput() {
   for (const output of [nodePanesHelp, pyPanesHelp]) {
     assertIncludes(output, 'Pane session commands.');
     assertIncludes(output, 'runpane panes list');
+    assertIncludes(output, 'runpane panes cost');
     assertIncludes(output, 'runpane panes create');
     assertIncludes(output, 'runpane panes pin');
     assertIncludes(output, 'runpane panes unpin');
@@ -1512,6 +2205,8 @@ function compareAgentContextParity() {
   assert.ok(managedBlock.includes('Do not hardcode a specific assistant brand'));
   assert.ok(managedBlock.includes('Pane agent or custom tool command the user selected'));
   assert.ok(managedBlock.includes('do not clone/install the repo unless the user asks'));
+  assert.ok(managedBlock.includes('runpane watch --follow'));
+  assert.ok(managedBlock.includes('For ongoing supervision'));
 
   const nodeDottedDetail = JSON.parse(runNode(['agent-context', '--command', 'panes.create', '--json']));
   const pyDottedDetail = JSON.parse(runPython(['agent-context', '--command', 'panes.create', '--json']));
@@ -1551,6 +2246,199 @@ function checkNoArgsAndSetupFallback() {
     assertIncludes(output, 'runpane agent-context --json');
     assertIncludes(output, 'Agent discovery:');
     assertIncludes(output, 'Quick start:');
+  }
+}
+
+function checkDoctorReportSafety() {
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'runpane-report-test-'));
+  const evidencePath = path.join(temporaryDirectory, 'evidence.txt');
+  const ghLog = path.join(temporaryDirectory, 'gh.log');
+  const binDirectory = path.join(temporaryDirectory, 'bin');
+  fs.mkdirSync(binDirectory);
+  const evidence = [
+    'command: runpane watch --follow',
+    'exit: 2',
+    `path: ${os.homedir()}/.pane`,
+    'Authorization: Bearer do-not-leak',
+    'api_key=also-secret',
+    'OPENAI_API_KEY=sk-prefixed-secret',
+    'GH_TOKEN="two word secret"',
+    'Authorization=Bearer assignment-secret',
+    'authToken=camel-secret',
+    'url=https://example.test/path?token=secret&next=value',
+    '```',
+    '![untrusted](https://example.test/tracker.png)',
+  ].join('\n');
+  fs.writeFileSync(evidencePath, evidence);
+  const fakeDoctor = {
+    ok: false,
+    source: 'npm',
+    wrapper: {
+      runtime: 'node',
+      version: '2.4.80',
+      paneDir: `${os.homedir()}/.pane`,
+      endpoint: { transport: 'unix', path: `${os.homedir()}/.pane/daemon.sock` },
+    },
+    platform: { os: 'linux', arch: 'x64' },
+    release: { ok: false, error: 'offline' },
+    installedPane: { found: false },
+    daemon: {
+      reachable: false,
+      endpoint: { transport: 'unix', path: `${os.homedir()}/.pane/daemon.sock` },
+      error: 'daemon unreachable',
+    },
+    remoteDaemonService: {
+      paneDir: `${os.homedir()}/.pane`,
+      managed: false,
+      reachable: false,
+      endpoint: { transport: 'unix', path: `${os.homedir()}/.pane/daemon.sock` },
+    },
+    remoteSetup: { ready: true, displayAvailable: true, headlessEnvironmentApplied: false, diagnostics: [] },
+    nextCommands: [],
+  };
+  const doctor = require(path.join(rootDir, 'packages', 'runpane', 'dist', 'doctor.js'));
+  const requestedTitle = 'watch failed GITHUB_TOKEN=title-secret';
+  const parsed = { bodyFile: evidencePath, title: requestedTitle };
+  const first = doctor.prepareDoctorFailureReport(parsed, fakeDoctor);
+  const second = doctor.prepareDoctorFailureReport(parsed, fakeDoctor);
+  const safeTitle = doctor.prepareDoctorFailureReport({ bodyFile: evidencePath, title: 'watch failed' }, fakeDoctor);
+  let pythonReportPath;
+
+  try {
+    assert.strictEqual(first.sha256, second.sha256, 'doctor report hash must be deterministic');
+    assert.strictEqual(first.filed, false);
+    if (process.platform !== 'win32') {
+      assert.strictEqual(fs.statSync(first.path).mode & 0o777, 0o600);
+    }
+    const contents = fs.readFileSync(first.path, 'utf8');
+    assert.ok(contents.includes('daemon unreachable'));
+    assert.ok(contents.includes('~/.pane'));
+    assert.ok(!contents.includes(os.homedir()));
+    assert.ok(!contents.includes('do-not-leak'));
+    assert.ok(!contents.includes('also-secret'));
+    assert.ok(!contents.includes('sk-prefixed-secret'));
+    assert.ok(!contents.includes('two word secret'));
+    assert.ok(!contents.includes('assignment-secret'));
+    assert.ok(!contents.includes('camel-secret'));
+    assert.ok(!contents.includes('title-secret'));
+    assert.ok(!contents.includes('token=secret'));
+    assert.match(contents, /```\n!\[untrusted\]\([^\n]+\)\n`{4,}\n/u);
+    assert.strictEqual(first.redactionCount, safeTitle.redactionCount + 1, 'title secret must count exactly once');
+    assert.ok(!first.title.includes('title-secret'));
+    assert.ok(!first.proposedCommand.includes('title-secret'));
+    assert.ok(!fs.existsSync(ghLog), 'report preparation must not invoke gh');
+
+    const pythonPrepared = JSON.parse(runPythonSnippet(`
+import json
+import sys
+from types import SimpleNamespace
+from runpane.doctor import prepare_doctor_failure_report
+
+request = json.loads(sys.stdin.read())
+parsed = SimpleNamespace(body_file=request["bodyFile"], title=request["title"])
+print(json.dumps(prepare_doctor_failure_report(parsed, request["doctor"])))
+`, JSON.stringify({ bodyFile: evidencePath, title: requestedTitle, doctor: fakeDoctor })));
+    if (process.platform !== 'win32') {
+      assert.strictEqual(fs.statSync(pythonPrepared.path).mode & 0o777, 0o600);
+    }
+    pythonReportPath = pythonPrepared.path;
+    assert.strictEqual(pythonPrepared.sha256, first.sha256, 'npm and pip report bodies must match');
+    assert.strictEqual(pythonPrepared.redactionCount, first.redactionCount);
+
+    let restoreSpawnSync = () => {};
+    if (process.platform === 'win32') {
+      const originalSpawnSync = childProcess.spawnSync;
+      childProcess.spawnSync = (command, args) => {
+        assert.strictEqual(command, 'gh');
+        const commandArgs = Array.isArray(args) ? args : [];
+        fs.appendFileSync(ghLog, `${commandArgs.join('\n')}\n--call--\n`);
+        return {
+          status: 0,
+          stdout: commandArgs[0] === 'auth' ? '' : 'https://github.com/greenfield-inc/Pane/issues/999\n',
+          stderr: '',
+        };
+      };
+      restoreSpawnSync = () => {
+        childProcess.spawnSync = originalSpawnSync;
+      };
+    } else {
+      const stubPath = path.join(binDirectory, 'gh');
+      fs.writeFileSync(stubPath, [
+        '#!/bin/sh',
+        'printf "%s\\n" "$@" >> "$RUNPANE_GH_LOG"',
+        'printf "%s\\n" "--call--" >> "$RUNPANE_GH_LOG"',
+        '[ "$1" = "auth" ] && exit 0',
+        'printf "%s\\n" "https://github.com/greenfield-inc/Pane/issues/999"',
+      ].join('\n'), { mode: 0o755 });
+    }
+
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${binDirectory}${path.delimiter}${originalPath || ''}`;
+    process.env.RUNPANE_GH_LOG = ghLog;
+    try {
+      doctor.fileDoctorFailureReport(first);
+      assert.strictEqual(first.filed, true);
+      assert.strictEqual(first.issueUrl, 'https://github.com/greenfield-inc/Pane/issues/999');
+      const log = fs.readFileSync(ghLog, 'utf8');
+      const calls = log.split(/--call--\r?\n/u).map(call => call.trim().split(/\r?\n/u)).filter(call => call[0]);
+      assert.deepStrictEqual(calls[0], ['auth', 'status']);
+      assert.strictEqual(calls.length, 2, 'confirmed filing must authenticate once and create once');
+      assert.ok(log.includes('--body-file'));
+      assert.ok(log.includes(first.path));
+      assert.ok(!log.includes('do-not-leak'));
+      assert.ok(!log.includes('also-secret'));
+      assert.ok(!log.includes('title-secret'));
+      assert.strictEqual((log.match(/^issue$/gm) || []).length, 1, 'confirmed filing must create one issue');
+
+      fs.writeFileSync(ghLog, '');
+      const pythonWindowsSpawnStub = process.platform === 'win32' ? `
+import os
+import runpane.doctor as doctor_module
+from types import SimpleNamespace
+
+def fake_run(args, **_kwargs):
+    with open(os.environ["RUNPANE_GH_LOG"], "a", encoding="utf-8") as log:
+        log.write("\\n".join(args[1:]) + "\\n--call--\\n")
+    return SimpleNamespace(
+        returncode=0,
+        stdout="" if args[1] == "auth" else "https://github.com/greenfield-inc/Pane/issues/999\\n",
+        stderr="",
+    )
+
+doctor_module.subprocess.run = fake_run
+` : '';
+      const pythonFiled = JSON.parse(runPythonSnippet(`
+import json
+import sys
+from runpane.doctor import file_doctor_failure_report
+${pythonWindowsSpawnStub}
+
+prepared = json.loads(sys.stdin.read())
+file_doctor_failure_report(prepared)
+print(json.dumps(prepared))
+`, JSON.stringify(pythonPrepared)));
+      assert.strictEqual(pythonFiled.filed, true);
+      assert.strictEqual(pythonFiled.issueUrl, 'https://github.com/greenfield-inc/Pane/issues/999');
+      const pythonLog = fs.readFileSync(ghLog, 'utf8');
+      const pythonCalls = pythonLog.split(/--call--\r?\n/u).map(call => call.trim().split(/\r?\n/u)).filter(call => call[0]);
+      assert.deepStrictEqual(pythonCalls[0], ['auth', 'status']);
+      assert.strictEqual(pythonCalls.length, 2, 'Python filing must authenticate once and create once');
+      assert.ok(pythonLog.includes('--body-file'));
+      assert.ok(pythonLog.includes(pythonPrepared.path));
+      assert.ok(!pythonLog.includes('title-secret'));
+      assert.strictEqual((pythonLog.match(/^issue$/gm) || []).length, 1, 'Python filing must create one issue');
+    } finally {
+      restoreSpawnSync();
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      delete process.env.RUNPANE_GH_LOG;
+    }
+  } finally {
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+    fs.rmSync(path.dirname(first.path), { recursive: true, force: true });
+    fs.rmSync(path.dirname(second.path), { recursive: true, force: true });
+    fs.rmSync(path.dirname(safeTitle.path), { recursive: true, force: true });
+    if (pythonReportPath) fs.rmSync(path.dirname(pythonReportPath), { recursive: true, force: true });
   }
 }
 
@@ -1602,6 +2490,8 @@ async function runChecks() {
   checkGeneratedContractFresh();
   ensureBuiltCli();
   compareParserParity();
+  checkWatchFormatterGoldens();
+  await checkWatchStreamParity();
   compareLegacyRemoteDaemonHealthParity();
   compareDaemonRepairJsonParity();
   await checkLinuxPackageCompatibilityAlias();
@@ -1619,13 +2509,16 @@ async function runChecks() {
   await checkExistingDaemonShortCircuit();
   checkWindowsPaneVersionDoesNotLaunchExecutable();
   await checkFromJsonAcceptsBom();
+  await checkPaneArchiveDryRunParity();
   await checkPanePinParity();
+  await checkPanesCostParity();
   await checkPaneRenameParity();
   await checkAgentTemplateParity();
   checkHelpOutput();
   compareAgentContextParity();
   await checkNodeReleaseTimeout();
   checkNoArgsAndSetupFallback();
+  checkDoctorReportSafety();
   console.log('runpane CLI contract checks passed');
 }
 

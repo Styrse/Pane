@@ -1,5 +1,5 @@
 import React, { useCallback, memo, useState, useRef, useEffect, useMemo } from 'react';
-import { Plus, X, Terminal, ChevronDown, GitBranch, FileCode, BarChart3, PanelRight, FolderTree, TerminalSquare, Play, Globe } from 'lucide-react';
+import { Plus, X, Terminal, GitBranch, FileCode, FileDiff, FileText, BarChart3, PanelRight, FolderTree, TerminalSquare, Play, Globe } from 'lucide-react';
 import { createPortal } from 'react-dom';
 import { cn } from '../../utils/cn';
 import { useHotkey } from '../../hooks/useHotkey';
@@ -10,6 +10,8 @@ import { useConfigStore } from '../../stores/configStore';
 import { formatKeyDisplay } from '../../utils/hotkeyUtils';
 import { useHotkeyStore } from '../../stores/hotkeyStore';
 import { Tooltip } from '../ui/Tooltip';
+import { useTitleBarSlotStore } from '../../stores/titleBarSlotStore';
+import { editorPanelState } from '../../services/openFileInEditor';
 import { Kbd } from '../ui/Kbd';
 import { CLI_BRAND_ICONS, getCliBrandIcon } from '../ui/brandIconRegistry';
 import { visibleAgentPresets } from '../../utils/agentPresets';
@@ -61,12 +63,43 @@ Analyze this project's actual framework and structure first, then create the com
 IMPORTANT: After creating the script, TEST THE RESTART PATH — run 'node scripts/pane-run-script.js', then kill it ungracefully (Ctrl+C or kill the terminal), then run it again. It must reclaim the same port without EADDRINUSE or lock file errors. A single happy-path run proves nothing. Then commit and merge to main so all future worktrees have it.`;
 }
 
+function getPanelIcon(type: ToolPanelType, panel?: ToolPanel) {
+  // Check for brand-specific terminal panels by title
+  if (type === 'terminal' && panel) {
+    const title = panel.title.toLowerCase();
+    for (const [keyword, IconComponent] of Object.entries(CLI_BRAND_ICONS)) {
+      if (title.includes(keyword)) {
+        return <IconComponent className="w-4 h-4" />;
+      }
+    }
+  }
+  switch (type) {
+    case 'terminal':
+      return <Terminal className="w-4 h-4" />;
+    case 'diff':
+      return <GitBranch className="w-4 h-4" />;
+    case 'explorer':
+      return <FolderTree className="w-4 h-4" />;
+    case 'editor':
+      return panel && editorPanelState(panel)?.diff ? <FileDiff className="w-4 h-4" /> : <FileText className="w-4 h-4" />;
+    case 'logs':
+      return <FileCode className="w-4 h-4" />;
+    case 'dashboard':
+      return <BarChart3 className="w-4 h-4" />;
+    case 'browser':
+      return <Globe className="w-4 h-4" />;
+    default:
+      return null;
+  }
+}
+
 export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
   panels,
   activePanel,
   onPanelSelect,
   onPanelClose,
   onPanelCreate,
+  onShowExplorer,
   projectEnvironment,
   context = 'worktree',  // Default to worktree for backward compatibility
   onToggleDetailPanel,
@@ -98,6 +131,9 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
   const addToolButtonRef = useRef<HTMLButtonElement>(null);
   const dropdownMenuRef = useRef<HTMLDivElement>(null);
   const [dropdownStyle, setDropdownStyle] = useState<React.CSSProperties>({});
+  // A group strip's "+" opens this same menu, anchored to that button instead.
+  const externalAnchorRef = useRef<DOMRect | null>(null);
+  const trailingSlot = useTitleBarSlotStore((state) => state.trailingSlot);
   // Rename state moved to PanelTabStrip
   const [showCustomInput, setShowCustomInput] = useState(false);
   const [customCommand, setCustomCommand] = useState('');
@@ -165,7 +201,7 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
     if (!showDropdown || !dropdownRef.current) return;
     const updatePosition = () => {
       if (!dropdownRef.current) return;
-      const rect = dropdownRef.current.getBoundingClientRect();
+      const rect = externalAnchorRef.current ?? dropdownRef.current.getBoundingClientRect();
       const width = Math.min(
         ADD_TOOL_MENU_WIDTH,
         window.innerWidth - (ADD_TOOL_MENU_VIEWPORT_MARGIN * 2),
@@ -239,6 +275,20 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
       document.addEventListener('mousedown', handleClickOutside);
       return () => document.removeEventListener('mousedown', handleClickOutside);
     }
+  }, [showDropdown]);
+
+  // Group strips ask for the menu with their own "+" as the anchor.
+  useEffect(() => {
+    const handleOpenRequest = (event: Event) => {
+      if (!(event instanceof CustomEvent)) return;
+      externalAnchorRef.current = event.detail?.rect ?? null;
+      setShowDropdown(true);
+    };
+    window.addEventListener('pane:open-add-tool', handleOpenRequest);
+    return () => window.removeEventListener('pane:open-add-tool', handleOpenRequest);
+  }, []);
+  useEffect(() => {
+    if (!showDropdown) externalAnchorRef.current = null;
   }, [showDropdown]);
 
   // Auto-focus custom command input when shown
@@ -364,8 +414,8 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
       // Exclude permanent panels
       if (capabilities.permanent) return false;
 
-      // Exclude logs panel - it's only created automatically when running scripts
-      if (type === 'logs') return false;
+      // Logs is created by running scripts; editor tabs by opening files
+      if (type === 'logs' || type === 'editor') return false;
 
       // Enforce singleton panels
       if (capabilities.singleton) {
@@ -376,33 +426,6 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
       return true;
     });
   
-  const getPanelIcon = (type: ToolPanelType, panel?: ToolPanel) => {
-    // Check for brand-specific terminal panels by title
-    if (type === 'terminal' && panel) {
-      const title = panel.title.toLowerCase();
-      for (const [keyword, IconComponent] of Object.entries(CLI_BRAND_ICONS)) {
-        if (title.includes(keyword)) {
-          return <IconComponent className="w-4 h-4" />;
-        }
-      }
-    }
-    switch (type) {
-      case 'terminal':
-        return <Terminal className="w-4 h-4" />;
-      case 'diff':
-        return <GitBranch className="w-4 h-4" />;
-      case 'explorer':
-        return <FolderTree className="w-4 h-4" />;
-      case 'logs':
-        return <FileCode className="w-4 h-4" />;
-      case 'dashboard':
-        return <BarChart3 className="w-4 h-4" />;
-      case 'browser':
-        return <Globe className="w-4 h-4" />;
-      default:
-        return null;
-    }
-  };
 
   // Whether a tab drag is hovering the bar (drives the un-split affordance)
   const [dragOverBar, setDragOverBar] = useState(false);
@@ -425,254 +448,7 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
     });
   }, [panels]);
 
-  return (
-    <>
-    <div className="panel-tab-bar bg-bg-chrome flex-shrink-0">
-      {/* Flex container */}
-      <div
-        className="relative flex items-center min-h-[var(--panel-tab-height)] px-2"
-        onDragOver={tabsInGroups && isTabDragging ? () => setDragOverBar(true) : undefined}
-        onDragLeave={tabsInGroups && isTabDragging ? () => setDragOverBar(false) : undefined}
-      >
-        {/* Un-split affordance: dropping a tab on the top bar while split
-            merges every group back into the primary group. Advertise that
-            while a drag hovers the bar (pointer-events-none so drops pass
-            through to the strip). */}
-        {tabsInGroups && isTabDragging && dragOverBar && (
-          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] bg-surface-primary border border-[color-mix(in_srgb,var(--color-interactive-primary)_40%,transparent)] text-text-secondary shadow-dropdown">
-              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-                <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" />
-                <line x1="8" y1="2.5" x2="8" y2="13.5" strokeDasharray="2 2" opacity="0.5" />
-                <path d="M5.5 8h5M9 6.5 10.5 8 9 9.5" />
-              </svg>
-              Drop to merge all tabs back here
-            </span>
-          </div>
-        )}
-        {/* Scrollable tab area — delegated to PanelTabStrip. When the pane is
-            split, SessionView passes only the primary group's permanent tabs
-            here (working tabs live in the group strips); shortcut hints are
-            disabled then because the strip shows a subset and the 1-9 indexes
-            would lie. */}
-        <PanelTabStrip
-          idNamespace="top"
-          panels={primaryGroupPanels ?? sortedPanels}
-          activePanelId={primaryGroupActivePanelId !== undefined ? primaryGroupActivePanelId : (activePanel?.id ?? null)}
-          onPanelSelect={handlePanelClick}
-          onPanelClose={handlePanelClose}
-          isPrimary
-          isFocused={primaryGroupFocused ?? true}
-          showShortcutHints={!tabsInGroups}
-          onDragStart={onDragStart}
-          onDragEnd={onDragEnd}
-          onStripDrop={onStripDrop}
-          isTabDragging={isTabDragging}
-          draggedPanelId={draggedPanelId}
-          getPanelTabPresentation={getPanelTabPresentation}
-        />
-
-        {/* Add Panel dropdown button - outside overflow container so dropdown isn't clipped */}
-        <div className="relative h-[var(--panel-tab-height)] flex items-center flex-shrink-0" ref={dropdownRef}>
-          <Tooltip content={hotkeyDisplay('open-add-tool') ? <Kbd>{hotkeyDisplay('open-add-tool')}</Kbd> : undefined} side="bottom">
-            <button
-              ref={addToolButtonRef}
-              type="button"
-              className="inline-flex items-center h-[var(--panel-tab-height)] px-3 text-sm text-text-tertiary hover:text-text-primary hover:bg-surface-hover rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring-subtle"
-              onClick={() => setShowDropdown(!showDropdown)}
-              onKeyDown={(e) => {
-                if (e.key === 'ArrowDown' && !showDropdown) {
-                  e.preventDefault();
-                  setShowDropdown(true);
-                }
-              }}
-              aria-haspopup="menu"
-              aria-expanded={showDropdown}
-            >
-              <Plus className="w-4 h-4 mr-1" />
-              Add Tool
-              <ChevronDown className="w-3 h-3 ml-1" />
-            </button>
-          </Tooltip>
-
-          {showDropdown && (() => {
-            // Track ref index for keyboard navigation
-            let refIndex = 0;
-            const menuItemClass = "flex items-start w-full px-4 py-2 text-sm text-text-secondary transition-colors hover:bg-surface-hover hover:text-text-primary focus:bg-surface-hover focus:text-text-primary focus:outline-none text-left";
-
-            return createPortal(
-            <div
-              ref={dropdownMenuRef}
-              className="bg-surface-primary border border-border-primary rounded shadow-dropdown z-50 animate-dropdown-enter"
-              style={dropdownStyle}
-              role="menu"
-              onKeyDown={handleDropdownKeyDown}
-            >
-              {/* Terminal - plain terminal */}
-              {availablePanelTypes.includes('terminal') && (
-                <button
-                  ref={(el) => { dropdownItemsRef.current[refIndex++] = el; }}
-                  role="menuitem"
-                  className={menuItemClass}
-                  onClick={() => handleAddPanel('terminal')}
-                >
-                  <Terminal className="w-4 h-4 flex-shrink-0 mt-0.5" />
-                  <span className="ml-2 flex-1 min-w-0">
-                    <span className="block">Terminal</span>
-                    {hotkeyDisplay('add-tool-terminal') && <Kbd size="xs" variant="muted" className="mt-1 origin-left scale-[0.7]">{hotkeyDisplay('add-tool-terminal')}</Kbd>}
-                  </span>
-                </button>
-              )}
-              {/* Explorer */}
-              {availablePanelTypes.includes('explorer') && (
-                <button
-                  ref={(el) => { dropdownItemsRef.current[refIndex++] = el; }}
-                  role="menuitem"
-                  className={menuItemClass}
-                  onClick={() => handleAddPanel('explorer')}
-                >
-                  <FolderTree className="w-4 h-4 flex-shrink-0 mt-0.5" />
-                  <span className="ml-2 flex-1 min-w-0">
-                    <span className="block">Explorer</span>
-                    {hotkeyDisplay('add-tool-explorer') && <Kbd size="xs" variant="muted" className="mt-1 origin-left scale-[0.7]">{hotkeyDisplay('add-tool-explorer')}</Kbd>}
-                  </span>
-                </button>
-              )}
-              {/* Built-in agents */}
-              {availablePanelTypes.includes('terminal') && agentPresets.map(preset => (
-                <button
-                  key={preset.id}
-                  ref={(el) => { dropdownItemsRef.current[refIndex++] = el; }}
-                  role="menuitem"
-                  className={menuItemClass}
-                  onClick={() => handleAddPanel('terminal', {
-                    initialCommand: preset.command,
-                    title: preset.title
-                  })}
-                >
-                  {getCliBrandIcon(preset.iconKey, 'w-4 h-4 flex-shrink-0 mt-0.5')}
-                  <span className="ml-2 flex-1 min-w-0">
-                    <span className="block">{preset.title}</span>
-                    {hotkeyDisplay(preset.hotkeyId) && <Kbd size="xs" variant="muted" className="mt-1 origin-left scale-[0.7]">{hotkeyDisplay(preset.hotkeyId)}</Kbd>}
-                  </span>
-                </button>
-              ))}
-              {/* Saved custom commands */}
-              {availablePanelTypes.includes('terminal') && customCommands.map((cmd, index) => {
-                const currentRefIndex = refIndex++;
-                const shortcutDisplay = hotkeyDisplay(`add-tool-custom-${index}`);
-                const displayName = truncateCustomCommandLabel(cmd.name);
-                return (
-                <div key={`custom-${index}`} role="none" className="flex min-w-0 items-center">
-                  <Tooltip
-                    content={(
-                      <span className="block max-w-[min(32rem,calc(100vw-1rem))] whitespace-normal break-words">
-                        <span className="block">{cmd.command}</span>
-                        <span className="mt-1 block text-xs text-text-tertiary">Delete or Backspace to remove</span>
-                      </span>
-                    )}
-                    side="bottom"
-                  >
-                    <button
-                      ref={(el) => { dropdownItemsRef.current[currentRefIndex] = el; }}
-                      type="button"
-                      role="menuitem"
-                      className={cn(menuItemClass, 'min-w-0 flex-1')}
-                      onClick={() => handleAddPanel('terminal', {
-                        initialCommand: cmd.command,
-                        title: cmd.name
-                      })}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Delete' || e.key === 'Backspace') {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          deleteCustomCommand(index);
-                        }
-                      }}
-                    >
-                      {getCliBrandIcon(cmd.command, 'w-4 h-4 flex-shrink-0 mt-0.5') || <TerminalSquare className="w-4 h-4 flex-shrink-0 mt-0.5" />}
-                      <span className="ml-2 min-w-0 flex-1">
-                        <span className="block truncate">{displayName}</span>
-                        {shortcutDisplay && <Kbd size="xs" variant="muted" className="mt-1 origin-left scale-[0.7]">{shortcutDisplay}</Kbd>}
-                      </span>
-                    </button>
-                  </Tooltip>
-                  <button
-                    type="button"
-                    className="p-1 mr-2 rounded hover:bg-surface-hover text-text-muted hover:text-text-primary transition-colors flex-shrink-0"
-                    onClick={() => deleteCustomCommand(index)}
-                    aria-label={`Remove ${cmd.name} shortcut`}
-                  >
-                    <X className="w-3 h-3" />
-                  </button>
-                </div>
-              );})}
-              {/* Add Custom Command input */}
-              {availablePanelTypes.includes('terminal') && (
-                showCustomInput ? (
-                  <div className="px-3 py-2 border-b border-border-primary">
-                    <label className="text-xs text-text-tertiary mb-1 block">Command to run:</label>
-                    <input
-                      ref={(el) => { customInputRef.current = el; dropdownItemsRef.current[refIndex++] = el; }}
-                      type="text"
-                      className="w-full px-2 py-1.5 text-sm bg-surface-secondary border border-border-primary rounded text-text-primary placeholder:text-text-muted focus:outline-none focus:border-border-focus focus:ring-1 focus:ring-border-focus"
-                      placeholder="e.g. aider, npm run dev, bash"
-                      value={customCommand}
-                      onChange={(e) => setCustomCommand(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' && customCommand.trim()) {
-                          const command = customCommand.trim();
-                          const name = command.split(/\s+/).slice(0, 3).join(' ');
-                          saveCustomCommand(name, command);
-                          handleAddPanel('terminal', {
-                            initialCommand: command,
-                            title: name
-                          });
-                          setCustomCommand('');
-                          setShowCustomInput(false);
-                        }
-                        if (e.key === 'Escape') {
-                          setShowCustomInput(false);
-                          setCustomCommand('');
-                        }
-                        // Let arrow keys propagate for dropdown navigation
-                      }}
-                    />
-                  </div>
-                ) : (
-                  <button
-                    ref={(el) => { dropdownItemsRef.current[refIndex++] = el; }}
-                    role="menuitem"
-                    className={`${menuItemClass} border-b border-border-primary`}
-                    onClick={() => setShowCustomInput(true)}
-                  >
-                    <Plus className="w-4 h-4 flex-shrink-0" />
-                    <span className="ml-2">Add Custom Command...</span>
-                  </button>
-                )
-              )}
-              {/* Other panel types (excluding terminal and explorer, already listed above) */}
-              {availablePanelTypes.filter(t => t !== 'terminal' && t !== 'explorer').map((type) => {
-                const currentRefIndex = refIndex++;
-                return (
-                <button
-                  key={type}
-                  ref={(el) => { dropdownItemsRef.current[currentRefIndex] = el; }}
-                  role="menuitem"
-                  className={menuItemClass}
-                  onClick={() => handleAddPanel(type)}
-                >
-                  {getPanelIcon(type)}
-                  <span className="ml-2 capitalize">{type}</span>
-                </button>
-              );})}
-            </div>,
-            document.body
-            );
-          })()}
-        </div>
-
-        {/* Right side actions */}
+  const rightActions = (
         <div className="flex items-center gap-1 flex-shrink-0 ml-auto">
           {/* Run Dev Server button */}
           {session && (
@@ -737,6 +513,292 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
             </Tooltip>
           )}
         </div>
+  );
+
+  // Once the pane is split every tab lives in its group strip, so the top row
+  // has nothing to show and collapses — unless a drag is in flight (it is the
+  // drop target that merges the groups) or the title bar cannot host the
+  // controls (native-framed Linux).
+  const barCollapsed = tabsInGroups && !isTabDragging && !!trailingSlot;
+
+  return (
+    <>
+    <div className={cn("panel-tab-bar bg-bg-chrome flex-shrink-0", barCollapsed && "hidden")}>
+      {/* Flex container */}
+      <div
+        className="relative flex items-center min-h-[var(--panel-tab-height)] pr-2"
+        onDragOver={tabsInGroups && isTabDragging ? () => setDragOverBar(true) : undefined}
+        onDragLeave={tabsInGroups && isTabDragging ? () => setDragOverBar(false) : undefined}
+      >
+        {/* Un-split affordance: dropping a tab on the top bar while split
+            merges every group back into the primary group. Advertise that
+            while a drag hovers the bar (pointer-events-none so drops pass
+            through to the strip). */}
+        {tabsInGroups && isTabDragging && dragOverBar && (
+          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] bg-surface-primary border border-[color-mix(in_srgb,var(--color-interactive-primary)_40%,transparent)] text-text-secondary shadow-dropdown">
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+                <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" />
+                <line x1="8" y1="2.5" x2="8" y2="13.5" strokeDasharray="2 2" opacity="0.5" />
+                <path d="M5.5 8h5M9 6.5 10.5 8 9 9.5" />
+              </svg>
+              Drop to merge all tabs back here
+            </span>
+          </div>
+        )}
+        {/* Scrollable tab area — delegated to PanelTabStrip. When the pane is
+            split, SessionView passes only the primary group's permanent tabs
+            here (working tabs live in the group strips); shortcut hints are
+            disabled then because the strip shows a subset and the 1-9 indexes
+            would lie. */}
+        <PanelTabStrip
+          idNamespace="top"
+          panels={primaryGroupPanels ?? sortedPanels}
+          activePanelId={primaryGroupActivePanelId !== undefined ? primaryGroupActivePanelId : (activePanel?.id ?? null)}
+          onPanelSelect={handlePanelClick}
+          onPanelClose={handlePanelClose}
+          isPrimary
+          isFocused={primaryGroupFocused ?? true}
+          showShortcutHints={!tabsInGroups}
+          onDragStart={onDragStart}
+          onDragEnd={onDragEnd}
+          onStripDrop={onStripDrop}
+          isTabDragging={isTabDragging}
+          draggedPanelId={draggedPanelId}
+          getPanelTabPresentation={getPanelTabPresentation}
+        />
+
+        {/* Add Panel dropdown button - outside overflow container so dropdown isn't clipped */}
+        <div className="relative h-[var(--panel-tab-height)] flex items-center flex-shrink-0" ref={dropdownRef}>
+          <Tooltip content={hotkeyDisplay('open-add-tool') ? <Kbd>{hotkeyDisplay('open-add-tool')}</Kbd> : undefined} side="bottom">
+            <button
+              ref={addToolButtonRef}
+              type="button"
+              className={cn(
+                "inline-flex items-center justify-center h-7 w-7 ml-0.5 text-text-tertiary hover:text-text-primary hover:bg-surface-hover rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring-subtle",
+                tabsInGroups && "hidden",
+              )}
+              onClick={() => setShowDropdown(!showDropdown)}
+              aria-label="Add tool"
+              onKeyDown={(e) => {
+                if (e.key === 'ArrowDown' && !showDropdown) {
+                  e.preventDefault();
+                  setShowDropdown(true);
+                }
+              }}
+              aria-haspopup="menu"
+              aria-expanded={showDropdown}
+            >
+              <Plus className="w-4 h-4" />
+            </button>
+          </Tooltip>
+
+          {showDropdown && (() => {
+            // Track ref index for keyboard navigation
+            let refIndex = 0;
+            const menuItemClass = "flex items-center gap-2 w-full h-7 px-2.5 text-[13px] text-text-secondary hover:bg-surface-hover hover:text-text-primary focus:bg-surface-hover focus:text-text-primary focus:outline-none text-left";
+            const separator = <hr className="my-1 border-t border-border-primary" />;
+            const otherPanelTypes = availablePanelTypes.filter(t => t !== 'terminal' && t !== 'explorer' && t !== 'browser');
+            const groupLabel = (label: string) => (
+              <div role="presentation" className="px-2.5 pt-1.5 pb-0.5 text-[10px] font-semibold uppercase tracking-wide text-text-muted">{label}</div>
+            );
+            const shortcut = (id: string) => (hotkeyDisplay(id) ? <Kbd variant="inline" className="ml-auto pl-3">{hotkeyDisplay(id)}</Kbd> : null);
+
+            return createPortal(
+            <div
+              ref={dropdownMenuRef}
+              className="min-w-[228px] py-1 bg-surface-primary border border-border-primary rounded-md shadow-dropdown z-50"
+              style={dropdownStyle}
+              role="menu"
+              onKeyDown={handleDropdownKeyDown}
+            >
+              {/* Terminal - plain terminal */}
+              {availablePanelTypes.includes('terminal') && (
+                <button
+                  type="button"
+                  ref={(el) => { dropdownItemsRef.current[refIndex++] = el; }}
+                  role="menuitem"
+                  className={menuItemClass}
+                  onClick={() => handleAddPanel('terminal')}
+                >
+                  <Terminal className="w-3.5 h-3.5 flex-shrink-0" />
+                  <span className="truncate">Terminal</span>
+                  {shortcut('add-tool-terminal')}
+                </button>
+              )}
+              {/* Explorer */}
+              {availablePanelTypes.includes('explorer') && (
+                <button
+                  type="button"
+                  ref={(el) => { dropdownItemsRef.current[refIndex++] = el; }}
+                  role="menuitem"
+                  className={menuItemClass}
+                  onClick={() => {
+                    onShowExplorer();
+                    setShowDropdown(false);
+                  }}
+                >
+                  <FolderTree className="w-3.5 h-3.5 flex-shrink-0" />
+                  <span className="truncate">Explorer</span>
+                  {shortcut('add-tool-explorer')}
+                </button>
+              )}
+              {availablePanelTypes.includes('browser') && (
+                <button
+                  type="button"
+                  ref={(el) => { dropdownItemsRef.current[refIndex++] = el; }}
+                  role="menuitem"
+                  className={menuItemClass}
+                  onClick={() => handleAddPanel('browser')}
+                >
+                  <Globe className="w-3.5 h-3.5 flex-shrink-0" />
+                  <span className="truncate">Browser</span>
+                </button>
+              )}
+              {availablePanelTypes.includes('terminal') && agentPresets.length > 0 && (
+                <>
+                  {separator}
+                  {groupLabel('Presets')}
+                </>
+              )}
+              {/* Built-in agents */}
+              {availablePanelTypes.includes('terminal') && agentPresets.map(preset => (
+                <button
+                  key={preset.id}
+                  type="button"
+                  ref={(el) => { dropdownItemsRef.current[refIndex++] = el; }}
+                  role="menuitem"
+                  className={menuItemClass}
+                  onClick={() => handleAddPanel('terminal', {
+                    initialCommand: preset.command,
+                    title: preset.title
+                  })}
+                >
+                  {getCliBrandIcon(preset.iconKey, 'w-3.5 h-3.5 flex-shrink-0')}
+                  <span className="truncate">{preset.title}</span>
+                  {shortcut(preset.hotkeyId)}
+                </button>
+              ))}
+              {availablePanelTypes.includes('terminal') && separator}
+              {/* Saved custom commands */}
+              {availablePanelTypes.includes('terminal') && customCommands.map((cmd, index) => {
+                const currentRefIndex = refIndex++;
+                const shortcutDisplay = hotkeyDisplay(`add-tool-custom-${index}`);
+                const displayName = truncateCustomCommandLabel(cmd.name);
+                return (
+                <div key={`custom-${index}`} role="none" className="flex min-w-0 items-center">
+                  <Tooltip
+                    content={(
+                      <span className="block max-w-[min(32rem,calc(100vw-1rem))] whitespace-normal break-words">
+                        <span className="block">{cmd.command}</span>
+                        <span className="mt-1 block text-xs text-text-tertiary">Delete or Backspace to remove</span>
+                      </span>
+                    )}
+                    side="bottom"
+                  >
+                    <button
+                      ref={(el) => { dropdownItemsRef.current[currentRefIndex] = el; }}
+                      type="button"
+                      role="menuitem"
+                      className={cn(menuItemClass, 'min-w-0 flex-1')}
+                      onClick={() => handleAddPanel('terminal', {
+                        initialCommand: cmd.command,
+                        title: cmd.name
+                      })}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Delete' || e.key === 'Backspace') {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          deleteCustomCommand(index);
+                        }
+                      }}
+                    >
+                      {getCliBrandIcon(cmd.command, 'w-3.5 h-3.5 flex-shrink-0') || <TerminalSquare className="w-3.5 h-3.5 flex-shrink-0" />}
+                      <span className="truncate">{displayName}</span>
+                      {shortcutDisplay && <Kbd variant="inline" className="ml-auto pl-3">{shortcutDisplay}</Kbd>}
+                    </button>
+                  </Tooltip>
+                  <button
+                    type="button"
+                    className="p-1 mr-1.5 rounded hover:bg-surface-hover text-text-muted hover:text-text-primary flex-shrink-0"
+                    onClick={() => deleteCustomCommand(index)}
+                    aria-label={`Remove ${cmd.name} shortcut`}
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+              );})}
+              {/* Add Custom Command input */}
+              {availablePanelTypes.includes('terminal') && (
+                showCustomInput ? (
+                  <div className="px-3 py-2 border-b border-border-primary">
+                    <label className="text-xs text-text-tertiary mb-1 block">Command to run:</label>
+                    <input
+                      ref={(el) => { customInputRef.current = el; dropdownItemsRef.current[refIndex++] = el; }}
+                      type="text"
+                      className="w-full px-2 py-1.5 text-sm bg-surface-secondary border border-border-primary rounded text-text-primary placeholder:text-text-muted focus:outline-none focus:border-border-focus focus:ring-1 focus:ring-border-focus"
+                      placeholder="e.g. aider, npm run dev, bash"
+                      value={customCommand}
+                      onChange={(e) => setCustomCommand(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && customCommand.trim()) {
+                          const command = customCommand.trim();
+                          const name = command.split(/\s+/).slice(0, 3).join(' ');
+                          saveCustomCommand(name, command);
+                          handleAddPanel('terminal', {
+                            initialCommand: command,
+                            title: name
+                          });
+                          setCustomCommand('');
+                          setShowCustomInput(false);
+                        }
+                        if (e.key === 'Escape') {
+                          setShowCustomInput(false);
+                          setCustomCommand('');
+                        }
+                        // Let arrow keys propagate for dropdown navigation
+                      }}
+                    />
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    ref={(el) => { dropdownItemsRef.current[refIndex++] = el; }}
+                    role="menuitem"
+                    className={menuItemClass}
+                    onClick={() => setShowCustomInput(true)}
+                  >
+                    <Plus className="w-3.5 h-3.5 flex-shrink-0" />
+                    <span className="truncate">Add custom command…</span>
+                  </button>
+                )
+              )}
+              {/* Other panel types (terminal, explorer and browser are listed above) */}
+              {otherPanelTypes.length > 0 && separator}
+              {otherPanelTypes.map((type) => {
+                const currentRefIndex = refIndex++;
+                return (
+                <button
+                  key={type}
+                  type="button"
+                  ref={(el) => { dropdownItemsRef.current[currentRefIndex] = el; }}
+                  role="menuitem"
+                  className={menuItemClass}
+                  onClick={() => handleAddPanel(type)}
+                >
+                  {getPanelIcon(type)}
+                  <span className="capitalize">{type}</span>
+                </button>
+              );})}
+            </div>,
+            document.body
+            );
+          })()}
+        </div>
+
+        {/* Run / inspector controls live on the title plane when the
+            window owns its title bar; otherwise they stay at the bar's end. */}
+        {trailingSlot ? createPortal(rightActions, trailingSlot) : rightActions}
       </div>
     </div>
 

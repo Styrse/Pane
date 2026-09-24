@@ -10,7 +10,7 @@ import type {
   PaneDaemonRequestFrame,
   PaneDaemonSuccessResponseFrame,
 } from '../../../shared/types/daemon';
-import { boundary } from '../../../shared/validation/boundaryDecoder';
+import { boundary, decodeOptionalBoundary } from '../../../shared/validation/boundaryDecoder';
 import { serializeJsonTransport } from './jsonTransport';
 
 const DAEMON_EVENT_PREFIXES = [
@@ -19,6 +19,7 @@ const DAEMON_EVENT_PREFIXES = [
   'panel:',
   'project:',
   'resource-monitor:',
+  'orchestration-sessions:',
   'session:',
   'sessions:',
   'terminal:',
@@ -53,6 +54,7 @@ interface ConnectedPaneDaemonClient {
   pendingFrames: string[];
   pendingBytes: number;
   waitingForDrain: boolean;
+  eventFilter: string[] | null;
 }
 
 type PaneDaemonClientWrite = (clientId: string, socket: net.Socket, encodedFrame: string) => boolean;
@@ -60,6 +62,9 @@ type PaneDaemonClientWrite = (clientId: string, socket: net.Socket, encodedFrame
 const UNIX_SOCKET_DIRECTORY_MODE = 0o700;
 const UNIX_SOCKET_FILE_MODE = 0o600;
 const MAX_PENDING_BYTES_PER_CLIENT = 4 * 1024 * 1024;
+const daemonEventFilterRequestSchema = boundary.object({
+  include: boundary.nullable(boundary.array(boundary.string)),
+});
 
 export class PaneDaemonServer {
   private server: net.Server | null = null;
@@ -73,13 +78,17 @@ export class PaneDaemonServer {
         return;
       }
 
+      const interestedClients = [...this.clients.entries()]
+        .filter(([, client]) => client.eventFilter === null || client.eventFilter.some(prefix => channel.startsWith(prefix)));
+      if (interestedClients.length === 0) return;
+
       const encodedFrame = encodePaneDaemonFrame({
         type: 'event',
         channel,
         args: serializeJsonTransport(args, boundary.array(boundary.json)),
       });
 
-      for (const [clientId] of this.clients) {
+      for (const [clientId] of interestedClients) {
         this.writeFrame(clientId, encodedFrame);
       }
     },
@@ -186,6 +195,7 @@ export class PaneDaemonServer {
       pendingFrames: [],
       pendingBytes: 0,
       waitingForDrain: false,
+      eventFilter: null,
     };
 
     this.clients.set(clientId, client);
@@ -240,7 +250,9 @@ export class PaneDaemonServer {
   }
 
   private async handleRequest(clientId: string, frame: PaneDaemonRequestFrame): Promise<void> {
-    const response = await this.buildResponseFrame(frame);
+    const response = frame.channel === 'daemon:events'
+      ? this.buildEventFilterResponse(clientId, frame)
+      : await this.buildResponseFrame(frame);
     const client = this.clients.get(clientId);
 
     if (!client || client.socket.destroyed) {
@@ -248,6 +260,34 @@ export class PaneDaemonServer {
     }
 
     this.writeFrame(clientId, encodePaneDaemonFrame(response));
+  }
+
+  private buildEventFilterResponse(
+    clientId: string,
+    frame: PaneDaemonRequestFrame,
+  ): PaneDaemonSuccessResponseFrame | PaneDaemonErrorResponseFrame {
+    const client = this.clients.get(clientId);
+    if (!client) {
+      return daemonError(frame.id, 'Pane daemon client disconnected', 'ERR_DAEMON_REQUEST_FAILED');
+    }
+
+    const request = decodeOptionalBoundary(frame.args[0], daemonEventFilterRequestSchema);
+    if (!request) {
+      return daemonError(frame.id, 'daemon:events include must be null or an array of channel prefixes', 'ERR_DAEMON_REQUEST_FAILED');
+    }
+
+    const { include } = request;
+    client.eventFilter = include === null ? null : [...include];
+    return {
+      type: 'response',
+      id: frame.id,
+      ok: true,
+      result: {
+        ok: true,
+        include: client.eventFilter,
+        muted: Array.isArray(client.eventFilter) && client.eventFilter.length === 0,
+      },
+    };
   }
 
   private writeFrame(clientId: string, encodedFrame: string): void {
@@ -339,6 +379,14 @@ export class PaneDaemonServer {
       };
     }
   }
+}
+
+function daemonError(
+  id: number,
+  message: string,
+  code: string,
+): PaneDaemonErrorResponseFrame {
+  return { type: 'response', id, ok: false, error: { message, code } };
 }
 
 async function probeUnixSocketPath(socketPath: string): Promise<'active' | 'stale'> {

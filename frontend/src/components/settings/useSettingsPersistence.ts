@@ -98,6 +98,24 @@ export function useSettingsPersistence(isOpen: boolean) {
     }
   }, [fetchConfig, setSaveState, updateConfig]);
 
+  const runSave = useCallback(async (
+    settingId: SettingsSettingId,
+    work: () => Promise<void>,
+  ): Promise<boolean> => {
+    setSaveState(settingId, { state: 'saving' });
+    try {
+      await work();
+      setSaveState(settingId, { state: 'saved' });
+      return true;
+    } catch (error) {
+      setSaveState(settingId, {
+        state: 'error',
+        message: error instanceof Error ? error.message : 'Failed to save setting',
+      });
+      return false;
+    }
+  }, [setSaveState]);
+
   const savePreference = useCallback(async <K extends PreferenceName>(
     name: K,
     value: SettingsPreferenceValues[K],
@@ -134,6 +152,7 @@ export function useSettingsPersistence(isOpen: boolean) {
     configError,
     fetchConfig,
     saveConfig,
+    runSave,
     saveStates,
     reportSaveError: (settingId: SettingsSettingId, message: string) => setSaveState(settingId, { state: 'error', message }),
     preferences,

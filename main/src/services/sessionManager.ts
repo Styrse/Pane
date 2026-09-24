@@ -8,12 +8,14 @@ import { randomUUID } from 'crypto';
 import { EventEmitter } from 'events';
 import { spawn, ChildProcess, exec, execSync } from 'child_process';
 import { promisify } from 'util';
+import { existsSync } from 'fs';
 import { getRuntimeConfigManager } from '../core/runtime';
 import { ShellDetector } from '../utils/shellDetector';
 import type { Session, SessionUpdate, SessionOutput } from '../types/session';
 import type { DatabaseService } from '../database/database';
 import type { Session as DbSession, CreateSessionData, UpdateSessionData, ConversationMessage, PromptMarker, ExecutionDiff, CreateExecutionDiffData, Project } from '../database/models';
 import { getShellPath } from '../utils/shellPath';
+import { inheritedProcessEnv } from '../utils/inheritedProcessEnv';
 import { TerminalSessionManager } from './terminalSessionManager';
 import type { ToolPanelState, ResumableSession } from '../../../shared/types/panels';
 import { formatForDisplay } from '../utils/timestampUtils';
@@ -25,6 +27,7 @@ import { boundary, decodeBoundary, type JsonValue } from '../../../shared/valida
 interface CreateSessionOptions {
   detached?: boolean;
   hidden?: boolean;
+  worktreeOwnership?: 'pane' | 'external';
 }
 
 interface ProjectContext {
@@ -310,7 +313,9 @@ export class SessionManager extends EventEmitter {
       worktreePath: dbSession.worktree_path,
       prompt: dbSession.initial_prompt,
       status: this.mapDbStatusToSessionStatus(dbSession.status),
-      statusMessage: dbSession.status_message,
+      statusMessage: dbSession.worktree_ownership === 'external' && !existsSync(dbSession.worktree_path)
+        ? 'External worktree directory is missing'
+        : dbSession.status_message,
       pid: dbSession.pid,
       createdAt: new Date(dbSession.created_at),
       lastActivity: new Date(dbSession.updated_at),
@@ -322,6 +327,7 @@ export class SessionManager extends EventEmitter {
       permissionMode: dbSession.permission_mode,
       runStartedAt: dbSession.run_started_at,
       isMainRepo: dbSession.is_main_repo,
+      worktreeOwnership: dbSession.worktree_ownership ?? 'pane',
       projectId: dbSession.project_id ?? undefined,
       folderId: dbSession.folder_id,
       displayOrder: dbSession.display_order, // Include displayOrder for proper sorting
@@ -469,6 +475,8 @@ export class SessionManager extends EventEmitter {
       folder_id: folderId,
       permission_mode: permissionMode,
       is_main_repo: isMainRepo,
+      worktree_ownership: options?.worktreeOwnership ?? 'pane',
+      commit_mode: options?.worktreeOwnership === 'external' ? 'disabled' : undefined,
       // Model is now managed at panel level
       base_commit: baseCommit,
       base_branch: baseBranch,
@@ -586,10 +594,14 @@ export class SessionManager extends EventEmitter {
     });
   }
 
-  emitSessionCreated(session: Session, options: { activateOnCreate?: boolean } = {}): void {
+  emitSessionCreated(
+    session: Session,
+    options: { activateOnCreate?: boolean; createDefaultTerminalOnCreate?: boolean } = {},
+  ): void {
     this.emit('session-created', {
       ...session,
       activateOnCreate: options.activateOnCreate !== false,
+      createDefaultTerminalOnCreate: options.createDefaultTerminalOnCreate !== false,
     });
   }
 
@@ -722,8 +734,8 @@ export class SessionManager extends EventEmitter {
       
       if (promptText) {
         // Get current output count to use as index
-        const outputs = this.db.getSessionOutputs(id);
-        this.db.addPromptMarker(id, promptText, outputs.length - 1);
+        const outputCount = this.db.getSessionOutputCount(id);
+        this.db.addPromptMarker(id, promptText, outputCount - 1);
         // Also add to conversation messages for continuation support
         this.db.addConversationMessage(id, 'user', promptText);
       }
@@ -1093,8 +1105,8 @@ export class SessionManager extends EventEmitter {
       
       // Add a prompt marker for this continued conversation
       // Get current output count to use as index
-      const outputs = this.db.getSessionOutputs(id);
-      this.db.addPromptMarker(id, userMessage, outputs.length);
+      const outputCount = this.db.getSessionOutputCount(id);
+      this.db.addPromptMarker(id, userMessage, outputCount);
       
       // Emit event for the Claude Code manager to handle
       this.emit('conversation-continue', { sessionId: id, message: userMessage });
@@ -1235,7 +1247,7 @@ export class SessionManager extends EventEmitter {
       stdio: 'pipe',
       detached: true, // Create a new process group
       env: {
-        ...process.env,
+        ...inheritedProcessEnv(),
         PATH: shellPath
       }
     });

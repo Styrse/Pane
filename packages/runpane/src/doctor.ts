@@ -1,5 +1,6 @@
 import type { ParsedArgs } from './commands';
 import childProcess from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -12,6 +13,7 @@ import {
 } from './daemonClient';
 import { resolveExistingPanePath } from './installers';
 import { detectPlatform, type PanePlatform } from './platform';
+import { RUNPANE_CONTRACT } from './generated/contract';
 import { resolveRelease } from './releases';
 import { getPaneVersion, getWrapperVersion } from './version';
 import type { BoundarySchema } from './boundaryDecoder';
@@ -20,6 +22,12 @@ const DOCTOR_DAEMON_TIMEOUT_MS = 5_000;
 const DOCTOR_RELEASE_TIMEOUT_MS = 5_000;
 const REMOTE_LAUNCHER_MARKER = 'pane-remote-daemon-launcher-v2';
 const REMOTE_DAEMON_UNIT = 'pane-remote-daemon.service';
+const PANE_REPO = 'greenfield-inc/Pane';
+const LEGACY_PANE_REPOS = ['dcouple/Pane', 'Dcouple-Inc/Pane'] as const;
+const ISSUE_URL_PATTERN = new RegExp(
+  `^https://github\\.com/(?:${[PANE_REPO, ...LEGACY_PANE_REPOS].join('|')})/issues/\\d+$`,
+  'i',
+);
 
 type ProcessImageStatus = 'current' | 'replaced' | 'deleted' | 'unknown';
 type RestartStatus = 'ready' | 'broken' | 'unknown';
@@ -178,8 +186,14 @@ interface DoctorReport {
   daemon: DoctorDaemonCheck;
   remoteDaemonService: RemoteDaemonServiceDoctorCheck;
   remoteSetup: RemoteSetupDoctorCheck;
+  watchDefaults: DoctorWatchDefaults;
   nextCommands: string[];
 }
+
+type DoctorWatchDefaults = Omit<
+  typeof RUNPANE_CONTRACT.defaults.watch,
+  'format' | 'agentsOnly' | 'includeHeldInputPresence'
+> & { kinds: 'all' };
 
 interface RemoteDaemonServiceDoctorCheck {
   paneDir: string;
@@ -203,8 +217,44 @@ interface RemoteSetupDoctorCheck {
   diagnostics: RemoteSetupDiagnostic[];
 }
 
+export interface PreparedDoctorReport {
+  ok: boolean;
+  title: string;
+  path: string;
+  sha256: string;
+  redactionCount: number;
+  proposedCommand: string;
+  filed: boolean;
+  issueUrl?: string;
+  fallbackUrl?: string;
+  error?: string;
+}
+
+interface RedactedDoctorReport {
+  text: string;
+  count: number;
+}
+
 export async function runDoctor(parsed: ParsedArgs, source: 'npm' | 'pip' = 'npm'): Promise<number> {
   const report = await buildDoctorReport(parsed, source);
+
+  if (parsed.report) {
+    const prepared = prepareDoctorFailureReport(parsed, report);
+    if (parsed.yes) {
+      fileDoctorFailureReport(prepared);
+    }
+    if (parsed.json) {
+      console.log(JSON.stringify(prepared, null, 2));
+    } else {
+      console.log(`Report: ${prepared.path}`);
+      console.log(`SHA-256: ${prepared.sha256}`);
+      console.log(`Redactions: ${prepared.redactionCount}`);
+      if (prepared.issueUrl) console.log(`Issue: ${prepared.issueUrl}`);
+      else console.log(`Proposed: ${prepared.proposedCommand}`);
+      if (prepared.error) console.error(`Report filing failed: ${prepared.error}`);
+    }
+    return prepared.ok ? 0 : 1;
+  }
 
   if (parsed.json) {
     console.log(JSON.stringify(report, null, 2));
@@ -213,6 +263,173 @@ export async function runDoctor(parsed: ParsedArgs, source: 'npm' | 'pip' = 'npm
 
   renderDoctorText(report);
   return report.release.ok ? 0 : 1;
+}
+
+export function prepareDoctorFailureReport(parsed: ParsedArgs, doctor: DoctorReport): PreparedDoctorReport {
+  if (!parsed.bodyFile) {
+    throw new Error('runpane doctor --report requires --body-file <path|->.');
+  }
+  const requestedTitle = singleLine(parsed.title?.trim() || 'RunPane watcher failure');
+  const redactedTitle = redactDoctorReport(requestedTitle);
+  const title = singleLine(redactedTitle.text);
+  const evidence = readReportEvidence(parsed.bodyFile);
+  const diagnostics = {
+    source: doctor.source,
+    wrapper: {
+      runtime: doctor.wrapper.runtime,
+      version: doctor.wrapper.version,
+      paneDir: doctor.wrapper.paneDir,
+      endpoint: doctor.wrapper.endpoint,
+    },
+    platform: doctor.platform,
+    release: doctor.release,
+    installedPane: doctor.installedPane,
+    daemon: {
+      reachable: doctor.daemon.reachable,
+      endpoint: doctor.daemon.endpoint,
+      app: doctor.daemon.result?.app,
+      error: doctor.daemon.error,
+    },
+    remoteSetup: doctor.remoteSetup,
+  };
+  const diagnosticsText = JSON.stringify(diagnostics, null, 2);
+  const fence = markdownFence(requestedTitle, evidence, diagnosticsText);
+  const raw = [
+    '# RunPane watcher failure report',
+    '',
+    '## Report title',
+    '',
+    fence,
+    requestedTitle,
+    fence,
+    '',
+    '## Failure evidence',
+    '',
+    fence,
+    evidence,
+    fence,
+    '',
+    '## RunPane diagnostics',
+    '',
+    fence,
+    diagnosticsText,
+    fence,
+    '',
+  ].join('\n');
+  const redacted = redactDoctorReport(raw);
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'runpane-report-'));
+  const reportPath = path.join(directory, 'report.md');
+  fs.writeFileSync(reportPath, redacted.text, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+  fs.chmodSync(reportPath, 0o600);
+  const sha256 = createHash('sha256').update(redacted.text).digest('hex');
+  const proposedCommand = [
+    `gh issue create --repo ${PANE_REPO}`,
+    `--title ${shellQuote(title)}`,
+    `--body-file ${shellQuote(reportPath)}`,
+    '--label bug',
+  ].join(' ');
+  return {
+    ok: true,
+    title,
+    path: reportPath,
+    sha256,
+    redactionCount: redacted.count,
+    proposedCommand,
+    filed: false,
+  };
+}
+
+export function redactDoctorReport(value: string, home = os.homedir()): RedactedDoctorReport {
+  let text = value;
+  let count = 0;
+  if (home) {
+    text = text.replace(new RegExp(escapeRegExp(home), 'g'), () => {
+      count += 1;
+      return '~';
+    });
+  }
+  text = text.replace(
+    /\b(authorization|proxy-authorization|cookie|set-cookie)(\s*:\s*)[^\r\n]*/giu,
+    (_match, key: string, separator: string) => {
+      count += 1;
+      return `${key}${separator}[REDACTED]`;
+    },
+  );
+  text = text.replace(
+    /(["']?)((?:[a-z][a-z0-9_-]*?)?(?:token|password|passwd|secret|api[_-]?key|access[_-]?key)|authorization|proxy-authorization|cookie|set-cookie)\1(\s*[=:]\s*)([^\r\n]*)/giu,
+    (match, quote: string, key: string, separator: string, value: string) => {
+      if (/^(["']?)\[REDACTED\]\1$/iu.test(value.trim())) return match;
+      count += 1;
+      const redactedValue = quote ? `${quote}[REDACTED]${quote}` : '[REDACTED]';
+      return `${quote}${key}${quote}${separator}${redactedValue}`;
+    },
+  );
+  text = text.replace(/([?&][^=\s&]+)=([^&#\s]*)/gu, (_match, prefix: string) => {
+    count += 1;
+    return `${prefix}=[REDACTED]`;
+  });
+  return { text, count };
+}
+
+function markdownFence(...values: string[]): string {
+  let longest = 2;
+  for (const value of values) {
+    for (const match of value.matchAll(/`+/gu)) longest = Math.max(longest, match[0].length);
+  }
+  return '`'.repeat(longest + 1);
+}
+
+function readReportEvidence(bodyFile: string): string {
+  const bytes = bodyFile === '-' ? fs.readFileSync(0) : fs.readFileSync(bodyFile);
+  if (bytes.byteLength > 32 * 1024) {
+    throw new Error('runpane doctor --report evidence exceeds the 32 KiB limit.');
+  }
+  return bytes.toString('utf8');
+}
+
+export function fileDoctorFailureReport(prepared: PreparedDoctorReport): void {
+  const { title } = prepared;
+  const fallbackUrl = `https://github.com/${PANE_REPO}/issues/new?title=${encodeURIComponent(title)}`;
+  prepared.fallbackUrl = fallbackUrl;
+  const auth = childProcess.spawnSync('gh', ['auth', 'status'], { encoding: 'utf8', timeout: 10_000 });
+  if (auth.error || auth.status !== 0) {
+    prepared.ok = false;
+    prepared.error = auth.error?.message || auth.stderr?.trim() || 'gh auth status failed';
+    return;
+  }
+  const baseArgs = ['issue', 'create', '--repo', PANE_REPO, '--title', title, '--body-file', prepared.path];
+  let created = childProcess.spawnSync('gh', [...baseArgs, '--label', 'bug'], { encoding: 'utf8', timeout: 30_000 });
+  if (created.status !== 0 && !created.error && /label|could not add/iu.test(created.stderr ?? '')) {
+    created = childProcess.spawnSync('gh', baseArgs, { encoding: 'utf8', timeout: 30_000 });
+  }
+  const issueUrl = created.stdout?.trim().split(/\s+/u).find(value => ISSUE_URL_PATTERN.test(value));
+  if (created.error || created.status !== 0 || !issueUrl) {
+    prepared.ok = false;
+    prepared.error = created.error?.message || created.stderr?.trim() || 'gh issue create did not return an issue URL';
+    return;
+  }
+  prepared.filed = true;
+  prepared.issueUrl = issueUrl;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function singleLine(value: string): string {
+  return [...value]
+    .map(character => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint <= 31 || codePoint >= 127 && codePoint <= 159 ? ' ' : character;
+    })
+    .join('')
+    .replace(/\s+/gu, ' ')
+    .trim()
+    .slice(0, 180) || 'RunPane watcher failure';
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 async function buildDoctorReport(parsed: ParsedArgs, source: 'npm' | 'pip'): Promise<DoctorReport> {
@@ -247,6 +464,7 @@ async function buildDoctorReport(parsed: ParsedArgs, source: 'npm' | 'pip'): Pro
     daemon,
     remoteDaemonService,
     remoteSetup,
+    watchDefaults: watchDefaults(),
     nextCommands: [
       'runpane agent-context --json',
       'runpane agent-context --command "<command>" --json',
@@ -705,6 +923,17 @@ function resolveDaemonRecoveryCommand(endpoint: PaneDaemonEndpoint, message: str
   return 'Open Pane, then rerun runpane doctor --json';
 }
 
+export function watchDefaults(): DoctorWatchDefaults {
+  const { heartbeatSeconds, idleAfterMs, settleMs, blockedSettleMs, minIntervalMs, idleBackoff } = RUNPANE_CONTRACT.defaults.watch;
+  return { heartbeatSeconds, idleAfterMs, settleMs, blockedSettleMs, minIntervalMs, idleBackoff, kinds: 'all' };
+}
+
+export function formatWatchDefaults(defaults: DoctorWatchDefaults): string {
+  return `Watch defaults (--follow): heartbeat ${defaults.heartbeatSeconds}s, idle-after ${defaults.idleAfterMs}ms, `
+    + `settle ${defaults.settleMs}ms, blocked-settle ${defaults.blockedSettleMs}ms, min-interval ${defaults.minIntervalMs}ms, `
+    + `idle-backoff ${defaults.idleBackoff ? 'on' : 'off'}, kinds ${defaults.kinds}`;
+}
+
 function renderDoctorText(report: DoctorReport): void {
   if (report.platform) {
     console.log(`Platform: ${report.platform.os}/${report.platform.arch}`);
@@ -749,6 +978,7 @@ function renderDoctorText(report: DoctorReport): void {
     }
   }
 
+  console.log(formatWatchDefaults(report.watchDefaults));
   console.log('Agent discovery: run "runpane doctor --json" before Pane actions, then "runpane agent-context --json" for full CLI context.');
   console.log('Remote setup: run "runpane setup" for guided setup, or "runpane install daemon --label <name>" for scripting.');
 }

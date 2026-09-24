@@ -5,6 +5,7 @@ type PanelContext = 'project' | 'worktree';
 export interface PanelCreateOptions {
   initialCommand?: string;  // Command to run on terminal init
   title?: string;           // Custom panel title
+  initialState?: { customState?: unknown };
 }
 
 interface PanelTabPresentation {
@@ -21,6 +22,7 @@ export interface PanelTabBarProps {
   onPanelSelect: (panel: ToolPanel) => void;
   onPanelClose: (panel: ToolPanel) => void;
   onPanelCreate: (type: ToolPanelType, options?: PanelCreateOptions) => void;
+  onShowExplorer: () => void;
   projectEnvironment?: ProjectEnvironment;
   context?: PanelContext;  // Optional context to filter available panels
   onToggleDetailPanel?: () => void;

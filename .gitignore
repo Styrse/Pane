@@ -10,6 +10,7 @@ node_modules/
 .pnpm-store/
 package-lock.json
 *.egg-info/
+__pycache__/
 
 # Build outputs
 dist/
@@ -120,3 +121,4 @@ docs/research/
 
 # Draft posts (local only)
 docs/posts/
+.agent-farm/generated/

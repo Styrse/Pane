@@ -2,7 +2,9 @@ import { test, expect, Page } from '@playwright/test';
 import { installElectronApiMock } from './electronApiMock';
 
 test.beforeEach(async ({ page }) => {
-  await installElectronApiMock(page);
+  await installElectronApiMock(page, {
+    initialConfig: { theme: 'light-rounded', appearanceMode: 'fixed' },
+  });
   // Pin a known starting theme so arrow-key movement is deterministic.
   await page.addInitScript(() => {
     localStorage.setItem('theme', 'light-rounded');
@@ -33,7 +35,7 @@ test.describe('Dropdown keyboard navigation', () => {
     await expect(trigger).toBeVisible({ timeout: 5000 });
     await trigger.click();
 
-    const footerAction = page.getByRole('button', { name: 'Add Repository' });
+    const footerAction = page.getByRole('menu').getByRole('button', { name: 'Add Repository' });
     await expect(footerAction).toBeFocused();
     await page.keyboard.press('Enter');
 

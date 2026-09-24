@@ -2,6 +2,33 @@ import { describe, expect, it } from 'vitest';
 import { TerminalStateEmulator } from './terminalStateEmulator';
 
 describe('TerminalStateEmulator', () => {
+  it('preserves negotiated Win32 input mode across snapshots and split output chunks', async () => {
+    const emulator = new TerminalStateEmulator(20, 5);
+    emulator.write('\x1b[?90');
+    emulator.write('01h');
+    await emulator.waitForIdle();
+    expect(emulator.serializeForRestore()).toContain('\x1b[?9001h');
+    emulator.write('\x1b[?1049h');
+    await emulator.waitForIdle();
+    const snapshot = emulator.serializeForRestore();
+    expect(snapshot).toContain('\x1b[?9001h');
+    const restored = new TerminalStateEmulator(20, 5);
+    restored.write(snapshot);
+    await restored.waitForIdle();
+    expect(restored.serializeForRestore()).toContain('\x1b[?9001h');
+    restored.dispose();
+    emulator.dispose();
+    expect(emulator.serializeForRestore()).toContain('\x1b[?9001h');
+  });
+
+  it.each(['\x1b[?9001l', '\x1bc', '\x1b[!p'])('honors Win32 mode reset %j', async (reset) => {
+    const emulator = new TerminalStateEmulator(20, 5);
+    emulator.write(`\x1b[?9001h${reset}`);
+    await emulator.waitForIdle();
+    expect(emulator.serializeForRestore()).not.toContain('\x1b[?9001h');
+    emulator.dispose();
+  });
+
   it('renders cursor-addressed alternate-screen output as a coherent screen', async () => {
     const emulator = new TerminalStateEmulator(20, 5);
 
@@ -19,6 +46,17 @@ describe('TerminalStateEmulator', () => {
     expect(restored.isAlternateScreen).toBe(true);
     expect(restored.getScreenText()).toBe('Claude\nworking');
     restored.dispose();
+    emulator.dispose();
+  });
+
+  it('can blank dim cells, which TUIs use for placeholder suggestions', async () => {
+    const emulator = new TerminalStateEmulator(40, 5);
+
+    emulator.write('❯ \x1b[2mTry "fix the tests"\x1b[22m\r\ntyped \x1b[2mhint\x1b[22m kept');
+    await emulator.waitForIdle();
+
+    expect(emulator.getScreenText()).toBe('❯ Try "fix the tests"\ntyped hint kept');
+    expect(emulator.getScreenText({ omitDim: true })).toBe('❯\ntyped      kept');
     emulator.dispose();
   });
 

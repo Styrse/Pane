@@ -6,12 +6,17 @@ import type { AppServices } from './types';
 import type { PaneCommandRegistry, PaneCommandValue } from '../daemon/commandRegistry';
 import { PathResolver, ProjectEnvironment } from '../utils/pathResolver';
 import { sanitizeTerminalOutput } from '../utils/terminalOutputSanitizer';
+import { escapeShellArg } from '../utils/shellEscape';
 import { panelManager } from '../services/panelManager';
 import { terminalPanelManager, type TerminalPanelSnapshot } from '../services/terminalPanelManager';
+import { databaseService as panelDatabase } from '../services/database';
+import type { PanelBuffers } from '../database/panelBuffers';
 import { ensureProjectAgentContext } from '../services/agentContextManager';
-import { fastCheckWorkingDirectory, fastGetAheadBehind } from '../services/gitPlumbingCommands';
+import { fastCheckWorkingDirectory, listCommitsAhead } from '../services/gitPlumbingCommands';
 import { assessComposerEvidence, isSlashCommandInput } from './runpaneComposerEvidence';
+import { projectWorkspaceEntry } from '../services/workspaceJournal';
 import type { ArchiveProgressManager, SerializedArchiveTask } from '../services/archiveProgressManager';
+import type { CommandRunner } from '../utils/commandRunner';
 import type { Project } from '../database/models';
 import type { Session, SessionOutput } from '../types/session';
 import type { CreatePanelRequest, TerminalPanelState, ToolPanel } from '../../../shared/types/panels';
@@ -34,6 +39,10 @@ import type {
   RunpanePaneArchiveResult,
   RunpanePaneArchiveSafetyCheck,
   RunpanePaneArchiveSuccessResult,
+  RunpanePaneAdoptRequest,
+  RunpanePaneAdoptResult,
+  RunpanePaneCostRequest,
+  RunpanePaneCostResult,
   RunpanePaneListRequest,
   RunpanePaneListResult,
   RunpanePanePinRequest,
@@ -46,6 +55,8 @@ import type {
   RunpanePaneCreateResult,
   RunpanePaneCreateResultItem,
   RunpanePaneReadiness,
+  RunpanePaneSummary,
+  RunpanePanelActivityStatus,
   RunpanePanelBlockedState,
   RunpanePanelCreateRequest,
   RunpanePanelCreateResult,
@@ -76,16 +87,58 @@ import type {
   RunpaneResolvedTool,
   RunpaneToolSpec,
   RunpaneWorktreeCleanupState,
+  RunpaneWorkspaceEntry,
+  RunpaneWorkspaceEntryKind,
+  RunpaneWorkspaceStateResult,
+  RunpaneWorkspaceWaitRequest,
+  RunpaneWorkspaceWaitResult,
+  RunpaneSessionListResult,
+  RunpaneSessionResult,
+  RunpaneSessionOverviewResult,
+  RunpaneSessionSelector,
 } from '../../../shared/types/runpaneOrchestration';
+import type {
+  OrchestrationAssociationInput,
+  OrchestrationSessionCreateInput,
+  OrchestrationSessionUpdateInput,
+} from '../../../shared/types/orchestrationSession';
+import type { PaneChatAgent } from '../../../shared/types/paneChat';
 import { getAppDirectory } from '../utils/appDirectory';
 import { collectRemoteDaemonExecutableHealth } from '../daemon/remoteDaemonExecutableHealth';
+import {
+  WorkspaceJournal,
+  matchesFilter,
+  workspaceFilterKey,
+  type WorkspaceJournalFilter,
+} from '../services/workspaceJournal';
+import { WatchCadence, type WatchCadenceOptions } from '../services/workspaceWatchCadence';
+import { WorkspaceStateReader } from '../services/workspaceStateReader';
+import { WorkspaceCursorStore } from '../services/workspaceCursorStore';
+import { usageManager } from '../services/usage/usageManager';
+import { parseWSLPath } from '../utils/wslUtils';
+import {
+  dueIdleEntries,
+  nextIdleDeadline,
+  type WorkspaceIdleCandidate,
+  type WorkspaceIdleSchedule,
+} from '../services/workspaceIdleTracker';
 
 const RUNPANE_CHANNELS = [
   'runpane:doctor',
   'runpane:repos:list',
   'runpane:repos:add',
+  'runpane:sessions:list',
+  'runpane:sessions:create',
+  'runpane:sessions:get',
+  'runpane:sessions:update',
+  'runpane:sessions:set-agent',
+  'runpane:sessions:associate',
+  'runpane:sessions:detach',
+  'runpane:sessions:overview',
   'runpane:panes:list',
+  'runpane:panes:cost',
   'runpane:panes:create',
+  'runpane:panes:adopt',
   'runpane:panes:pin',
   'runpane:panes:rename',
   'runpane:panes:archive',
@@ -97,6 +150,8 @@ const RUNPANE_CHANNELS = [
   'runpane:panels:submit',
   'runpane:panels:submit-composer',
   'runpane:panels:wait',
+  'runpane:workspace:state',
+  'runpane:workspace:wait',
   'runpane:agents:doctor',
 ] as const;
 
@@ -108,10 +163,78 @@ const DEFAULT_PANEL_WAIT_TIMEOUT_MS = 30_000;
 const DEFAULT_PANEL_WAIT_INTERVAL_MS = 500;
 const DEFAULT_COMPOSER_VERIFY_TIMEOUT_MS = 3_000;
 const DEFAULT_COMPOSER_VERIFY_INTERVAL_MS = 100;
+const CODEX_SUBMIT_STAGE_DELAY_MS = 500;
+const CLAUDE_INPUT_WAIT_TIMEOUT_MS = 15_000;
+const CLAUDE_UI_QUIET_MS = 3_000;
 const MAX_CREATE_SUBMIT_ATTEMPTS = 3;
 const CREATE_SUBMIT_CONFIRMATION_DELAY_MS = 400;
 const DEFAULT_ARCHIVE_CLEANUP_TIMEOUT_MS = 30_000;
 const DEFAULT_ARCHIVE_CLEANUP_POLL_INTERVAL_MS = 200;
+const DEFAULT_WORKSPACE_WAIT_TIMEOUT_MS = 60_000;
+const MAX_WORKSPACE_WAIT_TIMEOUT_MS = 120_000;
+const DEFAULT_WORKSPACE_WAIT_LIMIT = 256;
+const WORKSPACE_CONSUMER_PATTERN = /^[A-Za-z0-9._-]{1,64}$/u;
+const MUTATING_RUNPANE_ACTIONS = new Set([
+  'panes:create',
+  'panes:adopt',
+  'panes:archive',
+  'panes:pin',
+  'panes:rename',
+  'panels:create',
+  'panels:input',
+  'panels:submit',
+  'panels:submit-composer',
+  'sessions:create',
+  'sessions:update',
+  'sessions:set-agent',
+  'sessions:associate',
+  'sessions:detach',
+]);
+
+const orchestrationSelectorSchema = boundary.object({
+  sessionId: boundary.optional(boundary.nonEmptyString),
+  name: boundary.optional(boundary.nonEmptyString),
+});
+const orchestrationLinkSchema = boundary.object({
+  label: boundary.nonEmptyString,
+  url: boundary.nonEmptyString,
+  kind: boundary.optional(boundary.enumeration('evidence', 'output', 'ticket', 'pull-request', 'other')),
+  provenance: boundary.optional(boundary.string),
+  addedAt: boundary.nonEmptyString,
+});
+const orchestrationSessionCreateSchema = boundary.object({
+  name: boundary.nonEmptyString,
+  agent: boundary.optional(boundary.enumeration('claude', 'codex', 'cursor')),
+  goal: boundary.optional(boundary.string),
+  context: boundary.optional(boundary.string),
+  decisions: boundary.optional(boundary.array(boundary.string)),
+  blockers: boundary.optional(boundary.array(boundary.string)),
+  nextAction: boundary.optional(boundary.string),
+  evidence: boundary.optional(boundary.array(orchestrationLinkSchema)),
+  outputs: boundary.optional(boundary.array(orchestrationLinkSchema)),
+});
+const orchestrationSessionUpdateSchema = boundary.object({
+  name: boundary.optional(boundary.string),
+  archived: boundary.optional(boundary.boolean),
+  isPinned: boundary.optional(boundary.boolean),
+  agent: boundary.optional(boundary.enumeration('claude', 'codex', 'cursor')),
+  goal: boundary.optional(boundary.string),
+  context: boundary.optional(boundary.string),
+  decisions: boundary.optional(boundary.array(boundary.string)),
+  blockers: boundary.optional(boundary.array(boundary.string)),
+  nextAction: boundary.optional(boundary.string),
+  evidence: boundary.optional(boundary.array(orchestrationLinkSchema)),
+  outputs: boundary.optional(boundary.array(orchestrationLinkSchema)),
+  report: boundary.optional(boundary.nullable(boundary.object({
+    summary: boundary.nonEmptyString,
+    status: boundary.enumeration('reported', 'verified'),
+    evidence: boundary.array(orchestrationLinkSchema),
+    reportedAt: boundary.nonEmptyString,
+    provenance: boundary.nonEmptyString,
+  }))),
+  expectedRevision: boundary.optional(boundary.number),
+  source: boundary.optional(boundary.enumeration('user', 'agent')),
+});
 
 export function registerRunpaneHandlers(
   _ipcMain: IpcMain,
@@ -119,6 +242,19 @@ export function registerRunpaneHandlers(
   commandRegistry: PaneCommandRegistry,
 ): void {
   const { databaseService, sessionManager, taskQueue, configManager } = services;
+  const workspaceJournal = services.workspaceJournal ?? createWorkspaceJournal(services);
+  const workspaceStateReader = services.workspaceStateReader ?? new WorkspaceStateReader(
+    sessionManager,
+    () => workspaceJournal.epoch,
+    () => workspaceJournal.generation,
+  );
+  const workspaceCursorStore = services.workspaceCursorStore ?? new WorkspaceCursorStore(
+    path.join(getAppDirectory(), 'workspace-cursors.json'),
+  );
+  const consumerRuntime = new Map<string, { lastReadAt?: number; cadence?: WatchCadence }>();
+  services.workspaceJournal = workspaceJournal;
+  services.workspaceStateReader = workspaceStateReader;
+  services.workspaceCursorStore = workspaceCursorStore;
 
   commandRegistry.register('runpane:doctor', async (): Promise<RunpaneDoctorResult> => {
     return withRunpaneAction(services, 'doctor', {}, () => {
@@ -235,6 +371,75 @@ export function registerRunpaneHandlers(
     }, result => ({ repoId: result.repo?.id, resultCount: result.created ? 1 : 0 }));
   });
 
+  commandRegistry.register('runpane:sessions:list', async (): Promise<RunpaneSessionListResult> => {
+    return withRunpaneAction(services, 'sessions:list', {}, async () => {
+      const manager = requireOrchestrationSessionManager(services);
+      const result = await manager.list();
+      return { ok: true, ...result };
+    }, result => ({ resultCount: result.sessions.length }));
+  });
+
+  commandRegistry.register('runpane:sessions:create', async (request: PaneCommandValue): Promise<RunpaneSessionResult> => {
+    return withRunpaneAction(services, 'sessions:create', {}, async () => {
+      const manager = requireOrchestrationSessionManager(services);
+      const input = parseOrchestrationSessionCreateRequest(request);
+      const view = await manager.create(input);
+      return { ok: true, session: view.session, panelId: view.panel.id, internalSessionId: view.internalSession.id };
+    }, result => ({ resultCount: 1, panelId: result.panelId }));
+  });
+
+  commandRegistry.register('runpane:sessions:get', async (request: PaneCommandValue): Promise<RunpaneSessionResult> => {
+    return withRunpaneAction(services, 'sessions:get', {}, async () => {
+      const manager = requireOrchestrationSessionManager(services);
+      const session = await manager.get(parseOrchestrationSessionSelector(request));
+      return { ok: true, session };
+    }, result => ({ resultCount: 1 }));
+  });
+
+  commandRegistry.register('runpane:sessions:update', async (request: PaneCommandValue): Promise<RunpaneSessionResult> => {
+    return withRunpaneAction(services, 'sessions:update', {}, async () => {
+      const manager = requireOrchestrationSessionManager(services);
+      const normalized = parseOrchestrationSessionUpdateRequest(request);
+      const session = await manager.update(normalized.selector, normalized.input);
+      return { ok: true, session };
+    }, result => ({ resultCount: 1 }));
+  });
+
+  commandRegistry.register('runpane:sessions:set-agent', async (request: PaneCommandValue): Promise<RunpaneSessionResult> => {
+    return withRunpaneAction(services, 'sessions:set-agent', {}, async () => {
+      const manager = requireOrchestrationSessionManager(services);
+      const normalized = parseOrchestrationSessionAgentRequest(request);
+      const view = await manager.setAgent(normalized.selector, normalized.agent);
+      return { ok: true, session: view.session, panelId: view.panel.id, internalSessionId: view.internalSession.id };
+    }, result => ({ resultCount: 1, panelId: result.panelId }));
+  });
+
+  commandRegistry.register('runpane:sessions:associate', async (request: PaneCommandValue): Promise<RunpaneSessionResult> => {
+    return withRunpaneAction(services, 'sessions:associate', {}, async () => {
+      const manager = requireOrchestrationSessionManager(services);
+      const normalized = parseOrchestrationSessionAssociationRequest(request);
+      const session = await manager.associate(normalized.selector, normalized.association);
+      return { ok: true, session };
+    }, result => ({ resultCount: 1 }));
+  });
+
+  commandRegistry.register('runpane:sessions:detach', async (request: PaneCommandValue): Promise<RunpaneSessionResult> => {
+    return withRunpaneAction(services, 'sessions:detach', {}, async () => {
+      const manager = requireOrchestrationSessionManager(services);
+      const normalized = parseOrchestrationSessionDetachRequest(request);
+      const session = await manager.detach(normalized.selector, normalized.paneId);
+      return { ok: true, session };
+    }, result => ({ resultCount: 1 }));
+  });
+
+  commandRegistry.register('runpane:sessions:overview', async (request: PaneCommandValue): Promise<RunpaneSessionOverviewResult> => {
+    return withRunpaneAction(services, 'sessions:overview', {}, async () => {
+      const manager = requireOrchestrationSessionManager(services);
+      const overview = await manager.overview(parseOrchestrationSessionSelector(request));
+      return { ok: true, ...overview };
+    }, result => ({ resultCount: result.panes.length }));
+  });
+
   commandRegistry.register('runpane:panes:list', async (request: PaneCommandValue = {}): Promise<RunpanePaneListResult> => {
     return withRunpaneAction(services, 'panes:list', {}, () => {
       const normalized = parsePaneListRequest(request);
@@ -257,6 +462,54 @@ export function registerRunpaneHandlers(
         panes,
       };
     }, result => ({ repoId: result.repo?.id, resultCount: result.panes.length }));
+  });
+
+  commandRegistry.register('runpane:panes:cost', async (request: PaneCommandValue = {}): Promise<RunpanePaneCostResult> => {
+    let repoId: number | undefined;
+    return withRunpaneAction(services, 'panes:cost', {}, (): RunpanePaneCostResult => {
+      const normalized = parsePaneCostRequest(request);
+      const report = usageManager.getPaneCosts();
+      let panes = report.byPane.panes;
+
+      if (normalized.paneId) {
+        const pane = panes.find(entry => entry.paneId === normalized.paneId);
+        if (pane) {
+          panes = [pane];
+        } else {
+          const session = databaseService.getSession(normalized.paneId);
+          if (!session) throw new Error(`No Pane pane found with id ${normalized.paneId}`);
+          panes = [{
+            paneId: session.id,
+            paneName: session.name,
+            worktreePath: session.worktree_path,
+            repoId: session.project_id ?? null,
+            archived: isSessionArchived(session.archived),
+            createdAtMs: parseSessionTimestampMs(session.created_at),
+            ...emptyPaneCostSlice(),
+          }];
+        }
+      }
+
+      if (normalized.repo) {
+        const project = resolveRepoSelector(databaseService.getAllProjects(), normalized.repo);
+        repoId = project.id;
+        panes = panes.filter(pane => pane.repoId === project.id);
+      }
+
+      const scoped = normalized.paneId !== undefined || normalized.repo !== undefined;
+      const result: RunpanePaneCostResult = {
+        ok: true,
+        fromMs: report.fromMs,
+        toMs: report.toMs,
+        pricingAsOf: report.pricingAsOf,
+        panes,
+      };
+      if (!scoped) {
+        result.unattributed = report.byPane.unattributed;
+        result.totals = report.totals;
+      }
+      return result;
+    }, result => ({ repoId, resultCount: result.panes.length }));
   });
 
   commandRegistry.register('runpane:panes:pin', async (request: PaneCommandValue): Promise<RunpanePanePinResult> => {
@@ -365,6 +618,119 @@ export function registerRunpaneHandlers(
     }, result => ({ repoId: result.repo.id, resultCount: result.items.length }));
   });
 
+  commandRegistry.register('runpane:panes:adopt', async (request: PaneCommandValue): Promise<RunpanePaneAdoptResult> => {
+    return withRunpaneAction(services, 'panes:adopt', {}, async () => {
+      const normalized = parsePaneAdoptRequest(request);
+      const repo = resolveRepoSelector(databaseService.getAllProjects(), normalized.repo);
+      const repoSummary = projectToRepoSummary(repo, sessionManager.getSessionsForProject(repo.id).length);
+      const items: RunpanePaneCreateResultItem[] = [];
+
+      for (const [index, item] of normalized.panes.entries()) {
+        let createdSessionId: string | undefined;
+        let storedWorktreePath = item.path;
+        try {
+          const validatedPath = await validateAdoptedWorktree(services, repo, item.path);
+          storedWorktreePath = validatedPath.storagePath;
+          const existing = findSessionByWorktreeIdentity(
+            databaseService.getAllSessionsIncludingArchived({ includeHidden: true }),
+            validatedPath.identityPath,
+            validatedPath.pathResolver,
+          );
+          if (existing) {
+            throw new Error(`Worktree path is already registered by pane "${existing.name}" (${existing.id})`);
+          }
+          const tool = resolveToolSpec(item.tool, new PathResolver(repo).environment);
+          if (normalized.dryRun) {
+            items.push({ ok: true, index, name: item.name, pinned: item.pinned !== false, worktreePath: storedWorktreePath, tool: describeTool(tool) });
+            continue;
+          }
+
+          const session = await sessionManager.createSession(
+            item.name,
+            storedWorktreePath,
+            '',
+            path.basename(storedWorktreePath),
+            'ignore',
+            repo.id,
+            false,
+            item.folder
+              ? resolveOrCreateAdoptFolder(databaseService, repo.id, item.folder)
+              : undefined,
+            'none',
+            undefined,
+            item.baseBranch,
+            item.pinned !== false,
+            { worktreeOwnership: 'external' },
+          );
+          createdSessionId = session.id;
+          await sessionManager.updateSession(session.id, { status: 'stopped' });
+          const stoppedSession = sessionManager.getSession(session.id);
+          if (!stoppedSession) throw new Error(`Created session ${session.id} was not found after status update`);
+          await Promise.all([
+            panelManager.ensureExplorerPanel(session.id),
+            panelManager.ensureDiffPanel(session.id),
+          ]);
+
+          const resumeCommand = item.resume && tool.agent
+            ? buildAdoptResumeCommand(tool.agent, item.resume)
+            : tool.command;
+          const initialState: TerminalPanelState = {
+            initialCommand: item.launch ? resumeCommand : undefined,
+            agentType: tool.agent,
+            agentSessionId: item.resume,
+            hasClaudeSessionId: tool.agent === 'claude' && Boolean(item.resume),
+            isCliPanel: Boolean(tool.agent),
+          };
+          const panel = await panelManager.createPanel({
+            sessionId: session.id,
+            type: 'terminal',
+            title: tool.title,
+            initialState,
+            activate: normalized.focus === true,
+          });
+          const context = sessionManager.getProjectContext(session.id);
+          await terminalPanelManager.initializeTerminal(panel, storedWorktreePath, context?.commandRunner.wslContext ?? null);
+          if (!item.launch) {
+            terminalPanelManager.writeToTerminal(panel.id, resumeCommand);
+          }
+          sessionManager.emitSessionCreated(stoppedSession, {
+            activateOnCreate: normalized.focus === true,
+            createDefaultTerminalOnCreate: false,
+          });
+          items.push({
+            ok: true,
+            index,
+            name: item.name,
+            pinned: item.pinned !== false,
+            sessionId: session.id,
+            paneId: session.id,
+            panelId: panel.id,
+            worktreePath: storedWorktreePath,
+            tool: describeTool(tool),
+            active: Boolean(panel.state.isActive),
+            focused: Boolean(panel.state.isActive),
+            nextCommand: panelOutputCommand(panel.id),
+          });
+        } catch (error) {
+          let failureSessionId = createdSessionId;
+          if (createdSessionId) {
+            try {
+              await sessionManager.archiveSession(createdSessionId);
+              if (databaseService.deleteArchivedSessionPermanently(createdSessionId)) {
+                failureSessionId = undefined;
+              }
+            } catch (rollbackError) {
+              console.error(`[Runpane] Failed to roll back adopted pane ${createdSessionId}:`, rollbackError);
+            }
+          }
+          items.push(createFailureItem(index, item, error, failureSessionId, storedWorktreePath));
+        }
+      }
+
+      return { ok: items.every(item => item.ok), repo: repoSummary, items };
+    }, result => ({ repoId: result.repo.id, resultCount: result.items.length }));
+  });
+
   commandRegistry.register('runpane:panes:archive', async (request: PaneCommandValue): Promise<RunpanePaneArchiveResult> => {
     return withRunpaneAction(services, 'panes:archive', {}, async () => {
       const normalized = parsePaneArchiveRequest(request);
@@ -374,13 +740,33 @@ export function registerRunpaneHandlers(
         throw new Error(`Pane ${normalized.paneId} is already archived`);
       }
 
-      const worktreeCleanupApplicable = Boolean(pane.projectId) && !pane.isMainRepo;
+      const worktreeCleanupApplicable = Boolean(pane.projectId)
+        && !pane.isMainRepo
+        && pane.worktreeOwnership !== 'external';
       const safetyCheck = worktreeCleanupApplicable
         ? await computeArchiveSafety(services, pane)
         : { performed: false };
 
+      const blockCode = classifyArchiveBlock(safetyCheck, worktreeCleanupApplicable);
+      if (normalized.dryRun) {
+        return {
+          ok: true,
+          paneId: normalized.paneId,
+          dryRun: true,
+          wouldArchive: Boolean(normalized.force) || !blockCode,
+          forced: Boolean(normalized.force),
+          safetyCheck: toPublicSafetyCheck(safetyCheck),
+          blocked: blockCode
+            ? {
+                code: blockCode,
+                message: describeArchiveBlock(blockCode, safetyCheck),
+                safetyCheck: toPublicSafetyCheck(safetyCheck),
+              }
+            : undefined,
+        };
+      }
+
       if (!normalized.force) {
-        const blockCode = classifyArchiveBlock(safetyCheck, worktreeCleanupApplicable);
         if (blockCode) {
           const blocked: RunpanePaneArchiveBlockedResult = {
             ok: false,
@@ -574,11 +960,57 @@ export function registerRunpaneHandlers(
   });
 
   commandRegistry.register('runpane:panels:submit', async (request: PaneCommandValue): Promise<RunpanePanelSubmitResult> => {
-    return withRunpaneAction(services, 'panels:submit', {}, () => {
+    return withRunpaneAction(services, 'panels:submit', {}, async () => {
       const normalized = parsePanelSubmitRequest(request);
       const panel = resolveTerminalPanel(normalized.panelId);
       if (!terminalPanelManager.isTerminalInitialized(panel.id)) {
         throw new Error(`Terminal panel ${panel.id} is not initialized`);
+      }
+
+      let beforeScreen = await buildPanelScreenResult(panel, DEFAULT_PANEL_SCREEN_LIMIT);
+      const stagedInput = stripSubmitEnter(normalized.input);
+      const { agentType, activityStatus, isCliReady } = beforeScreen.state;
+      // Claude reads text and Enter arriving in one read as a paste and keeps
+      // the Enter as a newline. Terminal readiness can precede Claude drawing
+      // its UI or reading input, so wait while it is still drawing for its
+      // composer, then for the staged text to show, before sending Enter alone.
+      // Claude draws its UI on the alternate screen, so a quiet alternate
+      // screen without a composer is a menu or picker and gets the plain
+      // write. Startup can pause for seconds before the first frame.
+      if (stagedInput.length > 0 && agentType === 'claude' && !beforeScreen.composer.isPresent) {
+        beforeScreen = await waitForPanelScreen(
+          panel,
+          screen => screen.composer.isPresent ||
+            (screen.state.isAlternateScreen === true && !panelHasOutputWithin(panel.id, CLAUDE_UI_QUIET_MS)),
+        );
+      }
+      const stagesComposer = beforeScreen.composer.isPresent && (agentType === 'claude' ||
+        (agentType === 'codex' && activityStatus === 'idle' && isCliReady === true));
+      if (stagedInput.length > 0 && stagesComposer) {
+        const outputGenerationBeforeStage = terminalPanelManager.getOutputGeneration(panel.id);
+        terminalPanelManager.writeToTerminal(panel.id, stagedInput);
+        if (agentType === 'claude') {
+          await waitForPanelScreen(
+            panel,
+            screen => screen.composer.hasUndeliveredText && panelHasFreshOutputSince(panel.id, outputGenerationBeforeStage),
+          );
+        } else {
+          await sleep(CODEX_SUBMIT_STAGE_DELAY_MS);
+        }
+        const submission = await submitComposerForPanel(panel, 'auto');
+        return {
+          ok: submission.ok,
+          panelId: panel.id,
+          paneId: panel.sessionId,
+          inputBytes: Buffer.byteLength(stagedInput, 'utf8') + submission.inputBytes,
+          enter: 'cr',
+          sequenceName: submission.sequenceName,
+          verifiedSubmitted: submission.verifiedSubmitted,
+          verification: submission.verification,
+          sentAt: submission.sentAt,
+          blocked: submission.blocked,
+          nextCommand: submission.nextCommand,
+        };
       }
 
       const input = ensureSubmitEnter(normalized.input);
@@ -590,6 +1022,8 @@ export function registerRunpaneHandlers(
         paneId: panel.sessionId,
         inputBytes: Buffer.byteLength(input, 'utf8'),
         enter: 'cr',
+        sequenceName: 'enter-cr',
+        verifiedSubmitted: false,
         sentAt: new Date().toISOString(),
         nextCommand: panelWaitCommand(panel.id),
       };
@@ -632,6 +1066,194 @@ export function registerRunpaneHandlers(
     }));
   });
 
+  commandRegistry.register('runpane:workspace:state', async (request: PaneCommandValue = {}): Promise<RunpaneWorkspaceStateResult> => {
+    return withRunpaneAction(services, 'workspace:state', {}, () => {
+      const normalized = parsePaneListRequest(request);
+      const project = normalized.repo
+        ? resolveRepoSelector(databaseService.getAllProjects(), normalized.repo)
+        : undefined;
+      return workspaceStateReader.read(project?.id);
+    }, result => ({ resultCount: result.entries.length }));
+  });
+
+  commandRegistry.register('runpane:workspace:wait', async (request: PaneCommandValue = {}): Promise<RunpaneWorkspaceWaitResult> => {
+    return withRunpaneAction(services, 'workspace:wait', {}, async () => {
+      const normalized = parseWorkspaceWaitRequest(request);
+      const project = normalized.repo
+        ? resolveRepoSelector(databaseService.getAllProjects(), normalized.repo)
+        : undefined;
+      const filter: WorkspaceJournalFilter = {
+        kinds: normalized.kinds,
+        paneIds: normalized.paneIds,
+        excludePaneIds: normalized.excludePaneIds,
+        repoId: project?.id,
+        nameContains: normalized.nameContains,
+        agentsOnly: normalized.agentsOnly,
+        includeHeldInput: normalized.includeHeldInput,
+        includeHeldInputPresence: normalized.includeHeldInputPresence,
+      };
+      const timeoutMs = Math.min(normalized.timeoutMs ?? DEFAULT_WORKSPACE_WAIT_TIMEOUT_MS, MAX_WORKSPACE_WAIT_TIMEOUT_MS);
+      const limit = normalized.limit ?? DEFAULT_WORKSPACE_WAIT_LIMIT;
+      const idleSchedule: WorkspaceIdleSchedule = { idleAfterMs: normalized.idleAfterMs ?? 0, backoff: normalized.idleBackoff ?? false };
+      const requestStartedAt = Date.now();
+      // Take the consumer's in-memory record now; it is put back only on a non-reset exit.
+      const runtime = normalized.as ? consumerRuntime.get(normalized.as) : undefined;
+      if (normalized.as) consumerRuntime.delete(normalized.as);
+      let idleWindowStart = normalized.idleWindowStartMs ?? (normalized.as
+        ? runtime?.lastReadAt ?? 0
+        : normalized.since !== undefined ? 0 : requestStartedAt);
+      let cursor = normalized.since ?? workspaceJournal.generation;
+      let reset: RunpaneWorkspaceWaitResult['reset'];
+      const cadenceOptions = normalized.as ? workspaceCadenceOptions(normalized, filter, idleSchedule) : undefined;
+      const readFilter = cadenceOptions ? WatchCadence.observeFilter(filter) : filter;
+      const currentIdleEntries = (candidates: readonly WorkspaceIdleCandidate[]): RunpaneWorkspaceEntry[] => dueIdleEntries(
+        candidates,
+        idleSchedule,
+        idleWindowStart,
+        Date.now(),
+        workspaceJournal.generation,
+      )
+        .filter(entry => matchesFilter(entry, filter))
+        .map(entry => projectWorkspaceEntry(entry, filter));
+      const baselineEntries = (): RunpaneWorkspaceEntry[] => workspaceStateReader.read(project?.id).entries
+        .filter(entry => matchesFilter(entry, filter))
+        .map(entry => projectWorkspaceEntry(entry, filter));
+
+      if (normalized.as) {
+        const evicted = workspaceCursorStore.evictStale();
+        for (const name of evicted) consumerRuntime.delete(name);
+        let named = workspaceCursorStore.get(normalized.as);
+        if (!named) {
+          cursor = normalized.from === 'earliest'
+            ? Math.max(0, workspaceJournal.oldestGeneration - 1)
+            : workspaceJournal.generation;
+          workspaceCursorStore.create(normalized.as, cursor, workspaceJournal.epoch);
+          reset = { reason: evicted.includes(normalized.as) ? 'unknown-consumer' : 'first-use' };
+        } else if (named.epoch !== workspaceJournal.epoch) {
+          cursor = workspaceJournal.generation;
+          workspaceCursorStore.create(normalized.as, cursor, workspaceJournal.epoch);
+          reset = { reason: 'epoch-changed' };
+        } else {
+          named = workspaceCursorStore.commitPending(normalized.as) ?? named;
+          cursor = named.gen;
+        }
+      }
+
+      if (reset) {
+        const silentBaseline = reset.reason === 'first-use' && normalized.from !== 'earliest';
+        const baseline = silentBaseline ? [] : baselineEntries()
+          .map(entry => reset?.reason === 'epoch-changed' ? { ...entry, changedWhileAway: true as const } : entry);
+        const entries = [...baseline, ...currentIdleEntries(workspaceIdleCandidates(workspaceStateReader, workspaceJournal, project?.id))];
+        if (normalized.as) consumerRuntime.set(normalized.as, { lastReadAt: Date.now() });
+        return {
+          ok: true,
+          epoch: workspaceJournal.epoch,
+          generation: workspaceJournal.generation,
+          entries,
+          timedOut: false,
+          reset,
+          nextCommand: workspaceNextCommand(normalized, workspaceJournal.generation),
+        };
+      }
+
+      let cadence: WatchCadence | undefined;
+      if (cadenceOptions) {
+        cadence = runtime?.cadence?.options.key === cadenceOptions.key ? runtime.cadence : new WatchCadence(cadenceOptions);
+        cursor = cadence.readCursor ?? cursor;
+      }
+
+      const deadlineAt = requestStartedAt + timeoutMs;
+      const startCursor = cursor;
+      let readAny = false;
+      let waited: Awaited<ReturnType<WorkspaceJournal['waitAfter']>>;
+      let entries: RunpaneWorkspaceEntry[];
+      for (;;) {
+        const idleCandidates = workspaceIdleCandidates(workspaceStateReader, workspaceJournal, project?.id);
+        const initial = workspaceJournal.readAfter(cursor, readFilter, limit);
+        let idleEntries = currentIdleEntries(idleCandidates);
+        if (initial.entries.length > 0 || initial.dropped !== undefined || idleEntries.length > 0) {
+          waited = { ...initial, timedOut: initial.entries.length === 0 };
+        } else {
+          const now = Date.now();
+          const parkUntil = Math.min(
+            deadlineAt,
+            nextIdleDeadline(idleCandidates, idleSchedule, now) ?? Number.POSITIVE_INFINITY,
+            cadence?.nextDeadline(now) ?? Number.POSITIVE_INFINITY,
+          );
+          waited = await workspaceJournal.waitAfter(
+            cursor,
+            readFilter,
+            Math.max(0, parkUntil - now),
+            limit,
+            normalized.as ?? 'anonymous',
+          );
+          idleEntries = currentIdleEntries(workspaceIdleCandidates(workspaceStateReader, workspaceJournal, project?.id));
+        }
+        if (waited.dropped) {
+          reset = { reason: 'cursor-truncated' };
+        }
+        entries = [...reset ? baselineEntries() : waited.entries, ...idleEntries];
+
+        if (!cadence || reset) {
+          if (normalized.as && (!waited.timedOut || waited.dropped !== undefined)) {
+            workspaceCursorStore.advance(
+              normalized.as,
+              waited.generation,
+              workspaceJournal.epoch,
+              !normalized.ackNow,
+            );
+          }
+          break;
+        }
+
+        // Drain the rest of the backlog before flushing so a BUSY on a later page
+        // can still cancel a READY on an earlier one.
+        const now = Date.now();
+        if (waited.entries.length > 0) readAny = true;
+        cadence.ingest(entries, now);
+        idleWindowStart = now;
+        cursor = Math.max(cursor, waited.generation);
+        if (waited.entries.length > 0 && cursor < workspaceJournal.generation) {
+          const rest = workspaceJournal.readAfter(cursor, readFilter, Number.MAX_SAFE_INTEGER);
+          cadence.ingest(rest.entries, now);
+          cursor = Math.max(cursor, rest.generation);
+        }
+        cadence.readCursor = cursor;
+        entries = cadence.flush(now);
+        if (entries.length > 0 || now >= deadlineAt) break;
+      }
+      if (cadence && !reset && readAny) {
+        // The durable cursor never passes an entry still pending or held in memory. The
+        // instance resumes from its own read cursor, so nothing repeats while it lives. If
+        // the instance is discarded (request shape change, eviction, reset, or a call without
+        // cadence flags) the re-read from the durable cursor re-delivers the held entries under
+        // the new filter, and later entries already delivered may repeat: that is the accepted
+        // at-least-once contract.
+        const lowestUnflushed = cadence.lowestUnflushedGen();
+        const durableGen = Math.max(
+          startCursor,
+          Math.min(cursor, lowestUnflushed === undefined ? cursor : lowestUnflushed - 1),
+        );
+        workspaceCursorStore.advance(normalized.as ?? '', durableGen, workspaceJournal.epoch, !normalized.ackNow);
+      }
+      // A reset drops the cadence; the idle window still moves forward.
+      if (normalized.as) consumerRuntime.set(normalized.as, { lastReadAt: Date.now(), cadence: reset ? undefined : cadence });
+
+      const generation = cadence && !reset ? cursor : waited.generation;
+      return {
+        ok: true,
+        epoch: workspaceJournal.epoch,
+        generation,
+        entries,
+        timedOut: entries.length === 0 && (cadence !== undefined || waited.timedOut),
+        dropped: waited.dropped,
+        reset,
+        nextCommand: workspaceNextCommand(normalized, generation),
+      };
+    }, result => ({ resultCount: result.entries.length, timedOut: result.timedOut }), result =>
+      result.entries.length > 0 || result.reset !== undefined);
+  });
+
   commandRegistry.register('runpane:agents:doctor', async (request: PaneCommandValue): Promise<RunpaneAgentDoctorResult> => {
     return withRunpaneAction(services, 'agents:doctor', {}, async () => {
       const normalized = parseAgentDoctorRequest(request);
@@ -664,21 +1286,36 @@ function projectToRepoSummary(project: Project, sessionCount: number): RunpaneRe
   };
 }
 
-function sessionToPaneSummary(session: Session, project: Project) {
+function sessionToPaneSummary(session: Session, project: Project): RunpanePaneSummary {
+  const panels = panelManager.getPanelsForSession(session.id);
+  const agentStatus = resolveAggregatedAgentStatus(panels);
+
   return {
     id: session.id,
     paneId: session.id,
     name: session.name,
     status: session.status,
+    agentStatus,
     worktreePath: session.worktreePath,
     repoId: project.id,
     repoName: project.name,
-    panelCount: panelManager.getPanelsForSession(session.id).length,
+    panelCount: panels.length,
     pinned: Boolean(session.isFavorite),
     createdAt: toIsoString(session.createdAt),
     lastActivity: toIsoString(session.lastActivity),
     archived: session.archived || undefined,
+    ownership: session.worktreeOwnership ?? 'pane',
   };
+}
+
+function resolveAggregatedAgentStatus(panels: readonly ToolPanel[]): RunpanePanelActivityStatus {
+  for (const panel of panels) {
+    const state = terminalPanelManager.getAgentStatus(panel.id);
+    if (state === 'working' || state === 'blocked') {
+      return 'active';
+    }
+  }
+  return 'idle';
 }
 
 function panelToSummary(panel: ToolPanel) {
@@ -892,7 +1529,7 @@ async function submitCreateComposerInput(
         stagedText: input,
       });
 
-      if (lastVerdict === 'cleared' && afterScreen.state.activityStatus === 'active') {
+      if (lastVerdict === 'cleared' && panelHasFreshOutputSince(panel.id, outputGenerationBeforeSubmit)) {
         return {
           delivered: true,
           submitted: true,
@@ -900,6 +1537,7 @@ async function submitCreateComposerInput(
           strategy: submit.strategy,
           sequenceName: submit.sequenceName,
           verifiedSubmitted: true,
+          verification: 'observed' as const,
           staged: false,
           attempts,
           sentAt: new Date().toISOString(),
@@ -966,6 +1604,11 @@ function panelHasFreshOutputSince(panelId: string, generation: number): boolean 
   return terminalPanelManager.getOutputGeneration(panelId) > generation;
 }
 
+function panelHasOutputWithin(panelId: string, windowMs: number): boolean {
+  const lastOutputAt = terminalPanelManager.getLastOutputAt(panelId);
+  return lastOutputAt !== undefined && Date.now() - Date.parse(lastOutputAt) < windowMs;
+}
+
 async function createPaneItem(
   services: AppServices,
   repo: Project,
@@ -978,8 +1621,12 @@ async function createPaneItem(
     throw new Error('Task queue not initialized');
   }
 
+  const tool = resolveToolSpec(item.tool, new PathResolver(repo).environment);
+
+  let createdSessionId: string | undefined;
+  let createdWorktreePath: string | undefined;
+
   try {
-    const tool = resolveToolSpec(item.tool, new PathResolver(repo).environment);
     const sessionResult = await taskQueue.createSessionAndWait({
       prompt: item.sessionPrompt ?? '',
       worktreeTemplate: item.worktreeName ?? item.name,
@@ -990,10 +1637,13 @@ async function createPaneItem(
       activateOnCreate: options.activate !== false,
     }, { timeoutMs: options.timeoutMs });
 
+    createdSessionId = sessionResult.sessionId;
+
     const session = sessionManager.getSession(sessionResult.sessionId);
     if (!session) {
       throw new Error(`Created session ${sessionResult.sessionId} was not found`);
     }
+    createdWorktreePath = session.worktreePath;
 
     const { panel, readiness, initialInput } = await createTerminalPanelForSession(services, session, tool, {
       activate: options.activate,
@@ -1019,7 +1669,7 @@ async function createPaneItem(
       initialInput,
     };
   } catch (error) {
-    return createFailureItem(index, item, error);
+    return createFailureItem(index, item, error, createdSessionId, createdWorktreePath);
   }
 }
 
@@ -1091,8 +1741,13 @@ async function buildPanelScreenResult(panel: ToolPanel, limit: number): Promise<
   const liveSnapshot = terminalPanelManager.getTerminalSnapshot(panel.id);
   const customState = getTerminalCustomState(panel);
   const state = panelStateSummary(panel, liveSnapshot, customState);
-  const { source, rawText } = selectPanelScreenText(liveSnapshot, customState);
+  const persisted = liveSnapshot ? null : panelDatabase.getPanelBuffers(panel.id);
+  const { source, rawText } = selectPanelScreenText(liveSnapshot, customState, persisted);
   const bounded = boundSanitizedLines(rawText, limit);
+  const composerText = state.agentType === 'claude' && liveSnapshot
+    ? terminalPanelManager.getInputScreenText(panel.id) ?? bounded.text
+    : bounded.text;
+  const composer = detectPanelComposer(composerText, state.agentType);
 
   return {
     ok: true,
@@ -1104,8 +1759,59 @@ async function buildPanelScreenResult(panel: ToolPanel, limit: number): Promise<
     hasMore: bounded.hasMore,
     text: bounded.text,
     state,
+    composer,
     nextCommand: bounded.hasMore ? panelOutputCommand(panel.id) : panelWaitCommand(panel.id),
   };
+}
+
+function detectPanelComposer(
+  text: string,
+  agentType: RunpaneAgentId | undefined,
+): RunpanePanelScreenResult['composer'] {
+  if (agentType === 'claude') {
+    return detectClaudeComposer(text);
+  }
+  if (agentType !== 'codex') {
+    return { isPresent: false, hasUndeliveredText: false };
+  }
+
+  const lines = text.split(/\r?\n/u).map(line => line.trim());
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const match = lines[index].match(/^[›❯]\s*(.*)$/u);
+    if (!match) continue;
+
+    const content = match[1].trim();
+    const isPlaceholder = /^ask codex to do anything[.!]?$/iu.test(content);
+    return {
+      isPresent: true,
+      hasUndeliveredText: content.length > 0 && !isPlaceholder,
+    };
+  }
+
+  const hasPastedContent = /\[Pasted Content[^\]]*\]/iu.test(text);
+  return {
+    isPresent: hasPastedContent,
+    hasUndeliveredText: hasPastedContent,
+  };
+}
+
+// Claude draws its composer as a `❯` line boxed between two horizontal rules;
+// held input is anything between the prompt marker and the closing rule.
+function detectClaudeComposer(text: string): RunpanePanelScreenResult['composer'] {
+  const lines = text.split(/\r?\n/u).map(line => line.trim());
+  const isRule = (line: string | undefined) => line !== undefined && /^─{3,}$/u.test(line);
+  for (let index = lines.length - 1; index > 0; index -= 1) {
+    const match = lines[index].match(/^❯(?:\s+(.*))?$/u);
+    if (!match || !isRule(lines[index - 1])) continue;
+
+    const closingRule = lines.findIndex((line, lineIndex) => lineIndex > index && isRule(line));
+    const held = [match[1] ?? '', ...lines.slice(index + 1, closingRule < 0 ? undefined : closingRule)];
+    return {
+      isPresent: true,
+      hasUndeliveredText: held.some(line => line.length > 0),
+    };
+  }
+  return { isPresent: false, hasUndeliveredText: false };
 }
 
 interface PanelScreenText {
@@ -1116,6 +1822,7 @@ interface PanelScreenText {
 function selectPanelScreenText(
   snapshot: TerminalPanelSnapshot | null,
   customState: TerminalPanelState,
+  persisted: PanelBuffers | null,
 ): PanelScreenText {
   if (snapshot) {
     if (snapshot.screenText !== undefined) {
@@ -1133,12 +1840,12 @@ function selectPanelScreenText(
     return { source: 'empty', rawText: '' };
   }
 
-  const persistedAlternate = customState.alternateScreenBuffer;
+  const persistedAlternate = persisted?.alternate;
   if (customState.isAlternateScreen && persistedAlternate) {
     return { source: 'persistedOutput', rawText: persistedAlternate };
   }
 
-  const persistedScrollback = normalizeScrollbackBuffer(customState.scrollbackBuffer);
+  const persistedScrollback = persisted?.scrollback;
   if (persistedScrollback) {
     return { source: 'persistedOutput', rawText: persistedScrollback };
   }
@@ -1168,9 +1875,7 @@ function panelStateSummary(
 function getTerminalCustomState(panel: ToolPanel): TerminalPanelState {
   try {
     return decodeBoundary(panel.state.customState, boundary.object({
-      alternateScreenBuffer: boundary.optional(boundary.string),
       isAlternateScreen: boundary.optional(boundary.boolean),
-      scrollbackBuffer: boundary.optional(boundary.union(boundary.string, boundary.array(boundary.string))),
       agentType: boundary.optional(boundary.enumeration(...RUNPANE_CONTRACT.enums.agents)),
       isCliReady: boundary.optional(boundary.boolean),
       isCliPanel: boundary.optional(boundary.boolean),
@@ -1179,15 +1884,6 @@ function getTerminalCustomState(panel: ToolPanel): TerminalPanelState {
   } catch {
     return {};
   }
-}
-
-function normalizeScrollbackBuffer(value: TerminalPanelState['scrollbackBuffer']): string {
-  const stringValue = optionalString(value);
-  if (stringValue !== undefined) return stringValue;
-  if (Array.isArray(value)) {
-    return value.join('\n');
-  }
-  return '';
 }
 
 interface BoundedSanitizedLines {
@@ -1334,6 +2030,12 @@ function ensureSubmitEnter(input: string): string {
   return `${input}\r`;
 }
 
+function stripSubmitEnter(input: string): string {
+  if (input.endsWith('\r\n')) return input.slice(0, -2);
+  if (input.endsWith('\r') || input.endsWith('\n')) return input.slice(0, -1);
+  return input;
+}
+
 interface ComposerSubmit {
   strategy: 'codex-ctrl-enter' | 'enter';
   sequenceName: RunpanePanelSubmitComposerResult['sequenceName'];
@@ -1366,8 +2068,9 @@ async function submitComposerForPanel(
   const beforeScreen = await buildPanelScreenResult(panel, DEFAULT_PANEL_SCREEN_LIMIT);
   const state = beforeScreen.state;
   const submit = resolveComposerSubmit(strategy, state.agentType);
+  const outputGenerationBeforeSubmit = terminalPanelManager.getOutputGeneration(panel.id);
   terminalPanelManager.writeToTerminal(panel.id, submit.input);
-  const verification = await verifyComposerSubmitted(panel, beforeScreen);
+  const verification = await verifyComposerSubmitted(panel, beforeScreen, outputGenerationBeforeSubmit);
 
   return {
     ok: verification.ok,
@@ -1377,45 +2080,83 @@ async function submitComposerForPanel(
     strategy: submit.strategy,
     sequenceName: submit.sequenceName,
     verifiedSubmitted: verification.verifiedSubmitted,
+    verification: verification.verification,
     sentAt: new Date().toISOString(),
     blocked: verification.blocked,
     nextCommand: verification.blocked?.suggestedCommand ?? panelWaitCommand(panel.id),
   };
 }
 
+async function waitForPanelScreen(
+  panel: ToolPanel,
+  isReady: (screen: RunpanePanelScreenResult) => boolean,
+): Promise<RunpanePanelScreenResult> {
+  const startedAt = Date.now();
+  let screen = await buildPanelScreenResult(panel, DEFAULT_PANEL_SCREEN_LIMIT);
+  while (!isReady(screen) && Date.now() - startedAt < CLAUDE_INPUT_WAIT_TIMEOUT_MS) {
+    await sleep(DEFAULT_COMPOSER_VERIFY_INTERVAL_MS);
+    screen = await buildPanelScreenResult(panel, DEFAULT_PANEL_SCREEN_LIMIT);
+  }
+  return screen;
+}
+
 async function verifyComposerSubmitted(
   panel: ToolPanel,
   beforeScreen: RunpanePanelScreenResult,
+  outputGenerationBeforeSubmit: number,
 ): Promise<{
   ok: boolean;
   verifiedSubmitted: boolean;
+  verification?: 'observed' | 'unverifiable';
   blocked?: RunpanePanelBlockedState;
 }> {
-  const beforeHadComposerPrompt = looksLikePendingComposer(beforeScreen.text);
+  const beforeHadComposerPrompt = beforeScreen.composer.hasUndeliveredText || looksLikePendingComposer(beforeScreen.text);
   if (!beforeHadComposerPrompt && !beforeScreen.text.trim()) {
     return { ok: true, verifiedSubmitted: false };
   }
+  const stagedText = composerEvidenceText(beforeScreen.text);
   let latestScreen = beforeScreen;
+  let previousPollShowedEmptyComposer = false;
   const startedAt = Date.now();
 
   while (Date.now() - startedAt <= DEFAULT_COMPOSER_VERIFY_TIMEOUT_MS) {
     await sleep(DEFAULT_COMPOSER_VERIFY_INTERVAL_MS);
     latestScreen = await buildPanelScreenResult(panel, DEFAULT_PANEL_SCREEN_LIMIT);
 
-    if (latestScreen.state.activityStatus === 'active') {
-      return { ok: true, verifiedSubmitted: true };
+    // Claude always draws its composer box, and repaints (at startup, say)
+    // briefly show neither the box nor the prompt; only a steady empty box
+    // proves the prompt was taken.
+    if (beforeScreen.state.agentType === 'claude') {
+      const showsEmptyComposer = latestScreen.composer.isPresent && !latestScreen.composer.hasUndeliveredText;
+      if (beforeHadComposerPrompt && showsEmptyComposer && previousPollShowedEmptyComposer) {
+        return { ok: true, verifiedSubmitted: true, verification: 'observed' };
+      }
+      previousPollShowedEmptyComposer = showsEmptyComposer;
+      continue;
     }
 
-    if (beforeHadComposerPrompt && !looksLikePendingComposer(latestScreen.text)) {
-      return { ok: true, verifiedSubmitted: true };
+    const verdict = assessComposerEvidence({
+      beforeText: beforeScreen.text,
+      afterText: latestScreen.text,
+      stagedText,
+    });
+    const hasFreshOutput = panelHasFreshOutputSince(panel.id, outputGenerationBeforeSubmit);
+
+    if (verdict === 'cleared' && hasFreshOutput) {
+      return { ok: true, verifiedSubmitted: true, verification: 'observed' };
+    }
+
+    if (beforeHadComposerPrompt && !latestScreen.composer.hasUndeliveredText && !looksLikePendingComposer(latestScreen.text)) {
+      return { ok: true, verifiedSubmitted: true, verification: 'observed' };
     }
 
   }
 
-  if (beforeHadComposerPrompt && looksLikePendingComposer(latestScreen.text)) {
+  if (beforeHadComposerPrompt && (latestScreen.composer.hasUndeliveredText || looksLikePendingComposer(latestScreen.text))) {
     return {
       ok: false,
       verifiedSubmitted: false,
+      verification: panelHasFreshOutputSince(panel.id, outputGenerationBeforeSubmit) ? 'unverifiable' : undefined,
       blocked: {
         kind: 'agent-prompt',
         message: 'Pane sent the composer submit sequence, but the prompt still appears to be sitting in the composer.',
@@ -1424,11 +2165,25 @@ async function verifyComposerSubmitted(
     };
   }
 
+  if (panelHasFreshOutputSince(panel.id, outputGenerationBeforeSubmit)) {
+    return { ok: true, verifiedSubmitted: false, verification: 'unverifiable' };
+  }
+
   return { ok: true, verifiedSubmitted: false };
 }
 
+function composerEvidenceText(text: string): string {
+  const lines = text.split(/\r?\n/u);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const match = lines[index].trim().match(/^[>›❯▌]\s*(.+)$/u);
+    if (match?.[1]) return match[1];
+  }
+  const pasted = text.match(/\[Pasted (?:Content|text)[^\]]*\]/iu);
+  return pasted?.[0] ?? '';
+}
+
 function looksLikePendingComposer(text: string): boolean {
-  return /\[Pasted Content[^\]]*\]/i.test(text) ||
+  return /\[Pasted (?:Content|text)[^\]]*\]/i.test(text) ||
     /(?:press\s+)?(?:ctrl|control)\+enter\s+to\s+submit/i.test(text);
 }
 
@@ -1624,7 +2379,7 @@ function getPanelScrollback(panel: ToolPanel): string | null {
     return liveScrollback;
   }
 
-  const persisted = normalizeScrollbackBuffer(getTerminalCustomState(panel).scrollbackBuffer);
+  const persisted = panelDatabase.getPanelBuffers(panel.id)?.scrollback;
   if (persisted) return persisted;
 
   return null;
@@ -1658,6 +2413,186 @@ function parsePaneListRequest(value: PaneCommandValue): RunpanePaneListRequest {
   };
 }
 
+function requireOrchestrationSessionManager(services: AppServices) {
+  if (!services.orchestrationSessionManager) throw new Error('Sessions manager is not initialized');
+  return services.orchestrationSessionManager;
+}
+
+function parseOrchestrationSessionSelector(value: PaneCommandValue): RunpaneSessionSelector {
+  const selector = decodeBoundary(value, orchestrationSelectorSchema);
+  if (!selector.sessionId && !selector.name) throw new Error('Named Session id or name is required');
+  return selector;
+}
+
+function parseOrchestrationSessionCreateRequest(value: PaneCommandValue): OrchestrationSessionCreateInput {
+  return decodeBoundary(value, orchestrationSessionCreateSchema);
+}
+
+interface OrchestrationSessionUpdateRequest {
+  selector: RunpaneSessionSelector;
+  input: OrchestrationSessionUpdateInput;
+}
+
+function parseOrchestrationSessionUpdateRequest(value: PaneCommandValue): OrchestrationSessionUpdateRequest {
+  if (!isRecord(value)) throw new Error('Session update request must be an object');
+  const selector = parseOrchestrationSessionSelector(value.selector);
+  const input = decodeBoundary(value.input, orchestrationSessionUpdateSchema);
+  return { selector, input };
+}
+
+interface OrchestrationSessionAgentRequest {
+  selector: RunpaneSessionSelector;
+  agent: PaneChatAgent;
+}
+
+function parseOrchestrationSessionAgentRequest(value: PaneCommandValue): OrchestrationSessionAgentRequest {
+  if (!isRecord(value)) throw new Error('Session agent request must be an object');
+  const selector = parseOrchestrationSessionSelector(value.selector);
+  const agent = decodeBoundary(value.agent, boundary.enumeration('claude', 'codex', 'cursor'));
+  return { selector, agent };
+}
+
+interface OrchestrationSessionAssociationRequest {
+  selector: RunpaneSessionSelector;
+  association: OrchestrationAssociationInput;
+}
+
+function parseOrchestrationSessionAssociationRequest(value: PaneCommandValue): OrchestrationSessionAssociationRequest {
+  if (!isRecord(value)) throw new Error('Session association request must be an object');
+  const selector = parseOrchestrationSessionSelector(value.selector);
+  const association = decodeBoundary(value.association, boundary.object({
+    paneId: boundary.nonEmptyString,
+    panelIds: boundary.optional(boundary.array(boundary.nonEmptyString)),
+  }));
+  return { selector, association };
+}
+
+interface OrchestrationSessionDetachRequest {
+  selector: RunpaneSessionSelector;
+  paneId?: string;
+}
+
+function parseOrchestrationSessionDetachRequest(value: PaneCommandValue): OrchestrationSessionDetachRequest {
+  if (!isRecord(value)) throw new Error('Session detach request must be an object');
+  const selector = parseOrchestrationSessionSelector(value.selector);
+  const paneId = value.paneId === undefined ? undefined : decodeBoundary(value.paneId, boundary.nonEmptyString);
+  return { selector, paneId };
+}
+
+function parsePaneCostRequest(value: PaneCommandValue): RunpanePaneCostRequest {
+  if (value === undefined || value === null) return {};
+  if (!isRecord(value)) throw new Error('Pane cost request must be an object');
+  const paneId = optionalString(value.paneId)?.trim();
+  if (value.paneId !== undefined && !paneId) {
+    throw new Error('Pane cost paneId must be a non-empty string');
+  }
+  return {
+    repo: value.repo === undefined || value.repo === null || value.repo === ''
+      ? undefined
+      : parseRepoSelector(value.repo),
+    paneId,
+  };
+}
+
+function emptyPaneCostSlice() {
+  return {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    totalTokens: 0,
+    messageCount: 0,
+    estimatedCostUsd: 0,
+    costIncomplete: false,
+    cacheSavingsUsd: 0,
+    uncachedCostUsd: 0,
+    uncachedInputTokens: 0,
+    cacheHitRate: 0,
+    byModel: [],
+  };
+}
+
+function parseSessionTimestampMs(value: string): number {
+  const sqliteTimestamp = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(value);
+  return Date.parse(sqliteTimestamp ? `${value.replace(' ', 'T')}Z` : value);
+}
+
+function isSessionArchived(value: boolean | number | null | undefined): boolean {
+  return value === true || value === 1;
+}
+
+function parseWorkspaceWaitRequest(value: PaneCommandValue): RunpaneWorkspaceWaitRequest {
+  if (!isRecord(value)) throw new Error('Workspace wait request must be an object');
+  const consumer = optionalString(value.as)?.trim();
+  if (consumer && !WORKSPACE_CONSUMER_PATTERN.test(consumer)) {
+    throw new Error('Workspace wait as must contain 1-64 letters, numbers, dots, underscores, or hyphens');
+  }
+  const since = parseNonNegativeInteger(value.since, 'since');
+  if (consumer && since !== undefined) throw new Error('Workspace wait request cannot include both as and since');
+  if (value.from !== undefined && value.from !== 'now' && value.from !== 'earliest') {
+    throw new Error('Workspace wait from must be now or earliest');
+  }
+
+  return {
+    since,
+    as: consumer,
+    from: value.from === 'earliest' ? 'earliest' : value.from === 'now' ? 'now' : undefined,
+    timeoutMs: parseNonNegativeInteger(value.timeoutMs, 'timeoutMs'),
+    limit: parsePositiveInteger(value.limit, 'limit'),
+    kinds: parseWorkspaceKinds(value.kinds),
+    paneIds: parseStringArray(value.paneIds, 'paneIds'),
+    excludePaneIds: parseStringArray(value.excludePaneIds, 'excludePaneIds'),
+    repo: value.repo === undefined || value.repo === null || value.repo === '' ? undefined : parseRepoSelector(value.repo),
+    nameContains: optionalString(value.nameContains),
+    agentsOnly: optionalBoolean(value.agentsOnly),
+    ackNow: optionalBoolean(value.ackNow),
+    includeHeldInput: optionalBoolean(value.includeHeldInput),
+    includeHeldInputPresence: optionalBoolean(value.includeHeldInputPresence),
+    idleAfterMs: parseNonNegativeInteger(value.idleAfterMs, 'idleAfterMs'),
+    idleWindowStartMs: parseNonNegativeInteger(value.idleWindowStartMs, 'idleWindowStartMs'),
+    settleMs: parseNonNegativeInteger(value.settleMs, 'settleMs'),
+    blockedSettleMs: parseNonNegativeInteger(value.blockedSettleMs, 'blockedSettleMs'),
+    minIntervalMs: parseNonNegativeInteger(value.minIntervalMs, 'minIntervalMs'),
+    idleBackoff: optionalBoolean(value.idleBackoff),
+  };
+}
+
+const workspaceEntryKindSchema = boundary.enumeration(
+  'agent.ready',
+  'agent.busy',
+  'agent.blocked',
+  'agent.unknown',
+  'agent.idle',
+  'pane.created',
+  'pane.gone',
+  'panel.exited',
+);
+
+function parseWorkspaceKinds(value: PaneCommandValue): RunpaneWorkspaceEntryKind[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  return decodeBoundary(value, boundary.array(workspaceEntryKindSchema));
+}
+
+function parseStringArray(value: PaneCommandValue, field: string): string[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  try {
+    return decodeBoundary(value, boundary.array(boundary.string))
+      .map(item => item.trim())
+      .filter(Boolean);
+  } catch {
+    throw new Error(`Workspace wait ${field} must be an array of strings`);
+  }
+}
+
+function parseNonNegativeInteger(value: PaneCommandValue, field: string): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  const decoded = decodeBoundary(value, boundary.number);
+  if (!Number.isInteger(decoded) || decoded < 0) {
+    throw new Error(`${field} must be a non-negative integer`);
+  }
+  return decoded;
+}
+
 function parsePaneCreateRequest(value: PaneCommandValue): RunpanePaneCreateRequest {
   if (!isRecord(value)) {
     throw new Error('Pane create request must be an object');
@@ -1687,6 +2622,132 @@ function parsePaneCreateRequest(value: PaneCommandValue): RunpanePaneCreateReque
     focus: optionalBoolean(value.focus),
     source: value.source === 'user' || value.source === 'agent' ? value.source : undefined,
   };
+}
+
+function parsePaneAdoptRequest(value: PaneCommandValue): RunpanePaneAdoptRequest {
+  if (!isRecord(value)) throw new Error('Pane adopt request must be an object');
+  if (!Array.isArray(value.panes) || value.panes.length === 0) {
+    throw new Error('Pane adopt request must include at least one pane');
+  }
+  if (value.noFocus === true && value.focus === true) {
+    throw new Error('Pane adopt request cannot include both noFocus and focus');
+  }
+  return {
+    repo: parseRepoSelector(value.repo),
+    panes: value.panes.map((entry, index) => {
+      if (!isRecord(entry)) throw new Error(`Pane adopt item ${index} must be an object`);
+      const worktreePath = optionalString(entry.path)?.trim();
+      const name = optionalString(entry.name)?.trim();
+      if (!worktreePath) throw new Error(`Pane adopt item ${index} must include path`);
+      if (!name) throw new Error(`Pane adopt item ${index} must include name`);
+      return {
+        path: worktreePath,
+        name,
+        baseBranch: optionalString(entry.baseBranch),
+        folder: optionalString(entry.folder),
+        pinned: optionalBoolean(entry.pinned),
+        tool: parseRunpaneToolSpec(entry.tool, `Pane adopt item ${index}`),
+        resume: optionalString(entry.resume),
+        launch: optionalBoolean(entry.launch),
+      };
+    }),
+    dryRun: optionalBoolean(value.dryRun),
+    noFocus: optionalBoolean(value.noFocus),
+    focus: optionalBoolean(value.focus),
+    source: value.source === 'user' || value.source === 'agent' ? value.source : undefined,
+  };
+}
+
+async function validateAdoptedWorktree(
+  services: AppServices,
+  repo: Project,
+  requestedPath: string,
+): Promise<{ storagePath: string; identityPath: string; pathResolver: PathResolver }> {
+  const context = services.sessionManager.getProjectContextByProjectId(repo.id);
+  if (!context) throw new Error(`Project context is unavailable for ${repo.name}`);
+  let identityPath: string;
+  try {
+    identityPath = resolvePathIdentity(requestedPath, context.pathResolver);
+  } catch {
+    throw new Error(`Adopt path does not exist: ${requestedPath}`);
+  }
+  const worktrees = await services.worktreeManager.listWorktrees(repo.path, context.commandRunner);
+  const registeredPaths = worktrees.flatMap(entry => {
+    try {
+      return [resolvePathIdentity(entry.path, context.pathResolver)];
+    } catch {
+      return [];
+    }
+  });
+  if (!registeredPaths.some(registeredPath => pathsHaveSameIdentity(registeredPath, identityPath))) {
+    throw new Error(`Adopt path is not a git worktree of the selected repository: ${requestedPath}`);
+  }
+
+  const storagePath = context.pathResolver.environment === 'wsl'
+    ? parseWSLPath(identityPath)?.linuxPath ?? requestedPath
+    : identityPath;
+  const candidateCommon = await resolveGitCommonDirectory(storagePath, context.pathResolver, context.commandRunner);
+  const repoCommon = await resolveGitCommonDirectory(repo.path, context.pathResolver, context.commandRunner);
+  if (!pathsHaveSameIdentity(candidateCommon, repoCommon)) {
+    throw new Error(`Adopt path belongs to a different git repository: ${requestedPath}`);
+  }
+  return { storagePath, identityPath, pathResolver: context.pathResolver };
+}
+
+async function resolveGitCommonDirectory(
+  directory: string,
+  pathResolver: PathResolver,
+  commandRunner: CommandRunner,
+): Promise<string> {
+  const { stdout } = await commandRunner.execAsync('git rev-parse --git-common-dir', directory);
+  const common = stdout.trim();
+  const storedCommon = pathResolver.environment === 'wsl'
+    ? common.startsWith('/') ? common : path.posix.resolve(directory, common)
+    : path.resolve(directory, common);
+  return resolvePathIdentity(storedCommon, pathResolver);
+}
+
+function resolvePathIdentity(storedPath: string, pathResolver: PathResolver): string {
+  return fs.realpathSync.native(pathResolver.toFileSystem(storedPath));
+}
+
+function pathsHaveSameIdentity(left: string, right: string): boolean {
+  const normalize = (value: string): string => {
+    const normalized = path.normalize(value).replace(/[\\/]+$/u, '');
+    return process.platform === 'win32' ? normalized.toLocaleLowerCase('en-US') : normalized;
+  };
+  return normalize(left) === normalize(right);
+}
+
+function findSessionByWorktreeIdentity<T extends { worktree_path: string }>(
+  sessions: readonly T[],
+  identityPath: string,
+  pathResolver: PathResolver,
+): T | undefined {
+  return sessions.find(session => {
+    try {
+      return pathsHaveSameIdentity(resolvePathIdentity(session.worktree_path, pathResolver), identityPath);
+    } catch {
+      return false;
+    }
+  });
+}
+
+function buildAdoptResumeCommand(agent: RunpaneAgentId, sessionId: string): string {
+  const id = escapeShellArg(sessionId);
+  if (agent === 'claude') return `claude --resume ${id} --dangerously-skip-permissions`;
+  if (agent === 'codex') return `codex resume --yolo ${id}`;
+  return `cursor-agent --force --trust --resume ${id}`;
+}
+
+function resolveOrCreateAdoptFolder(
+  databaseService: AppServices['databaseService'],
+  projectId: number,
+  folderName: string,
+): string {
+  const existing = databaseService.getFoldersForProject(projectId)
+    .find(folder => folder.name === folderName && !folder.parent_folder_id);
+  return existing?.id ?? databaseService.createFolder(folderName, projectId).id;
 }
 
 function parsePanelListRequest(value: PaneCommandValue): RunpanePanelListRequest {
@@ -1926,31 +2987,74 @@ async function computeArchiveSafety(services: AppServices, pane: Session): Promi
     // Deliberately bypass gitStatusManager's cache (up to CACHE_TTL_MS stale)
     // and read git plumbing directly — a safety gate must see the current
     // state, not a snapshot from moments-ago that predates a recent commit.
-    const workingDirectory = fastCheckWorkingDirectory(pane.worktreePath, ctx.commandRunner.wslContext);
+    const workingDirectory = await fastCheckWorkingDirectory(pane.worktreePath, ctx.commandRunner.wslContext);
     const hasUncommittedChanges = workingDirectory.hasModified || workingDirectory.hasStaged || workingDirectory.hasConflicts;
     const hasUntrackedFiles = workingDirectory.hasUntracked;
 
     const upstream = await services.worktreeManager.getUpstream(pane.worktreePath, ctx.commandRunner);
     if (upstream) {
-      const { ahead } = fastGetAheadBehind(pane.worktreePath, upstream, ctx.commandRunner.wslContext);
-      return { performed: true, hasUncommittedChanges, hasUntrackedFiles, hasUpstream: true, unpushedCommits: ahead };
+      const remote = await resolveUpstreamRemote(pane.worktreePath, upstream, ctx.commandRunner);
+      await ctx.commandRunner.execAsync(
+        `git fetch --no-tags --prune ${escapeShellArg(remote)}`,
+        pane.worktreePath,
+        { timeout: 30000 },
+      );
+      const unpushedCommitDetails = await listCommitsAhead(
+        pane.worktreePath,
+        upstream,
+        ctx.commandRunner.wslContext,
+      );
+      return {
+        performed: true,
+        hasUncommittedChanges,
+        hasUntrackedFiles,
+        hasUpstream: true,
+        upstream,
+        upstreamRefreshed: true,
+        unpushedCommits: unpushedCommitDetails.length,
+        unpushedCommitDetails,
+      };
     }
 
     // No upstream at all (never pushed, or detached HEAD): the branch's own
     // commits ahead of its base/comparison branch are the closest proxy for
     // "unpushed work".
     const comparisonBranch = await services.worktreeManager.getSessionComparisonBranch(pane, ctx);
-    const { ahead } = fastGetAheadBehind(pane.worktreePath, comparisonBranch, ctx.commandRunner.wslContext);
+    const unpushedCommitDetails = await listCommitsAhead(
+      pane.worktreePath,
+      comparisonBranch,
+      ctx.commandRunner.wslContext,
+    );
     return {
       performed: true,
       hasUncommittedChanges,
       hasUntrackedFiles,
       hasUpstream: false,
-      unpushedCommits: ahead,
+      upstreamRefreshed: false,
+      unpushedCommits: unpushedCommitDetails.length,
+      unpushedCommitDetails,
     };
   } catch {
     return { performed: false, reasonUnavailable: 'git-status-error' };
   }
+}
+
+async function resolveUpstreamRemote(
+  worktreePath: string,
+  upstream: string,
+  commandRunner: CommandRunner,
+): Promise<string> {
+  const { stdout } = await commandRunner.execAsync('git remote', worktreePath);
+  const remote = stdout
+    .split('\n')
+    .map(value => value.trim())
+    .filter(Boolean)
+    .sort((left, right) => right.length - left.length)
+    .find(value => upstream.startsWith(`${value}/`));
+  if (!remote) {
+    throw new Error(`Could not resolve remote for upstream ${upstream}`);
+  }
+  return remote;
 }
 
 function classifyArchiveBlock(check: ArchiveSafetyCheck, applicable: boolean): RunpanePaneArchiveBlockCode | undefined {
@@ -1991,7 +3095,10 @@ function toPublicSafetyCheck(check: ArchiveSafetyCheck): RunpanePaneArchiveSafet
     hasUncommittedChanges: check.hasUncommittedChanges,
     hasUntrackedFiles: check.hasUntrackedFiles,
     hasUpstream: check.hasUpstream,
+    upstream: check.upstream,
+    upstreamRefreshed: check.upstreamRefreshed,
     unpushedCommits: check.unpushedCommits,
+    unpushedCommitDetails: check.unpushedCommitDetails,
   };
 }
 
@@ -2056,6 +3163,7 @@ function parsePaneArchiveRequest(value: PaneCommandValue): RunpanePaneArchiveReq
     paneId,
     force: optionalBoolean(value.force),
     source: value.source === 'user' || value.source === 'agent' ? value.source : undefined,
+    dryRun: optionalBoolean(value.dryRun),
   };
 }
 
@@ -2312,11 +3420,20 @@ function describeTool(tool: RunpaneResolvedTool): DescribedTool {
   };
 }
 
-function createFailureItem(index: number, item: RunpanePaneCreateItem, cause: unknown): RunpanePaneCreateFailureItem {
+function createFailureItem(
+  index: number,
+  item: RunpanePaneCreateItem,
+  cause: unknown,
+  sessionId?: string,
+  worktreePath?: string,
+): RunpanePaneCreateFailureItem {
   return {
     ok: false,
     index,
     name: item.name,
+    sessionId,
+    paneId: sessionId,
+    worktreePath,
     error: {
       message: cause instanceof Error ? cause.message : String(cause),
       code: 'ERR_RUNPANE_PANE_CREATE_FAILED',
@@ -2378,10 +3495,17 @@ async function withRunpaneAction<T extends { ok: boolean }>(
   metadata: RunpaneActionMetadata,
   handler: () => Promise<T> | T,
   resultMetadata?: (result: T) => RunpaneActionMetadata,
+  shouldTrackResult: (result: T) => boolean = () => true,
 ): Promise<T> {
   const startedAt = Date.now();
+  const generation = MUTATING_RUNPANE_ACTIONS.has(action)
+    ? services.workspaceJournal?.generation
+    : undefined;
   try {
     const result = await handler();
+    if (generation !== undefined && !('dryRun' in result && result.dryRun === true)) {
+      Object.assign(result, { generation });
+    }
     const commandOk = result.ok;
     const actionMetadata: RunpaneActionMetadata = {
       ...metadata,
@@ -2390,7 +3514,9 @@ async function withRunpaneAction<T extends { ok: boolean }>(
     if (resultMetadata) {
       Object.assign(actionMetadata, resultMetadata(result));
     }
-    trackRunpaneAction(services, action, 'success', Date.now() - startedAt, actionMetadata);
+    if (shouldTrackResult(result)) {
+      trackRunpaneAction(services, action, 'success', Date.now() - startedAt, actionMetadata);
+    }
     return result;
   } catch (error) {
     trackRunpaneAction(services, action, 'failure', Date.now() - startedAt, {
@@ -2399,6 +3525,90 @@ async function withRunpaneAction<T extends { ok: boolean }>(
     }, error);
     throw error;
   }
+}
+
+function createWorkspaceJournal(services: AppServices): WorkspaceJournal {
+  const journal = new WorkspaceJournal({
+    resolvePane: (paneId) => {
+      const session = services.sessionManager.getSession(paneId);
+      if (!session) return undefined;
+      const project = services.sessionManager.getProjectForSession(paneId);
+      return {
+        paneId,
+        paneName: session.name,
+        repoId: project?.id,
+        repoName: project?.name,
+        worktreePath: session.worktreePath,
+      };
+    },
+    resolvePanel: (panelId) => {
+      const panel = panelManager.getPanel(panelId);
+      if (!panel) return undefined;
+      const snapshot = terminalPanelManager.getTerminalSnapshot(panelId);
+      const customState = isRecord(panel.state.customState) ? panel.state.customState : {};
+      return {
+        panelId,
+        paneId: panel.sessionId,
+        panelTitle: panel.title,
+        isCliPanel: snapshot?.isCliPanel ?? optionalBoolean(customState.isCliPanel) ?? false,
+        agentType: snapshot?.agentType ?? optionalString(customState.agentType),
+        lastActivityAt: snapshot?.lastActivityTime,
+        screenText: snapshot?.screenText,
+      };
+    },
+  });
+  const sessions = services.sessionManager.getAllSessions();
+  for (const session of sessions) {
+    const project = services.sessionManager.getProjectForSession(session.id);
+    journal.rememberPane({
+      paneId: session.id,
+      paneName: session.name,
+      repoId: project?.id,
+      repoName: project?.name,
+      worktreePath: session.worktreePath,
+    });
+  }
+  return journal;
+}
+
+function workspaceCadenceOptions(
+  request: RunpaneWorkspaceWaitRequest,
+  filter: WorkspaceJournalFilter,
+  idleSchedule: WorkspaceIdleSchedule,
+): WatchCadenceOptions | undefined {
+  const settleMs = request.settleMs ?? 0;
+  const blockedSettleMs = request.blockedSettleMs ?? 0;
+  const minIntervalMs = request.minIntervalMs ?? 0;
+  if (settleMs <= 0 && blockedSettleMs <= 0 && minIntervalMs <= 0) return undefined;
+  const key = JSON.stringify({
+    settleMs,
+    blockedSettleMs,
+    minIntervalMs,
+    idleAfterMs: idleSchedule.idleAfterMs,
+    idleBackoff: idleSchedule.backoff === true,
+    filter: workspaceFilterKey(filter),
+  });
+  return { settleMs, blockedSettleMs, minIntervalMs, emitKinds: request.kinds, key };
+}
+
+function workspaceNextCommand(request: RunpaneWorkspaceWaitRequest, generation: number): string {
+  const cursor = request.as ? `--as ${request.as}` : `--since ${generation}`;
+  return `runpane watch ${cursor}`;
+}
+
+function workspaceIdleCandidates(
+  workspaceStateReader: WorkspaceStateReader,
+  workspaceJournal: WorkspaceJournal,
+  repoId?: number,
+): WorkspaceIdleCandidate[] {
+  return workspaceStateReader.listManagedCliPanels(repoId).flatMap((panel) => {
+    if (panel.agentState !== 'idle' || !panel.agentType) return [];
+    const snapshotTime = panel.lastActivityTime ? Date.parse(panel.lastActivityTime) : Number.NaN;
+    const idleSinceMs = workspaceJournal.readySince(panel.panelId)
+      ?? (Number.isFinite(snapshotTime) ? snapshotTime : undefined);
+    if (idleSinceMs === undefined) return [];
+    return [{ ...panel, agentType: panel.agentType, idleSinceMs }];
+  });
 }
 
 function trackRunpaneAction(
