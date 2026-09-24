@@ -8,6 +8,11 @@ overrides:
   prebuild-install>node-abi: ^4.33.0
   d3-sankey>d3-array: ^3.2.0
 
+patchedDependencies:
+  '@xterm/addon-webgl@0.20.0-beta.298':
+    hash: 0dc6be44d1aec4eeed1d1f914ba03179fe323b397b2e2f033b054ad18857742a
+    path: patches/@xterm__addon-webgl@0.20.0-beta.298.patch
+
 importers:
 
   .:
@@ -150,7 +155,7 @@ importers:
         version: 0.13.0-beta.299(@xterm/xterm@6.1.0-beta.302)
       '@xterm/addon-webgl':
         specifier: 0.20.0-beta.298
-        version: 0.20.0-beta.298(@xterm/xterm@6.1.0-beta.302)
+        version: 0.20.0-beta.298(patch_hash=0dc6be44d1aec4eeed1d1f914ba03179fe323b397b2e2f033b054ad18857742a)(@xterm/xterm@6.1.0-beta.302)
       '@xterm/xterm':
         specifier: 6.1.0-beta.302
         version: 6.1.0-beta.302
@@ -10302,7 +10307,7 @@ snapshots:
     dependencies:
       '@xterm/xterm': 6.1.0-beta.302
 
-  '@xterm/addon-webgl@0.20.0-beta.298(@xterm/xterm@6.1.0-beta.302)':
+  '@xterm/addon-webgl@0.20.0-beta.298(patch_hash=0dc6be44d1aec4eeed1d1f914ba03179fe323b397b2e2f033b054ad18857742a)(@xterm/xterm@6.1.0-beta.302)':
     dependencies:
       '@xterm/xterm': 6.1.0-beta.302
 

@@ -31,6 +31,36 @@ ELECTRON_RUN_AS_NODE=1 node_modules/.bin/electron scripts/benchmark-terminal-emu
 
 `PANES` and `SECONDS` override the defaults (8 and 10).
 
+## benchmark-webgl-atlas.js
+
+Opens one xterm with the WebGL renderer and repaints it every frame in 24-bit
+colors it has not used before, the worst case of an agent's animated gradient.
+Prints GPU and renderer process memory, frame rate, and the glyph atlas page
+sizes once a second. On macOS memory comes from `footprint`, which counts the
+graphics memory that Electron's own metrics leave out.
+
+```bash
+node_modules/.bin/electron scripts/benchmark-webgl-atlas.js
+```
+
+`DURATION` sets the run length in seconds (default 90). `WEBGL_ADDON` points
+at another `addon-webgl.js` build, for example an unpatched copy from
+`npm pack @xterm/addon-webgl@<version>`, to compare against.
+
+## benchmark-conpty.js
+
+Windows only. Compares Windows' built-in ConPTY with the bundled conpty.dll
+and OpenConsole.exe that node-pty ships (`useConptyDll`). Each round paints
+about 12 MB of full-screen TUI frames through the PTY and reports how long
+they take to arrive, how many bytes arrive, CPU used by the console host and
+by the benchmark process, and keystroke echo latency. Rounds alternate modes.
+
+```bash
+node scripts/benchmark-conpty.js
+```
+
+`ROUNDS` and `FRAMES` override the defaults (3 and 1500).
+
 ## ci-background.sh
 
 Lets a GitHub Actions job run a command in the background while later steps

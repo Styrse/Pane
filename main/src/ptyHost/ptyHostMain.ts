@@ -103,6 +103,7 @@ const spawnOptsSchema = boundary.object({
   rows: boundary.number,
   env: boundary.jsonObject,
   name: boundary.optional(boundary.string),
+  useConptyDll: boundary.optional(boundary.boolean),
 });
 const requestSchema = boundary.union(
   boundary.object({ id: boundary.number, method: boundary.literal('spawn'), args: spawnOptsSchema }),
@@ -232,6 +233,7 @@ function handleSpawn(id: number, opts: PtyHostSpawnOpts): void {
       cols: opts.cols,
       rows: opts.rows,
       env: opts.env,
+      useConptyDll: opts.useConptyDll,
     });
   } catch (err) {
     let failure: SpawnFailure;

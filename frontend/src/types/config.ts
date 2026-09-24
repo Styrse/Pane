@@ -132,6 +132,8 @@ export interface AppConfig {
   // isolation. On by default on Windows. Requires app restart; the supervisor is forked
   // once at `app.whenReady`.
   usePtyHost?: boolean;
+  // Windows: run PTY-host terminals on node-pty's bundled ConPTY. Requires app restart.
+  useBundledConpty?: boolean;
   // PostHog analytics settings
   analytics?: AnalyticsConfig;
   // User-defined custom commands for the Add Tool picker
@@ -194,6 +196,7 @@ export interface UpdateConfigRequest {
   agentContext?: AppConfig['agentContext'];
   useInteractiveMode?: boolean;
   usePtyHost?: boolean;
+  useBundledConpty?: boolean;
   analytics?: AnalyticsConfig;
   customCommands?: CustomCommand[];
   terminalShortcuts?: TerminalShortcut[];
