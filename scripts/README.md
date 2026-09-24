@@ -61,6 +61,21 @@ node scripts/benchmark-conpty.js
 
 `ROUNDS` and `FRAMES` override the defaults (3 and 1500).
 
+## benchmark-git-worktree-config.mjs
+
+Builds a 100,000-file repository with a Pane-style worktree, edits a file, and
+times the git commands behind Pane's status refresh, Diff tab, and a plain
+`git status`. It runs with default git config, with the config
+Pane writes (`feature.manyFiles`, plus `core.fsmonitor` where Git has the
+built-in daemon), and with that config plus `GIT_OPTIONAL_LOCKS=0`, then
+prints the median of each.
+
+```bash
+node scripts/benchmark-git-worktree-config.mjs
+```
+
+`FILES` and `RUNS` override the defaults (100000 and 10).
+
 ## ci-background.sh
 
 Lets a GitHub Actions job run a command in the background while later steps
