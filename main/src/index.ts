@@ -1172,7 +1172,7 @@ if (launchRemoteSetup) {
   // legacy in-main `pty.spawn` path with zero ptyHost code executing.
   if (configManager.getUsePtyHost()) {
     try {
-      ptyHostSupervisor = new PtyHostSupervisor(configManager.getUseBundledConpty());
+      ptyHostSupervisor = new PtyHostSupervisor();
       await ptyHostSupervisor.start();
 
       ptyHostSupervisor.on('renderer-ack', (ptyId: string, bytes: number) => {

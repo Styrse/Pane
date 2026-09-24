@@ -28,8 +28,6 @@ export interface PtyHostSpawnOpts {
   env: Record<string, string>;
   /** Terminal type name; defaults to `xterm-256color` in the host when omitted. */
   name?: string;
-  /** Windows: use node-pty's bundled conpty.dll/OpenConsole.exe instead of the inbox ConPTY. */
-  useConptyDll?: boolean;
 }
 
 /**

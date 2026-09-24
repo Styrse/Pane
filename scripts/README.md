@@ -33,33 +33,24 @@ ELECTRON_RUN_AS_NODE=1 node_modules/.bin/electron scripts/benchmark-terminal-emu
 
 ## benchmark-webgl-atlas.js
 
-Opens one xterm with the WebGL renderer and repaints it every frame in 24-bit
-colors it has not used before, the worst case of an agent's animated gradient.
-Prints GPU and renderer process memory, frame rate, and the glyph atlas page
-sizes once a second. On macOS memory comes from `footprint`, which counts the
+Opens one xterm with the WebGL renderer and prints GPU and renderer memory,
+frame rate, the longest frame gap, and glyph atlas merges and full resets once
+a second, then a summary. `WORKLOAD=shimmer` (default) repaints every cell in a
+24-bit color it has not used before, the worst case of an agent's animated
+gradient; `WORKLOAD=normal` scrolls colored log lines under a cycling
+"Thinking…" gradient. On macOS memory comes from `footprint`, which counts the
 graphics memory that Electron's own metrics leave out.
 
 ```bash
 node_modules/.bin/electron scripts/benchmark-webgl-atlas.js
 ```
 
-`DURATION` sets the run length in seconds (default 90). `WEBGL_ADDON` points
-at another `addon-webgl.js` build, for example an unpatched copy from
-`npm pack @xterm/addon-webgl@<version>`, to compare against.
-
-## benchmark-conpty.js
-
-Windows only. Compares Windows' built-in ConPTY with the bundled conpty.dll
-and OpenConsole.exe that node-pty ships (`useConptyDll`). Each round paints
-about 12 MB of full-screen TUI frames through the PTY and reports how long
-they take to arrive, how many bytes arrive, CPU used by the console host and
-by the benchmark process, and keystroke echo latency. Rounds alternate modes.
-
-```bash
-node scripts/benchmark-conpty.js
-```
-
-`ROUNDS` and `FRAMES` override the defaults (3 and 1500).
+`DURATION` sets the run length in seconds (default 90). `ATLAS_CAP` swaps the
+patched 4096 px page cap for another size. `WEBGL_ADDON` points at another
+`addon-webgl.js` build, for example an unpatched copy from
+`npm pack @xterm/addon-webgl@<version>`. `RECORD=<file>.webm` saves a video of
+the terminal canvas plus the atlas reset times, to check frames for flashing
+glyphs.
 
 ## ci-background.sh
 
