@@ -306,25 +306,9 @@ const TerminalPanel: React.FC<TerminalPanelProps> = React.memo(({ panel, isActiv
   // ptyId for the current PTY behind this panel, delivered via
   // `terminal:ptyReady` when spawned through the ptyHost UtilityProcess.
   // Null under the legacy `pty.spawn` path. Re-fires with a new value on
-  // auto-reattach after a supervisor restart, which re-subscribes the data
-  // listener below.
-  const [ptyId, setPtyId] = useState<string | null>(null);
-
-  // Ref holding the terminal output consumer installed by the main init effect.
-  // The data-subscription effect below reads from this ref so it can swap the
-  // subscription source (legacy `terminal:output` vs `electronAPI.ptyHost.onData`)
-  // without re-running the full terminal init.
-  const outputConsumerRef = useRef<{
-    write: (data: string) => void;
-  } | null>(null);
-
-  // Mirror of `ptyId` so the ack-flush closure (captured inside the init effect)
-  // can read the current value without re-creating. Updated by the effect below
-  // whenever `ptyId` changes (spawn, auto-reattach, or unmount).
+  // auto-reattach after a supervisor restart. A ref so the ack-flush closure
+  // (captured inside the init effect) reads the current value.
   const currentPtyIdRef = useRef<string | null>(null);
-  useEffect(() => {
-    currentPtyIdRef.current = ptyId;
-  }, [ptyId]);
 
   // Sync isCliReady from panel prop when it changes (e.g. backend persisted isCliReady
   // before this component subscribed to the IPC event, or panel state was updated externally)
@@ -401,29 +385,15 @@ const TerminalPanel: React.FC<TerminalPanelProps> = React.memo(({ panel, isActiv
 
   // Listen for the ptyHost ptyId assignment. The main process fires this
   // once per spawn when the `usePtyHost` setting is on; fires again on auto-reattach
-  // after a supervisor restart with a new ptyId. Updating state triggers the
-  // data-subscription effect below to tear down and re-subscribe.
+  // after a supervisor restart with a new ptyId.
   useEffect(() => {
     const cleanup = window.electronAPI.events.onTerminalPtyReady((data) => {
       if (data.panelId === panel.id) {
-        setPtyId(data.ptyId);
+        currentPtyIdRef.current = data.ptyId;
       }
     });
     return cleanup;
   }, [panel.id]);
-
-  // Subscribe to the ptyHost MessagePort data stream for this panel when we
-  // have a `ptyId`. Flag-off panels keep the legacy `terminal:output` IPC
-  // subscription installed inside the main init effect and skip this effect
-  // entirely. Re-subscribes when `ptyId` changes (auto-reattach after a
-  // supervisor restart).
-  useEffect(() => {
-    if (!ptyId) return;
-    const unsubData = window.electronAPI.ptyHost.onData(ptyId, (data: string) => {
-      outputConsumerRef.current?.write(data);
-    });
-    return unsubData;
-  }, [ptyId]);
 
   // Get session data from context using the safe hook
   const sessionContext = useSession();
@@ -985,7 +955,12 @@ const TerminalPanel: React.FC<TerminalPanelProps> = React.memo(({ panel, isActiv
           // Without it that addon throws on load and the terminal silently
           // falls back to Unicode 6 cell widths.
           allowProposedApi: true,
-          vtExtensions: { kittyKeyboard: kittyKeyboardEnabledRef.current },
+          // Honor ConPTY's CSI ? 9001 h request. In particular, Windows programs
+          // launched through WSL need key records, not literal VT characters.
+          vtExtensions: {
+            kittyKeyboard: kittyKeyboardEnabledRef.current,
+            win32InputMode: true,
+          },
           scrollOnUserInput: true,
           scrollSensitivity: 1,
           altClickMovesCursor: true,
@@ -1570,11 +1545,7 @@ const TerminalPanel: React.FC<TerminalPanelProps> = React.memo(({ panel, isActiv
           setIsInitialized(true);
           devLog.debug('[TerminalPanel] Terminal initialization complete, isInitialized set to true');
 
-          // Core write-and-ack: consume a raw output chunk (already filtered by
-          // source/panelId on the dispatcher side). Installed into a ref so the
-          // `ptyId` effect below can swap subscription sources (legacy
-          // `terminal:output` IPC vs `electronAPI.ptyHost.onData` port) without
-          // re-running the full terminal init.
+          // Core write-and-ack: consume a raw output chunk for this panel.
           const writeAndAck = (output: string) => {
             if (!terminal || disposed) return;
             const outputLength = output.length;
@@ -1594,22 +1565,16 @@ const TerminalPanel: React.FC<TerminalPanelProps> = React.memo(({ panel, isActiv
               }
             });
           };
-          outputConsumerRef.current = { write: writeAndAck };
 
-          // Legacy `terminal:output` IPC subscription. Stays the primary source
-          // for flag-off panels (which never receive a `ptyId`). Under flag-on
-          // main also tees bytes through the ptyHost MessagePort; to avoid
-          // double-delivery to xterm, this handler short-circuits once the
-          // panel's `ptyId` is populated and the dedicated effect below takes
-          // over as the single byte source.
-          const legacyOutputHandler = (data: import('../../../../shared/types/panels').TerminalOutputEvent) => {
-            if (currentPtyIdRef.current) return;
+          // `terminal:output` is the single byte source for every panel,
+          // ptyHost or not.
+          const outputHandler = (data: import('../../../../shared/types/panels').TerminalOutputEvent) => {
             if ('panelId' in data && data.panelId === panel.id) {
-              outputConsumerRef.current?.write(data.output);
+              writeAndAck(data.output);
             }
             // Ignore session terminal output, which has no panelId.
           };
-          const unsubscribeOutput = window.electronAPI.events.onTerminalOutput(legacyOutputHandler);
+          const unsubscribeOutput = window.electronAPI.events.onTerminalOutput(outputHandler);
           devLog.debug('[TerminalPanel] Subscribed to terminal output events for panel:', panel.id);
 
           // Detect full-screen TUI apps (vim, htop, etc.) via alternate screen buffer.
@@ -1800,7 +1765,6 @@ const TerminalPanel: React.FC<TerminalPanelProps> = React.memo(({ panel, isActiv
             disposed = true;
             interceptor.dispose();
             interceptorRef.current = null;
-            outputConsumerRef.current = null;
             flushAck();
             if (ackFlushTimer) clearTimeout(ackFlushTimer);
             resizeObserver?.disconnect();

@@ -22,6 +22,8 @@ All notable changes to Pane will be documented in this file.
 - The Pane Chat orchestrator's Liveness Contract now arms the cadence flags above, filters HEARTBEAT out of its monitor, and judges a dead watch by a non-zero exit or a `WATCH ERROR` line rather than by silence.
 
 ### Fixed
+- `runpane panels submit` now submits prompts to Claude panes instead of leaving them in the composer. Pane waits for Claude's composer, types the prompt, and presses Enter separately once the text shows, so a pane created with `--wait-ready` and submitted to right away starts the turn. `verifiedSubmitted` is true only when Claude's composer is seen empty afterwards.
+- `runpane panels screen` reports `composer.hasUndeliveredText` for Claude panes. It used to read false for every Claude pane, even with a prompt sitting in the composer. Claude's dim placeholder suggestion does not count.
 - `runpane watch` no longer reports STUCK for the grey prompt suggestion Claude Code shows in an empty composer. STUCK now means real unsubmitted composer text.
 
 ## [1.1.123] - 2026-04-25

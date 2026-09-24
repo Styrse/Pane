@@ -1,5 +1,4 @@
 import type { Page } from '@playwright/test';
-import type { CloudVmState } from '../shared/types/cloud';
 import type { PaneChatAgent } from '../shared/types/paneChat';
 import type { PanePermissionRequest, PanePermissionResponse } from '../shared/types/permissions';
 import type {
@@ -155,24 +154,12 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
       listenPort: null,
       lastError: null,
       connectedClients: [],
+      executableHealth: {
+        processImage: { status: 'unknown' as const, runtimePath: null, installedPath: null, evidence: 'Executable identity has not been checked yet.' },
+        restart: { status: 'unknown' as const, evidence: 'Remote daemon launcher readiness has not been checked yet.' },
+        checkedAt: '1970-01-01T00:00:00.000Z',
+      },
       updatedAt: '1970-01-01T00:00:00.000Z',
-    };
-    const cloudState: CloudVmState = {
-      status: 'not_provisioned',
-      ip: null,
-      noVncUrl: null,
-      provider: null,
-      serverId: null,
-      lastChecked: null,
-      error: null,
-      tunnelStatus: 'off',
-      daemonStatus: 'unknown',
-      daemonBaseUrl: null,
-      linkedRemoteProfileId: null,
-      linkedRemoteProfileLabel: null,
-      remoteConnectionStatus: 'unlinked',
-      preferredAccess: 'daemon',
-      allowNoVncFallback: true,
     };
     const configState: JsonObject = {
       remoteDaemon: clone(remoteDaemonConfig),
@@ -255,7 +242,7 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
     let mockActiveProjectId = mockOptions.activeProjectId === undefined
       ? Number(mockProjects.find((project) => project.active === true)?.id ?? null) || null
       : mockOptions.activeProjectId;
-    let cloudDisconnectError: string | null = null;
+    let lastProjectUpdate: { projectId: string; updates: JsonObject } | null = null;
     let configGetCount = 0;
     let nextConfigUpdateError: string | null = null;
     let nextPreferenceSetError: string | null = null;
@@ -464,10 +451,10 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
             return Promise.resolve({
               success: false,
               error: 'GitHub CLI is not authenticated.',
-              data: { fallbackUrl: 'https://github.com/dcouple/Pane/issues/new?title=Prefilled' },
+              data: { fallbackUrl: 'https://github.com/greenfield-inc/Pane/issues/new?title=Prefilled' },
             });
           }
-          return success({ issueUrl: 'https://github.com/dcouple/Pane/issues/9001' });
+          return success({ issueUrl: 'https://github.com/greenfield-inc/Pane/issues/9001' });
         },
       }),
       analytics: namespace({
@@ -595,58 +582,6 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
           generatedAtMs: Date.now(),
         })),
       }),
-      cloud: namespace({
-        getState: () => success(clone(cloudState)),
-        onStateChanged: (callback: MockEventCallback) => subscribe('cloud:state-changed', callback),
-        connectWorkspace: () => {
-          if (!cloudState.linkedRemoteProfileId) {
-            return Promise.resolve({ success: false, error: 'Hosted cloud workspace does not have a linked remote profile' });
-          }
-          const profile = remoteDaemonConfig.client.profiles.find(
-            (candidate) => candidate.id === cloudState.linkedRemoteProfileId,
-          );
-          if (!profile) {
-            return Promise.resolve({ success: false, error: `Hosted cloud workspace linked profile "${cloudState.linkedRemoteProfileId}" does not exist` });
-          }
-          remoteDaemonConfig.client.activeProfileId = profile.id;
-          remoteDaemonConfig.client.mode = 'remote';
-          syncRemoteDaemonConfig();
-          cloudState.linkedRemoteProfileLabel = String(profile.label);
-          cloudState.remoteConnectionStatus = 'connected';
-          setRemoteConnectionState({
-            mode: 'remote',
-            status: 'connected',
-            activeProfileId: String(profile.id),
-            activeProfileLabel: String(profile.label),
-            activeBaseUrl: String(profile.baseUrl),
-            lastError: null,
-          });
-          emit('cloud:state-changed', clone(cloudState));
-          return success(clone(cloudState));
-        },
-        disconnectWorkspace: () => {
-          if (cloudDisconnectError) {
-            return Promise.resolve({ success: false, error: cloudDisconnectError });
-          }
-
-          remoteDaemonConfig.client.activeProfileId = null;
-          remoteDaemonConfig.client.mode = 'local';
-          syncRemoteDaemonConfig();
-          cloudState.remoteConnectionStatus = cloudState.linkedRemoteProfileId ? 'available' : 'unlinked';
-          setRemoteConnectionState({
-            mode: 'local',
-            status: 'local',
-            activeProfileId: null,
-            activeProfileLabel: null,
-            activeBaseUrl: null,
-            lastError: null,
-          });
-          emit('cloud:state-changed', clone(cloudState));
-          return success(clone(cloudState));
-        },
-        startPolling: () => success(),
-        stopPolling: () => success(),
-      }),
       config: namespace({
         get: async () => {
           configGetCount += 1;
@@ -688,6 +623,12 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
       }),
       folders: namespace({
         getByProject: () => success([]),
+      }),
+      git: namespace({
+        detectBranch: () => success('main'),
+      }),
+      dialog: namespace({
+        openDirectory: () => success('/tmp/pane-worktrees'),
       }),
       onboarding: namespace({
         detectEnvironment: () => success({}),
@@ -766,6 +707,16 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
           { name: 'origin/main', isCurrent: false, hasWorktree: false, isRemote: true },
           { name: 'main', isCurrent: true, hasWorktree: false, isRemote: false },
         ]),
+        update: (projectId: string, updates: JsonObject) => {
+          lastProjectUpdate = { projectId, updates: clone(updates) };
+          mockProjects = mockProjects.map((project) => (
+            String(project.id) === projectId
+              ? { ...project, ...clone(updates), updated_at: new Date().toISOString() }
+              : project
+          ));
+          return success(mockProjects.find((project) => String(project.id) === projectId) ?? null);
+        },
+        detectConfig: () => success(null),
         refreshGitStatus: () => success(),
       }),
       prompts: namespace({
@@ -773,7 +724,6 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
       }),
       ptyHost: namespace({
         ack: () => Promise.resolve(),
-        onData: subscribe,
         onExit: subscribe,
       }),
       resourceMonitor: namespace({
@@ -1122,13 +1072,6 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
           pendingPermissions.push(request);
           emit('permission:request', request);
         },
-        setCloudState(updates: Partial<CloudVmState>) {
-          Object.assign(cloudState, updates);
-          emit('cloud:state-changed', clone(cloudState));
-        },
-        setCloudDisconnectError(error: string | null) {
-          cloudDisconnectError = error;
-        },
         emitRemoteDaemonResyncRequested() {
           emit('remote-daemon:resync-required');
         },
@@ -1186,6 +1129,9 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
         },
         getFileDiffCalls() {
           return clone(fileDiffCalls);
+        },
+        getProjectUpdates() {
+          return lastProjectUpdate ? [clone(lastProjectUpdate)] : [];
         },
       },
     });
