@@ -50,7 +50,6 @@ import type { UsageIndexStatus, UsageReport, UsageReportRequest } from '../../..
 import type { LeaderboardResponse, LeaderboardStatus, LeaderboardSubmitResult } from '../../../shared/types/leaderboard';
 import type { CreateSessionRequest } from './session';
 import type { DetectedProjectConfig } from '../../../shared/types/projectConfig';
-import type { CloudVmState } from '../../../shared/types/cloud';
 import type { UpdateCapabilities } from '../../../shared/types/updater';
 import type {
   ProjectDashboardData,
@@ -571,20 +570,6 @@ interface ElectronAPI {
     enable: (sessionId: string) => Promise<IPCResponse>;
     disable: (sessionId: string) => Promise<IPCResponse>;
     getStatus: (projectId: number) => Promise<IPCResponse>;
-  };
-
-  // Cloud VM management
-  cloud: {
-    getState: () => Promise<IPCResponse>;
-    startVm: () => Promise<IPCResponse>;
-    stopVm: () => Promise<IPCResponse>;
-    startTunnel: () => Promise<IPCResponse>;
-    stopTunnel: () => Promise<IPCResponse>;
-    connectWorkspace: () => Promise<IPCResponse>;
-    disconnectWorkspace: () => Promise<IPCResponse>;
-    startPolling: () => Promise<IPCResponse>;
-    stopPolling: () => Promise<IPCResponse>;
-    onStateChanged: (callback: (state: CloudVmState) => void) => () => void;
   };
 
   // Resource monitor

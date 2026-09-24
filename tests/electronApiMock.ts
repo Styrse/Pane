@@ -1,5 +1,4 @@
 import type { Page } from '@playwright/test';
-import type { CloudVmState } from '../shared/types/cloud';
 import type { PaneChatAgent } from '../shared/types/paneChat';
 import type { PanePermissionRequest, PanePermissionResponse } from '../shared/types/permissions';
 import type {
@@ -162,23 +161,6 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
       },
       updatedAt: '1970-01-01T00:00:00.000Z',
     };
-    const cloudState: CloudVmState = {
-      status: 'not_provisioned',
-      ip: null,
-      noVncUrl: null,
-      provider: null,
-      serverId: null,
-      lastChecked: null,
-      error: null,
-      tunnelStatus: 'off',
-      daemonStatus: 'unknown',
-      daemonBaseUrl: null,
-      linkedRemoteProfileId: null,
-      linkedRemoteProfileLabel: null,
-      remoteConnectionStatus: 'unlinked',
-      preferredAccess: 'daemon',
-      allowNoVncFallback: true,
-    };
     const configState: JsonObject = {
       remoteDaemon: clone(remoteDaemonConfig),
       defaultOrchestratorAgent: 'claude',
@@ -261,7 +243,6 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
       ? Number(mockProjects.find((project) => project.active === true)?.id ?? null) || null
       : mockOptions.activeProjectId;
     let lastProjectUpdate: { projectId: string; updates: JsonObject } | null = null;
-    let cloudDisconnectError: string | null = null;
     let configGetCount = 0;
     let nextConfigUpdateError: string | null = null;
     let nextPreferenceSetError: string | null = null;
@@ -600,58 +581,6 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
           entries: [],
           generatedAtMs: Date.now(),
         })),
-      }),
-      cloud: namespace({
-        getState: () => success(clone(cloudState)),
-        onStateChanged: (callback: MockEventCallback) => subscribe('cloud:state-changed', callback),
-        connectWorkspace: () => {
-          if (!cloudState.linkedRemoteProfileId) {
-            return Promise.resolve({ success: false, error: 'Hosted cloud workspace does not have a linked remote profile' });
-          }
-          const profile = remoteDaemonConfig.client.profiles.find(
-            (candidate) => candidate.id === cloudState.linkedRemoteProfileId,
-          );
-          if (!profile) {
-            return Promise.resolve({ success: false, error: `Hosted cloud workspace linked profile "${cloudState.linkedRemoteProfileId}" does not exist` });
-          }
-          remoteDaemonConfig.client.activeProfileId = profile.id;
-          remoteDaemonConfig.client.mode = 'remote';
-          syncRemoteDaemonConfig();
-          cloudState.linkedRemoteProfileLabel = String(profile.label);
-          cloudState.remoteConnectionStatus = 'connected';
-          setRemoteConnectionState({
-            mode: 'remote',
-            status: 'connected',
-            activeProfileId: String(profile.id),
-            activeProfileLabel: String(profile.label),
-            activeBaseUrl: String(profile.baseUrl),
-            lastError: null,
-          });
-          emit('cloud:state-changed', clone(cloudState));
-          return success(clone(cloudState));
-        },
-        disconnectWorkspace: () => {
-          if (cloudDisconnectError) {
-            return Promise.resolve({ success: false, error: cloudDisconnectError });
-          }
-
-          remoteDaemonConfig.client.activeProfileId = null;
-          remoteDaemonConfig.client.mode = 'local';
-          syncRemoteDaemonConfig();
-          cloudState.remoteConnectionStatus = cloudState.linkedRemoteProfileId ? 'available' : 'unlinked';
-          setRemoteConnectionState({
-            mode: 'local',
-            status: 'local',
-            activeProfileId: null,
-            activeProfileLabel: null,
-            activeBaseUrl: null,
-            lastError: null,
-          });
-          emit('cloud:state-changed', clone(cloudState));
-          return success(clone(cloudState));
-        },
-        startPolling: () => success(),
-        stopPolling: () => success(),
       }),
       config: namespace({
         get: async () => {
@@ -1142,13 +1071,6 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
         emitPermissionRequest(request: PanePermissionRequest) {
           pendingPermissions.push(request);
           emit('permission:request', request);
-        },
-        setCloudState(updates: Partial<CloudVmState>) {
-          Object.assign(cloudState, updates);
-          emit('cloud:state-changed', clone(cloudState));
-        },
-        setCloudDisconnectError(error: string | null) {
-          cloudDisconnectError = error;
         },
         emitRemoteDaemonResyncRequested() {
           emit('remote-daemon:resync-required');

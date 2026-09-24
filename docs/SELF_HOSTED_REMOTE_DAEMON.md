@@ -91,7 +91,8 @@ The setup command:
 - enables the loopback listener on `127.0.0.1:42137`
 - creates a paired client record with a hashed token on the host
 - emits the raw token only inside the one-time `pane-remote://...` import code
-- attempts to install and start a user-level daemon service
+- attempts to install and start a user-level daemon service (on Linux, it also
+  enables lingering so the service keeps running after you log out)
 - prints the manual daemon command if service setup is unavailable
 - detects Tailscale Serve where possible and otherwise prints an SSH local-forward command
 
@@ -105,6 +106,49 @@ pnpm remote:setup -- --prefer-tunnel ssh
 pnpm remote:setup -- --no-install-service
 pnpm remote:setup -- --no-tailscale-serve
 ```
+
+## Run Pane on a Cloud VM
+
+Pane does not create or manage cloud machines. Create the VM yourself, then set
+it up as a Remote Pane host:
+
+1. Create an Ubuntu 24.04 VM with any provider. Size it for the agents and
+   builds you plan to run. It only needs inbound SSH. The daemon listens on
+   loopback, and you reach it through Tailscale or an SSH tunnel.
+2. SSH in as a regular user with `sudo`, not as `root`.
+3. Install what your agents need on the VM: `git`, Node.js 20 or newer (for
+   `npx`), and the agent CLIs you use, such as Claude Code or Codex. Sign in
+   to each CLI on the VM. Agents run there, not on your laptop.
+4. Install Tailscale and join your tailnet:
+
+   ```bash
+   curl -fsSL https://tailscale.com/install.sh | sh
+   sudo tailscale up
+   ```
+
+5. Install Pane and create a connection code. `--format deb` installs the
+   Debian package, so the host does not need FUSE:
+
+   ```bash
+   npx --yes runpane@latest install daemon --label "Cloud VM" --format deb
+   ```
+
+6. Check that the daemon keeps running after you log out. It runs as a systemd
+   user service, and setup turns on lingering (through passwordless `sudo` if
+   needed) so the service outlives your SSH session. If the setup output says
+   it could not, enable lingering yourself:
+
+   ```bash
+   sudo loginctl enable-linger "$USER"
+   systemctl --user status pane-remote-daemon.service
+   ```
+
+7. Paste the printed `pane-remote://...` code into desktop Pane (see
+   [Import Locally](#import-locally)) or into `https://runpane.com/app/`.
+
+To start, stop, or delete the VM, use your provider's console or CLI. If
+something fails, run `npx --yes runpane@latest doctor --json` on the VM and
+check [Troubleshooting](#troubleshooting).
 
 ## Import Locally
 
