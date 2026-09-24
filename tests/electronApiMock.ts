@@ -155,6 +155,11 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
       listenPort: null,
       lastError: null,
       connectedClients: [],
+      executableHealth: {
+        processImage: { status: 'unknown' as const, runtimePath: null, installedPath: null, evidence: 'Executable identity has not been checked yet.' },
+        restart: { status: 'unknown' as const, evidence: 'Remote daemon launcher readiness has not been checked yet.' },
+        checkedAt: '1970-01-01T00:00:00.000Z',
+      },
       updatedAt: '1970-01-01T00:00:00.000Z',
     };
     const cloudState: CloudVmState = {
