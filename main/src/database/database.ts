@@ -31,6 +31,7 @@ import {
   type JsonObject,
 } from "../../../shared/validation/boundaryDecoder";
 import { PanelBufferStore, splitPanelBufferState, type PanelBuffers } from "./panelBuffers";
+import { ensureUsageRollup } from "../services/usage/usageRollup";
 import {
   migratePanelBuffers,
   unwrapStringWrappedPanelState,
@@ -2531,6 +2532,8 @@ export class DatabaseService {
       `);
       console.log("[Database] Added credit and limit-state columns to usage_rate_limits table");
     }
+
+    ensureUsageRollup(this.db);
 
     // Keep this ownership migration after legacy table-rebuild migrations above,
     // since those intentionally reconstruct sessions from an older column set.
