@@ -15,13 +15,13 @@ const dist = path.join(__dirname, '../main/dist/main/src');
 const { DatabaseService } = require(path.join(dist, 'database/database.js'));
 const { UsageAggregator } = require(path.join(dist, 'services/usage/usageAggregator.js'));
 
+// Each set is applied on top of the pragmas DatabaseService already sets.
 const PRAGMA_SETS = {
   current: [],
+  'mmap_size=0': ['mmap_size = 0'],
   'temp_store=MEMORY': ['temp_store = MEMORY'],
   'cache_size=-32000': ['cache_size = -32000'],
-  'mmap_size=256MB': [`mmap_size = ${256 * 1024 * 1024}`],
   'optimize=0x10002': ['optimize = 0x10002'],
-  'temp+cache+mmap': ['temp_store = MEMORY', 'cache_size = -32000', `mmap_size = ${256 * 1024 * 1024}`],
 };
 const DAY_MS = 24 * 60 * 60 * 1000;
 const NOW_MS = Date.UTC(2026, 8, 1);
@@ -148,14 +148,15 @@ if (process.argv[2] === '--run') {
     }
     const names = Object.keys(PRAGMA_SETS);
     print(`${process.platform} ${os.arch()}, Node ${process.version}, ${rounds} rounds, seed ${(fs.statSync(seedFile).size / 1024 / 1024).toFixed(0)} MB`);
-    print(`p50 / p95 per call, median across rounds\n`);
+    print(`p50 / p95 per call / calls per second, median across rounds\n`);
     print(`| | ${names.join(' | ')} |`);
     print(`|---|${names.map(() => '---').join('|')}|`);
     for (const metric of Object.keys(results.current[0])) {
       const cells = names.map((name) => {
         const p50 = median(results[name].map((r) => r[metric].p50));
         const p95 = median(results[name].map((r) => r[metric].p95));
-        return `${format(p50)} / ${format(p95)}`;
+        const perSec = median(results[name].map((r) => r[metric].perSec));
+        return `${format(p50)} / ${format(p95)} / ${Math.round(perSec).toLocaleString('en-US')}`;
       });
       print(`| ${metric} | ${cells.join(' | ')} |`);
     }

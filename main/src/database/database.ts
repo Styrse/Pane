@@ -244,6 +244,11 @@ export class DatabaseService {
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("synchronous = NORMAL");
     this.db.pragma(`journal_size_limit = ${64 * 1024 * 1024}`);
+    // Reads the main file through a memory map instead of copying pages in,
+    // which speeds up the usage reports and terminal buffer loads. Writes
+    // still go through the WAL. scripts/benchmark-db.js measures this and
+    // the pragmas left at their defaults.
+    this.db.pragma(`mmap_size = ${256 * 1024 * 1024}`);
     this.panelBuffers = new PanelBufferStore(this.db);
   }
 
