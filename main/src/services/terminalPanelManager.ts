@@ -1329,7 +1329,7 @@ export class TerminalPanelManager extends EventEmitter {
 
   /** Viewport text with dim cells blanked, so placeholder hints do not read as typed input. */
   getInputScreenText(panelId: string): string | undefined {
-    return this.terminals.get(panelId)?.screenEmulator?.getScreenText({ omitDim: true });
+    return this.terminals.get(panelId)?.screenEmulator?.state.inputScreenText;
   }
 
   getOutputGeneration(panelId: string): number {
