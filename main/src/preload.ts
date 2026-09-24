@@ -135,7 +135,7 @@ interface UpdaterInfo {
 // Increase max listeners for ipcRenderer to prevent warnings when many components listen to events
 ipcRenderer.setMaxListeners(50);
 
-// ptyHost data port wiring.
+// ptyHost renderer port wiring.
 //
 // Main posts `webContents.postMessage('ptyHost-port', null, [rendererPort])`
 // after `did-finish-load`. The renderer end is a DOM-style `MessagePort` —
@@ -145,12 +145,6 @@ ipcRenderer.setMaxListeners(50);
 //
 // Terminal bytes do not use this port: they reach the renderer once, over the
 // `terminal:output` channel, for ptyHost and legacy PTYs alike.
-type PtyHostExitFrame = {
-  type: 'exit';
-  ptyId: string;
-  exitCode: number | null;
-  signal: number | null;
-};
 const ptyHostInboundSchema = boundary.object({
   type: boundary.literal('exit'),
   ptyId: boundary.string,
@@ -172,7 +166,7 @@ ipcRenderer.on('ptyHost-port', (event) => {
   // Renderer-world MessagePort is DOM-style: use .start() + .onmessage.
   port.start();
   port.onmessage = (e: MessageEvent) => {
-    let frame: PtyHostExitFrame;
+    let frame;
     try {
       frame = decodeBoundary(e.data, ptyHostInboundSchema);
     } catch {
@@ -1112,8 +1106,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // `onExit` returns an unsubscribe function matching the existing
   // event-subscription convention elsewhere on `electronAPI.events`.
   //
-  // `write` / `ack` post frames back over the port; Chunk D wires these in
-  // main-side via `PtyHostSupervisor.onRendererMessage` when they land.
+  // `write` / `ack` post frames back over the port; main handles them in
+  // `PtyHostSupervisor.onRendererMessage`.
   ptyHost: {
     onExit: (ptyId: string, cb: PtyExitCallback): (() => void) => {
       let set = ptyExitSubscribers.get(ptyId);
