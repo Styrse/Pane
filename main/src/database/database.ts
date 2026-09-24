@@ -235,6 +235,15 @@ export class DatabaseService {
 
     this.dbPath = dbPath;
     this.db = new Database(dbPath);
+    // WAL lets reads run during a write and commits append to the -wal file
+    // instead of syncing the main file. NORMAL is WAL's recommended pairing:
+    // an app crash loses nothing, and a power loss can drop only the last
+    // commits without corrupting the file. The size limit shrinks the -wal
+    // file back after a big write such as a retention sweep. All are no-ops
+    // on :memory:.
+    this.db.pragma("journal_mode = WAL");
+    this.db.pragma("synchronous = NORMAL");
+    this.db.pragma(`journal_size_limit = ${64 * 1024 * 1024}`);
     this.panelBuffers = new PanelBufferStore(this.db);
   }
 
