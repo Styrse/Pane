@@ -165,7 +165,7 @@ const DEFAULT_COMPOSER_VERIFY_TIMEOUT_MS = 3_000;
 const DEFAULT_COMPOSER_VERIFY_INTERVAL_MS = 100;
 const CODEX_SUBMIT_STAGE_DELAY_MS = 500;
 const CLAUDE_INPUT_WAIT_TIMEOUT_MS = 15_000;
-const CLAUDE_STARTUP_QUIET_MS = 3_000;
+const CLAUDE_UI_QUIET_MS = 3_000;
 const MAX_CREATE_SUBMIT_ATTEMPTS = 3;
 const CREATE_SUBMIT_CONFIRMATION_DELAY_MS = 400;
 const DEFAULT_ARCHIVE_CLEANUP_TIMEOUT_MS = 30_000;
@@ -974,11 +974,14 @@ export function registerRunpaneHandlers(
       // the Enter as a newline. Terminal readiness can precede Claude drawing
       // its UI or reading input, so wait while it is still drawing for its
       // composer, then for the staged text to show, before sending Enter alone.
-      // A quiet screen without a composer (a menu, a shell) gets the plain write.
+      // Claude draws its UI on the alternate screen, so a quiet alternate
+      // screen without a composer is a menu or picker and gets the plain
+      // write. Startup can pause for seconds before the first frame.
       if (stagedInput.length > 0 && agentType === 'claude' && !beforeScreen.composer.isPresent) {
         beforeScreen = await waitForPanelScreen(
           panel,
-          screen => screen.composer.isPresent || !panelHasOutputWithin(panel.id, CLAUDE_STARTUP_QUIET_MS),
+          screen => screen.composer.isPresent ||
+            (screen.state.isAlternateScreen === true && !panelHasOutputWithin(panel.id, CLAUDE_UI_QUIET_MS)),
         );
       }
       const stagesComposer = beforeScreen.composer.isPresent && (agentType === 'claude' ||
