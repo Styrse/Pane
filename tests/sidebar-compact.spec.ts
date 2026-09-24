@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import type { JsonObject } from '../shared/validation/boundaryDecoder';
 import { installElectronApiMock } from './electronApiMock';
 
 const projects = [
@@ -24,7 +25,7 @@ function session(
   id: string,
   name: string,
   projectId: number,
-  overrides: Record<string, unknown> = {},
+  overrides: JsonObject = {},
 ) {
   return {
     id,
@@ -54,6 +55,76 @@ async function collapseSidebar(page: Page) {
 }
 
 test.describe('compact sidebar', () => {
+  test('collapses repositories from the full sidebar using the shared section state', async ({ page }) => {
+    await installElectronApiMock(page, {
+      initialConfig: { theme: 'night-owl' },
+      initialProjects: projects,
+      initialSessions: [
+        session('pinned', 'Pinned work', 1, {
+          isFavorite: true,
+          favoritePinnedAt: '2026-01-03T00:00:00.000Z',
+        }),
+        session('regular', 'Regular work', 1),
+      ],
+      initialUiState: {
+        expandedProjects: [1],
+        pinnedSectionExpanded: true,
+        repositoriesSectionExpanded: true,
+      },
+    });
+
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
+
+    const pinnedToggle = page.getByRole('button', { name: 'Pinned', exact: true });
+    const repositoriesToggle = page.getByRole('button', { name: 'Repositories', exact: true });
+    await expect(pinnedToggle).toBeVisible();
+    await expect(repositoriesToggle).toBeVisible();
+    await expect(page.getByText('Alpha', { exact: true })).toBeVisible();
+
+    const [pinnedBox, repositoriesBox] = await Promise.all([
+      pinnedToggle.boundingBox(),
+      repositoriesToggle.boundingBox(),
+    ]);
+    expect(repositoriesBox?.height).toBe(pinnedBox?.height);
+
+    await repositoriesToggle.click();
+    await expect(page.getByText('Alpha', { exact: true })).toHaveCount(0);
+
+    await collapseSidebar(page);
+    await expect(page.getByTestId('compact-repositories-toggle')).toHaveAttribute('aria-expanded', 'false');
+    await page.getByTestId('compact-repositories-toggle').click();
+    await expect(page.getByTestId('compact-repository-1')).toBeVisible();
+  });
+
+  test('shows the full pane title when hovering a long sidebar label', async ({ page }) => {
+    const longPaneTitle = 'TIP416A · Show the complete descriptive pane title in the sidebar hover popover';
+
+    await installElectronApiMock(page, {
+      initialConfig: { theme: 'night-owl' },
+      initialProjects: projects,
+      initialSessions: [session('pane416--show-full-pane-title-in-sidebar-hover', longPaneTitle, 1)],
+      initialUiState: {
+        expandedProjects: [1],
+        pinnedSectionExpanded: true,
+        repositoriesSectionExpanded: true,
+      },
+    });
+
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
+
+    await page.getByRole('button', { name: longPaneTitle, exact: true }).hover();
+    const tooltip = page.getByRole('tooltip');
+    await expect(tooltip).toBeVisible();
+    await expect(tooltip.getByText(longPaneTitle, { exact: true })).toBeVisible();
+    await expect(tooltip).toContainText('pane416--show-full-pane-title-in-sidebar-hover');
+
+    await collapseSidebar(page);
+    await page.getByTestId('compact-repository-pane-pane416--show-full-pane-title-in-sidebar-hover').hover();
+    const compactTooltip = page.getByRole('tooltip');
+    await expect(compactTooltip.getByText(longPaneTitle, { exact: true })).toHaveCount(1);
+    await expect(compactTooltip).toContainText('pane416--show-full-pane-title-in-sidebar-hover');
+  });
+
   test('keeps the hover background on the active pane in both sidebar modes', async ({ page }) => {
     await installElectronApiMock(page, {
       initialConfig: { theme: 'night-owl' },
@@ -77,7 +148,7 @@ test.describe('compact sidebar', () => {
     const fullSidebarPane = page.getByRole('button', { name: 'Regular work', exact: true });
     await fullSidebarPane.click();
     await expect(fullSidebarPane).toHaveAttribute('aria-current', 'page');
-    await expect(fullSidebarPane.locator('..')).toHaveClass(/bg-surface-hover/);
+    await expect(fullSidebarPane.locator('..')).toHaveClass(/bg-surface-selected/);
     await fullSidebarPane.evaluate(element => element.blur());
     await page.mouse.move(640, 360);
     await page.screenshot({
@@ -87,12 +158,155 @@ test.describe('compact sidebar', () => {
 
     await collapseSidebar(page);
     const compactSidebarPane = page.getByTestId('compact-repository-pane-regular');
-    await expect(compactSidebarPane).toHaveClass(/bg-surface-hover/);
+    await expect(compactSidebarPane).toHaveClass(/bg-surface-selected/);
     await page.mouse.move(320, 180);
     await page.screenshot({
       path: 'test-results/sidebar-active-pane-compact.png',
       clip: { x: 0, y: 0, width: 180, height: 720 },
     });
+  });
+
+  test('offers archive and pin actions when a compact pane is right-clicked', async ({ page }) => {
+    await installElectronApiMock(page, {
+      initialConfig: { theme: 'night-owl' },
+      initialProjects: projects,
+      initialSessions: [
+        session('pinned', 'Pinned work', 1, {
+          isFavorite: true,
+          favoritePinnedAt: '2026-01-03T00:00:00.000Z',
+        }),
+        session('regular', 'Regular work', 1),
+      ],
+      initialUiState: {
+        expandedProjects: [1],
+        pinnedSectionExpanded: true,
+        repositoriesSectionExpanded: true,
+      },
+    });
+
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
+    await collapseSidebar(page);
+
+    const regularPane = page.getByTestId('compact-repository-pane-regular');
+    await regularPane.click({ button: 'right' });
+    let menu = page.getByRole('menu', { name: 'Pane actions for Regular work' });
+    await expect(menu.getByRole('menuitem').nth(0)).toHaveText('Pin');
+    await expect(menu.getByRole('menuitem').nth(1)).toHaveText('Archive');
+    await menu.getByRole('menuitem', { name: 'Archive' }).click();
+
+    // SAFETY: installElectronApiMock defines this test-only bridge before the page loads.
+    await expect.poll(() => page.evaluate(() => (
+      window as typeof window & {
+        __paneTestElectronMock: { getSessionDeleteCalls: () => string[] };
+      }
+    ).__paneTestElectronMock.getSessionDeleteCalls())).toEqual(['regular']);
+
+    await regularPane.click({ button: 'right' });
+    menu = page.getByRole('menu', { name: 'Pane actions for Regular work' });
+    await menu.getByRole('menuitem', { name: 'Pin', exact: true }).click();
+
+    const pinnedPane = page.getByTestId('compact-pinned-pane-pinned');
+    await pinnedPane.click({ button: 'right' });
+    menu = page.getByRole('menu', { name: 'Pane actions for Pinned work' });
+    await expect(menu.getByRole('menuitem').nth(0)).toHaveText('Unpin');
+    await expect(menu.getByRole('menuitem').nth(1)).toHaveText('Archive');
+    await menu.getByRole('menuitem', { name: 'Unpin', exact: true }).click();
+
+    // SAFETY: installElectronApiMock defines this test-only bridge before the page loads.
+    await expect.poll(() => page.evaluate(() => (
+      window as typeof window & {
+        __paneTestElectronMock: { getSessionFavoriteToggleCalls: () => string[] };
+      }
+    ).__paneTestElectronMock.getSessionFavoriteToggleCalls())).toEqual(['regular', 'pinned']);
+  });
+
+  test('keeps the destructive menu item readable under the cursor', async ({ page }) => {
+    await installElectronApiMock(page, {
+      initialConfig: { theme: 'night-owl' },
+      initialProjects: projects,
+      initialSessions: [session('regular', 'Regular work', 1)],
+      initialUiState: {
+        expandedProjects: [1],
+        pinnedSectionExpanded: true,
+        repositoriesSectionExpanded: true,
+      },
+    });
+
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
+    await collapseSidebar(page);
+
+    await page.getByTestId('compact-repository-pane-regular').click({ button: 'right' });
+    const archive = page
+      .getByRole('menu', { name: 'Pane actions for Regular work' })
+      .getByRole('menuitem', { name: 'Archive' });
+
+    // The menu opens under the cursor, so the item is hovered from the first frame:
+    // its icon and label have to survive that state.
+    await expect(archive).toHaveText('Archive');
+    await expect(archive.locator('svg')).toBeVisible();
+    await archive.hover();
+
+    const painted = () => archive.evaluate((node) => {
+      const style = getComputedStyle(node);
+      return { background: style.backgroundColor, color: style.color };
+    });
+
+    // Wait for the hover plate to finish transitioning in, then require the label
+    // to still contrast with it: painting the destructive red as the background
+    // swallowed the red text and left a blank slab.
+    await expect
+      .poll(async () => (await painted()).background)
+      .not.toBe('rgba(0, 0, 0, 0)');
+    const { background, color } = await painted();
+    expect(background).not.toBe(color);
+  });
+
+  test('keeps the pane tooltip reachable across its whole height', async ({ page }) => {
+    await installElectronApiMock(page, {
+      initialConfig: { theme: 'night-owl' },
+      initialProjects: projects,
+      initialSessions: [session('regular', 'Regular work', 1, {
+        gitStatus: {
+          state: 'ahead',
+          ahead: 2,
+          prNumber: 474,
+          prState: 'OPEN',
+          prTitle: 'Compact sidebar nits',
+          commitAdditions: 40,
+          commitDeletions: 12,
+          commitFilesChanged: 3,
+        },
+      })],
+      initialUiState: {
+        expandedProjects: [1],
+        pinnedSectionExpanded: true,
+        repositoriesSectionExpanded: true,
+      },
+    });
+
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
+    await collapseSidebar(page);
+
+    await page.getByTestId('compact-repository-pane-regular').hover();
+    const tooltip = page.getByRole('tooltip');
+    await expect(tooltip).toBeVisible({ timeout: 10_000 });
+
+    const box = await tooltip.boundingBox();
+    if (!box) throw new Error('tooltip has no box');
+
+    // Travel to the tooltip's top edge, then its bottom edge — both used to sit
+    // outside the hover region and dismissed it on the way.
+    await page.mouse.move(box.x + box.width / 2, box.y + 4);
+    await expect(tooltip).toBeVisible();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height - 4);
+    await expect(tooltip).toBeVisible();
+    // Content that lives at the bottom of the tooltip, the part that used to be
+    // unreachable: the PR state line.
+    await expect(tooltip).toContainText('Open');
+
+    // Leaving for good still dismisses it.
+    await page.mouse.move(box.x + box.width + 200, box.y + box.height + 200);
+    await expect(tooltip).toBeHidden({ timeout: 5_000 });
   });
 
   test('mirrors an expanded pinned section and collapsed repositories section', async ({ page }) => {
@@ -114,10 +328,13 @@ test.describe('compact sidebar', () => {
     });
 
     await page.goto('/', { waitUntil: 'domcontentloaded' });
+    await expect(page.getByRole('button', { name: 'Repositories', exact: true })).toBeVisible();
+    await expect(page.getByText('Alpha', { exact: true })).toHaveCount(0);
     await collapseSidebar(page);
 
     await expect(page.getByTestId('compact-pinned-toggle')).toHaveAttribute('aria-expanded', 'true');
     await expect(page.getByTestId('compact-pinned-pane-pinned')).toBeVisible();
+    await expect(page.getByTestId('compact-pinned-pane-placeholder-pinned')).toBeVisible();
     await expect(page.getByTestId('compact-repositories-toggle')).toHaveAttribute('aria-expanded', 'false');
     await expect(page.getByTestId('compact-repository-1')).toHaveCount(0);
     await expect(page.getByTestId('compact-repository-pane-regular')).toHaveCount(0);

@@ -1,15 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { PaneCommandRegistry } from '../daemon/commandRegistry';
+import { PaneCommandRegistry, type PaneCommandValue } from '../daemon/commandRegistry';
 import { remotePaneClientController } from '../daemon/client/remotePaneClient';
 import { createDaemonBridgeRouter, registerDaemonBridgeHandlers } from './daemon';
 
+interface TestIpcEvent { readonly sender?: { readonly id?: number } }
 interface IpcMainStub {
-  handlers: Map<string, (_event: unknown, ...args: unknown[]) => Promise<unknown>>;
-  handle(channel: string, listener: (_event: unknown, ...args: unknown[]) => Promise<unknown>): void;
+  handlers: Map<string, (_event: TestIpcEvent, ...args: PaneCommandValue[]) => Promise<PaneCommandValue>>;
+  handle(channel: string, listener: (_event: TestIpcEvent, ...args: PaneCommandValue[]) => Promise<PaneCommandValue>): void;
 }
 
 function createIpcMainStub(): IpcMainStub {
-  const handlers = new Map<string, (_event: unknown, ...args: unknown[]) => Promise<unknown>>();
+  const handlers = new Map<string, (_event: TestIpcEvent, ...args: PaneCommandValue[]) => Promise<PaneCommandValue>>();
 
   return {
     handlers,
@@ -40,6 +41,25 @@ describe('daemon IPC bridge', () => {
       data: 'session-1',
     });
     expect(handler).toHaveBeenCalledWith('session-1');
+  });
+
+  it('preserves structured-clone arguments and results for local handlers', async () => {
+    const registry = new PaneCommandRegistry();
+    const ipcMain = createIpcMainStub();
+    const timestamp = new Date('2026-08-17T00:00:00.000Z');
+    const handler = vi.fn(async (_sessionId: string, optionalValue?: string) => ({
+      optionalValue,
+      timestamp,
+    }));
+
+    registry.register('sessions:get-output', handler);
+    registerDaemonBridgeHandlers(ipcMain, createDaemonBridgeRouter(registry));
+
+    const bridge = ipcMain.handlers.get('daemon:invoke');
+    const result = await bridge?.({}, 'sessions:get-output', 'session-1', undefined);
+
+    expect(handler).toHaveBeenCalledWith('session-1', undefined);
+    expect(result).toEqual({ optionalValue: undefined, timestamp });
   });
 
   it('rejects adapter-only channels at the bridge boundary', async () => {

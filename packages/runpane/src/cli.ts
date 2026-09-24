@@ -4,6 +4,7 @@ import { stdin as input, stdout as output } from 'node:process';
 import { createInterface } from 'node:readline/promises';
 import { runAgentContext } from './agentContext';
 import { helpText, parseRunpaneArgs, type ParsedArgs } from './commands';
+import { boundary, decodeBoundary } from './boundaryDecoder';
 import { downloadArtifact } from './download';
 import { runDoctor } from './doctor';
 import {
@@ -11,7 +12,8 @@ import {
   launchPaneClient,
   resolveExistingPanePath,
   shouldReuseExistingPane,
-  spawnPane
+  spawnPane,
+  spawnPaneCaptured
 } from './installers';
 import {
   runAgentsDoctor,
@@ -24,11 +26,25 @@ import {
   runPanelsSubmitComposer,
   runPanelsWait,
   runPanesArchive,
+  runPanesAdopt,
   runPanesCreate,
+  runPanesCost,
   runPanesList,
   runPanesPin,
+  runPanesRename,
+  runPanesFocus,
+  runSessionsAssociate,
+  runSessionsCreate,
+  runSessionsDetach,
+  runSessionsGet,
+  runSessionsList,
+  runSessionsOverview,
+  runSessionsSetAgent,
+  runSessionsUpdate,
   runReposAdd,
-  runReposList
+  runReposList,
+  runWatch,
+  runWorkspaceState
 } from './localControl';
 import { detectPlatform } from './platform';
 import { resolveRelease } from './releases';
@@ -57,6 +73,13 @@ export async function main(argv: string[]): Promise<number> {
     telemetryContext.failureStage = 'parse';
     telemetryContext.failureCategory = categorizeFailure(error);
     await trackWrapperEvent('runpane_wrapper_command_failed', telemetryContext);
+    if (argv[0] === 'watch') {
+      const normalized = error instanceof Error ? error : new Error(String(error));
+      const line = `WATCH ERROR ${normalized.name || 'Error'}: ${normalized.message}`;
+      process.stdout.write(`${line}\n`);
+      process.stderr.write(`${line}\n`);
+      return 2;
+    }
     throw error;
   }
   applyParsedArgsToTelemetryContext(telemetryContext, parsed);
@@ -86,6 +109,10 @@ async function dispatchParsedCommand(parsed: ParsedArgs, telemetryContext: Wrapp
     return runDoctor(parsed, SOURCE);
   }
 
+  if (parsed.command === 'daemon repair') {
+    return runDaemonRepair(parsed);
+  }
+
   if (parsed.command === 'agent-context') {
     return runAgentContext(parsed);
   }
@@ -102,8 +129,56 @@ async function dispatchParsedCommand(parsed: ParsedArgs, telemetryContext: Wrapp
     return runPanesList(parsed);
   }
 
+  if (parsed.command === 'panes cost') {
+    return runPanesCost(parsed);
+  }
+
+  if (parsed.command === 'sessions list') {
+    return runSessionsList(parsed);
+  }
+
+  if (parsed.command === 'sessions create') {
+    return runSessionsCreate(parsed);
+  }
+
+  if (parsed.command === 'sessions get') {
+    return runSessionsGet(parsed);
+  }
+
+  if (parsed.command === 'sessions update') {
+    return runSessionsUpdate(parsed);
+  }
+
+  if (parsed.command === 'sessions set-agent') {
+    return runSessionsSetAgent(parsed);
+  }
+
+  if (parsed.command === 'sessions associate') {
+    return runSessionsAssociate(parsed);
+  }
+
+  if (parsed.command === 'sessions detach') {
+    return runSessionsDetach(parsed);
+  }
+
+  if (parsed.command === 'sessions overview') {
+    return runSessionsOverview(parsed);
+  }
+
+  if (parsed.command === 'workspace state') {
+    return runWorkspaceState(parsed);
+  }
+
+  if (parsed.command === 'watch') {
+    return runWatch(parsed);
+  }
+
   if (parsed.command === 'panes create') {
     return runPanesCreate(parsed);
+  }
+
+  if (parsed.command === 'panes adopt') {
+    return runPanesAdopt(parsed);
   }
 
   if (parsed.command === 'panes archive') {
@@ -116,6 +191,14 @@ async function dispatchParsedCommand(parsed: ParsedArgs, telemetryContext: Wrapp
 
   if (parsed.command === 'panes unpin') {
     return runPanesPin(parsed, false);
+  }
+
+  if (parsed.command === 'panes rename') {
+    return runPanesRename(parsed);
+  }
+
+  if (parsed.command === 'panes focus') {
+    return runPanesFocus(parsed);
   }
 
   if (parsed.command === 'panels list') {
@@ -160,6 +243,56 @@ async function dispatchParsedCommand(parsed: ParsedArgs, telemetryContext: Wrapp
 
   console.log(helpText());
   return 0;
+}
+
+const daemonRepairResultSchema = boundary.object({
+  ok: boundary.boolean,
+  changed: boundary.boolean,
+  paneDir: boundary.string,
+  strategy: boundary.enumeration('systemd-user', 'launch-agent', 'scheduled-task', 'manual', 'skipped'),
+  launcherPath: boundary.string,
+  before: boundary.jsonObject,
+  after: boundary.jsonObject,
+  message: boundary.string,
+});
+
+async function runDaemonRepair(parsed: ParsedArgs): Promise<number> {
+  const executable = resolveExistingPanePath(parsed.panePath);
+  if (!executable) {
+    throw new Error('Pane is not installed. Install Pane first, then rerun runpane daemon repair.');
+  }
+  await confirmDaemonRepair(parsed);
+  const paneDir = parsed.paneDir ?? `${os.homedir()}/.pane_remote`;
+  const args = ['--remote-setup', '--remote-repair-service', '--pane-dir', paneDir];
+  if (parsed.json) {
+    const child = await spawnPaneCaptured(executable, [...args, '--json']);
+    try {
+      const result = decodeBoundary(JSON.parse(child.stdout.trim()), daemonRepairResultSchema);
+      console.log(JSON.stringify(result, null, 2));
+      return child.code === 0 && result.ok ? 0 : 1;
+    } catch (error) {
+      const failure = error instanceof Error ? error : new Error(String(error));
+      throw new Error(`Pane returned an invalid daemon repair result: ${child.stderr.trim() || failure.message}`);
+    }
+  }
+  console.log(`runpane: repairing the remote daemon service in ${paneDir}...`);
+  return spawnPane(executable, args);
+}
+
+async function confirmDaemonRepair(parsed: ParsedArgs): Promise<void> {
+  if (parsed.yes) return;
+  if (parsed.json || !input.isTTY || !output.isTTY) {
+    throw new Error('runpane daemon repair restarts the remote daemon service. Rerun with --yes to confirm.');
+  }
+  const rl = createInterface({ input, output });
+  try {
+    const answer = (await rl.question('Repair and restart the Pane remote daemon service? [y/N] ')).trim().toLowerCase();
+    if (answer !== 'y' && answer !== 'yes') {
+      throw new Error('Daemon repair cancelled.');
+    }
+  } finally {
+    rl.close();
+  }
 }
 
 async function runTrackedCommand(

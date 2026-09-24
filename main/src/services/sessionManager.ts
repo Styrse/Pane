@@ -7,51 +7,129 @@
 import { randomUUID } from 'crypto';
 import { EventEmitter } from 'events';
 import { spawn, ChildProcess, exec, execSync } from 'child_process';
+import { promisify } from 'util';
+import { existsSync } from 'fs';
 import { getRuntimeConfigManager } from '../core/runtime';
 import { ShellDetector } from '../utils/shellDetector';
 import type { Session, SessionUpdate, SessionOutput } from '../types/session';
 import type { DatabaseService } from '../database/database';
 import type { Session as DbSession, CreateSessionData, UpdateSessionData, ConversationMessage, PromptMarker, ExecutionDiff, CreateExecutionDiffData, Project } from '../database/models';
 import { getShellPath } from '../utils/shellPath';
+import { inheritedProcessEnv } from '../utils/inheritedProcessEnv';
 import { TerminalSessionManager } from './terminalSessionManager';
-import type { BaseAIPanelState, ToolPanelState, ToolPanel, ResumableSession, TerminalPanelState } from '../../../shared/types/panels';
+import type { ToolPanelState, ResumableSession } from '../../../shared/types/panels';
 import { formatForDisplay } from '../utils/timestampUtils';
+import { isCliAgentType, resolveAgentTypeFromCommand } from './agents/agentIdentity';
+import { resolveResumeId } from './agents/agentResume';
 import { scriptExecutionTracker } from './scriptExecutionTracker';
+import { boundary, decodeBoundary, type JsonValue } from '../../../shared/validation/boundaryDecoder';
 
 interface CreateSessionOptions {
   detached?: boolean;
   hidden?: boolean;
+  worktreeOwnership?: 'pane' | 'external';
+}
+
+interface ProjectContext {
+  project: Project;
+  pathResolver: PathResolver;
+  commandRunner: CommandRunner;
+}
+
+interface CommandExecutionError {
+  stderr?: string;
+  stdout?: string;
+  message?: string;
 }
 
 // Interface for generic JSON message data that can contain various properties
+interface MessageTextBlock { type: string; text?: string }
 interface GenericMessageData {
   type?: string;
   subtype?: string;
   session_id?: string;
   message_id?: string;
-  message?: {
-    content?: unknown;
-    [key: string]: unknown;
-  };
-  data?: Record<string, unknown>;
+  message?: string | { content?: string | MessageTextBlock[] };
+  data?: { status?: string; message?: JsonValue };
   delta?: string;
-  [key: string]: unknown;
 }
 
-// Helper function to check if data is a JSON message object with specific properties
-function isJSONMessage(data: Record<string, unknown>, requiredType?: string, requiredSubtype?: string): data is GenericMessageData {
-  if (typeof data.type !== 'string') return false;
-  if (requiredType && data.type !== requiredType) return false;
-  if (requiredSubtype && typeof data.subtype !== 'string') return false;
-  if (requiredSubtype && data.subtype !== requiredSubtype) return false;
-  return true;
+const genericMessageSchema = boundary.object({
+  type: boundary.optional(boundary.string),
+  subtype: boundary.optional(boundary.string),
+  session_id: boundary.optional(boundary.string),
+  message_id: boundary.optional(boundary.string),
+  message: boundary.optional(boundary.union(
+    boundary.string,
+    boundary.object({
+      content: boundary.optional(boundary.union(
+        boundary.string,
+        boundary.array(boundary.object({
+          type: boundary.string,
+          text: boundary.optional(boundary.string),
+        })),
+      )),
+    }),
+  )),
+  data: boundary.optional(boundary.object({
+    status: boundary.optional(boundary.string),
+    message: boundary.optional(boundary.json),
+  })),
+  delta: boundary.optional(boundary.string),
+});
+
+function parseGenericMessage(output: Omit<SessionOutput, 'sessionId'>): GenericMessageData | undefined {
+  if (output.type !== 'json') return undefined;
+  try {
+    return decodeBoundary(output.data, genericMessageSchema);
+  } catch {
+    return undefined;
+  }
 }
+
+function getMessageContent(message: GenericMessageData['message']): string | MessageTextBlock[] | undefined {
+  if (message === undefined) return undefined;
+  try {
+    return decodeBoundary(message, boundary.object({
+      content: boundary.optional(boundary.union(
+        boundary.string,
+        boundary.array(boundary.object({ type: boundary.string, text: boundary.optional(boundary.string) })),
+      )),
+    })).content;
+  } catch {
+    return undefined;
+  }
+}
+
+const terminalResumeStateSchema = boundary.object({
+  wasInterrupted: boundary.optional(boundary.boolean),
+  initialCommand: boundary.optional(boundary.string),
+  agentType: boundary.optional(boundary.enumeration('claude', 'codex', 'cursor')),
+  agentSessionId: boundary.optional(boundary.string),
+  hasClaudeSessionId: boundary.optional(boundary.boolean),
+});
+
+function parseTerminalResumeState(value: ToolPanelState['customState']): {
+  wasInterrupted?: boolean;
+  initialCommand?: string;
+  agentType?: 'claude' | 'codex' | 'cursor';
+  agentSessionId?: string;
+  hasClaudeSessionId?: boolean;
+} | undefined {
+  try {
+    return decodeBoundary(value, terminalResumeStateSchema);
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeDbOutputType(type: DbSessionOutputType): SessionOutput['type'] {
+  return type === 'system' ? 'stdout' : type;
+}
+
+type DbSessionOutputType = import('../database/models').SessionOutput['type'];
 
 // Interface for panel state with custom state that can hold any AI-specific data
-interface PanelStateWithCustomData extends ToolPanelState {
-  customState?: Record<string, unknown>;
-  [key: string]: unknown;
-}
 import { addSessionLog, cleanupSessionLogs } from '../ipc/logs';
 import { PathResolver } from '../utils/pathResolver';
 import { CommandRunner } from '../utils/commandRunner';
@@ -151,9 +229,9 @@ export class SessionManager extends EventEmitter {
   getPanelAgentSessionId(panelId: string): string | undefined {
     try {
       const panel = this.db.getPanel(panelId);
-      const customState = panel?.state?.customState as BaseAIPanelState | undefined;
+      const customState = parseTerminalResumeState(panel?.state?.customState);
       return customState?.agentSessionId;
-    } catch (e) {
+    } catch {
       return undefined;
     }
   }
@@ -186,7 +264,7 @@ export class SessionManager extends EventEmitter {
     this.projectContextCache.delete(projectId);
   }
 
-  private getOrCreateContext(project: Project): { project: Project; pathResolver: PathResolver; commandRunner: CommandRunner } {
+  private getOrCreateContext(project: Project): ProjectContext {
     if (!this.projectContextCache.has(project.id)) {
       this.projectContextCache.set(project.id, {
         pathResolver: new PathResolver(project),
@@ -224,7 +302,7 @@ export class SessionManager extends EventEmitter {
   }
 
   private convertDbSessionToSession(dbSession: DbSession): Session {
-    const toolTypeFromDb = (dbSession as DbSession & { tool_type?: string }).tool_type as 'claude' | 'none' | null | undefined;
+    const toolTypeFromDb = dbSession.tool_type;
     const normalizedToolType: 'claude' | 'none' = toolTypeFromDb === 'none'
         ? 'none'
         : 'claude';
@@ -235,7 +313,9 @@ export class SessionManager extends EventEmitter {
       worktreePath: dbSession.worktree_path,
       prompt: dbSession.initial_prompt,
       status: this.mapDbStatusToSessionStatus(dbSession.status),
-      statusMessage: dbSession.status_message,
+      statusMessage: dbSession.worktree_ownership === 'external' && !existsSync(dbSession.worktree_path)
+        ? 'External worktree directory is missing'
+        : dbSession.status_message,
       pid: dbSession.pid,
       createdAt: new Date(dbSession.created_at),
       lastActivity: new Date(dbSession.updated_at),
@@ -247,6 +327,7 @@ export class SessionManager extends EventEmitter {
       permissionMode: dbSession.permission_mode,
       runStartedAt: dbSession.run_started_at,
       isMainRepo: dbSession.is_main_repo,
+      worktreeOwnership: dbSession.worktree_ownership ?? 'pane',
       projectId: dbSession.project_id ?? undefined,
       folderId: dbSession.folder_id,
       displayOrder: dbSession.display_order, // Include displayOrder for proper sorting
@@ -394,6 +475,8 @@ export class SessionManager extends EventEmitter {
       folder_id: folderId,
       permission_mode: permissionMode,
       is_main_repo: isMainRepo,
+      worktree_ownership: options?.worktreeOwnership ?? 'pane',
+      commit_mode: options?.worktreeOwnership === 'external' ? 'disabled' : undefined,
       // Model is now managed at panel level
       base_commit: baseCommit,
       base_branch: baseBranch,
@@ -511,10 +594,14 @@ export class SessionManager extends EventEmitter {
     });
   }
 
-  emitSessionCreated(session: Session, options: { activateOnCreate?: boolean } = {}): void {
+  emitSessionCreated(
+    session: Session,
+    options: { activateOnCreate?: boolean; createDefaultTerminalOnCreate?: boolean } = {},
+  ): void {
     this.emit('session-created', {
       ...session,
       activateOnCreate: options.activateOnCreate !== false,
+      createDefaultTerminalOnCreate: options.createDefaultTerminalOnCreate !== false,
     });
   }
 
@@ -600,10 +687,8 @@ export class SessionManager extends EventEmitter {
 
 
   addSessionOutput(id: string, output: Omit<SessionOutput, 'sessionId'>): void {
-    // Check if this is the first output for this session
-    const existingOutputs = this.db.getSessionOutputs(id, 1);
-    const isFirstOutput = existingOutputs.length === 0;
-    
+    const message = parseGenericMessage(output);
+    const messageContent = getMessageContent(message?.message);
     // Store in database (stringify JSON objects and error objects)
     const dataToStore = (output.type === 'json' || output.type === 'error') ? JSON.stringify(output.data) : String(output.data);
     this.db.addSessionOutput(id, output.type, dataToStore);
@@ -620,21 +705,21 @@ export class SessionManager extends EventEmitter {
     this.emit('session-output-available', { sessionId: id });
     
     // Check if this is the initial system message with Claude's session ID
-    if (output.type === 'json' && isJSONMessage(output.data as Record<string, unknown>, 'system', 'init') && (output.data as GenericMessageData).session_id) {
+    if (message?.type === 'system' && message.subtype === 'init' && message.session_id) {
       // Store Claude's actual session ID
-      this.db.updateSession(id, { claude_session_id: (output.data as GenericMessageData).session_id });
+      this.db.updateSession(id, { claude_session_id: message.session_id });
     }
     
     // Check if this is a system result message — update the completion timestamp for the most recent prompt
-    if (output.type === 'json' && isJSONMessage(output.data as Record<string, unknown>, 'system', 'result')) {
+    if (message?.type === 'system' && message.subtype === 'result') {
       const completionTimestamp = output.timestamp instanceof Date ? output.timestamp.toISOString() : output.timestamp;
       this.db.updatePromptMarkerCompletion(id, completionTimestamp);
     }
     
     // Check if this is a user message in JSON format to track prompts
-    if (output.type === 'json' && (output.data as GenericMessageData).type === 'user' && (output.data as GenericMessageData).message?.content) {
+    if (message?.type === 'user' && messageContent) {
       // Extract text content from user messages
-      const content = (output.data as GenericMessageData).message?.content;
+      const content = messageContent;
       let promptText = '';
       
       if (Array.isArray(content)) {
@@ -643,23 +728,23 @@ export class SessionManager extends EventEmitter {
         if (textContent?.text) {
           promptText = textContent.text;
         }
-      } else if (typeof content === 'string') {
+      } else {
         promptText = content;
       }
       
       if (promptText) {
         // Get current output count to use as index
-        const outputs = this.db.getSessionOutputs(id);
-        this.db.addPromptMarker(id, promptText, outputs.length - 1);
+        const outputCount = this.db.getSessionOutputCount(id);
+        this.db.addPromptMarker(id, promptText, outputCount - 1);
         // Also add to conversation messages for continuation support
         this.db.addConversationMessage(id, 'user', promptText);
       }
     }
     
     // Check if this is an assistant message to track for conversation history
-    if (output.type === 'json' && (output.data as GenericMessageData).type === 'assistant' && (output.data as GenericMessageData).message?.content) {
+    if (message?.type === 'assistant' && messageContent) {
       // Extract text content from assistant messages
-      const content = (output.data as GenericMessageData).message?.content;
+      const content = messageContent;
       let assistantText = '';
       
       if (Array.isArray(content)) {
@@ -668,7 +753,7 @@ export class SessionManager extends EventEmitter {
           .filter((item: { type: string; text?: string }) => item.type === 'text')
           .map((item: { type: string; text?: string }) => item.text || '')
           .join('\n');
-      } else if (typeof content === 'string') {
+      } else {
         assistantText = content;
       }
       
@@ -705,7 +790,7 @@ export class SessionManager extends EventEmitter {
     const dbOutputs = this.db.getSessionOutputs(id, limit);
     return dbOutputs.map(dbOutput => ({
       sessionId: dbOutput.session_id,
-      type: dbOutput.type as 'stdout' | 'stderr' | 'json' | 'error',
+      type: normalizeDbOutputType(dbOutput.type),
       data: (dbOutput.type === 'json' || dbOutput.type === 'error') ? JSON.parse(dbOutput.data) : dbOutput.data,
       timestamp: new Date(dbOutput.timestamp)
     }));
@@ -716,7 +801,7 @@ export class SessionManager extends EventEmitter {
     return dbOutputs.map(dbOutput => ({
       sessionId: dbOutput.session_id,
       panelId: dbOutput.panel_id,
-      type: dbOutput.type as 'stdout' | 'stderr' | 'json' | 'error',
+      type: normalizeDbOutputType(dbOutput.type),
       data: (dbOutput.type === 'json' || dbOutput.type === 'error') ? JSON.parse(dbOutput.data) : dbOutput.data,
       timestamp: new Date(dbOutput.timestamp)
     }));
@@ -805,6 +890,8 @@ export class SessionManager extends EventEmitter {
 
   // Panel-based methods for Claude panels (use panel_id instead of session_id)
   addPanelOutput(panelId: string, output: Omit<SessionOutput, 'sessionId'>): void {
+    const message = parseGenericMessage(output);
+    const messageContent = getMessageContent(message?.message);
     const panel = this.db.getPanel(panelId);
 
     if (this.hasAutoContextCapture(panelId)) {
@@ -819,22 +906,16 @@ export class SessionManager extends EventEmitter {
       return;
     }
 
-    // Check for JSON message type and store appropriately
-    const existingOutputs = this.db.getPanelOutputs(panelId, 1);
-    const isContinuing = existingOutputs.length > 0 && 
-                        existingOutputs[existingOutputs.length - 1]?.type === 'json';
-    
     const dataToStore = (output.type === 'json' || output.type === 'error') 
       ? JSON.stringify(output.data) 
-      : output.data as string;
+      : String(output.data);
     
     this.db.addPanelOutput(panelId, output.type, dataToStore);
 
     // Capture Claude's session ID from init/system messages for proper --resume handling
     try {
-      if (output.type === 'json' && output.data && typeof output.data === 'object') {
-        const data = output.data as GenericMessageData;
-        const sessionIdFromMsg = (data.type === 'system' && data.subtype === 'init' && data.session_id) || data.session_id;
+      if (message) {
+        const sessionIdFromMsg = (message.type === 'system' && message.subtype === 'init' && message.session_id) || message.session_id;
         if (sessionIdFromMsg && panel?.sessionId) {
           this.db.updateSession(panel.sessionId, { claude_session_id: sessionIdFromMsg });
         }
@@ -844,16 +925,16 @@ export class SessionManager extends EventEmitter {
     }
 
     // Check if this is a system result message indicating panel execution has completed
-    if (output.type === 'json' && isJSONMessage(output.data as Record<string, unknown>, 'system', 'result')) {
+    if (message?.type === 'system' && message.subtype === 'result') {
       // Update the completion timestamp for the most recent prompt marker for this panel
       const completionTimestamp = output.timestamp instanceof Date ? output.timestamp.toISOString() : output.timestamp;
       this.db.updatePanelPromptMarkerCompletion(panelId, completionTimestamp);
     }
 
     // Handle assistant conversation message extraction for Claude panels (same logic as sessions)
-    if (output.type === 'json' && (output.data as GenericMessageData).type === 'assistant' && (output.data as GenericMessageData).message?.content) {
+    if (message?.type === 'assistant' && messageContent) {
       // Extract text content from assistant messages
-      const content = (output.data as GenericMessageData).message?.content;
+      const content = messageContent;
       let assistantText = '';
 
       if (Array.isArray(content)) {
@@ -862,7 +943,7 @@ export class SessionManager extends EventEmitter {
           .filter((item: { type: string; text?: string }) => item.type === 'text')
           .map((item: { type: string; text?: string }) => item.text || '')
           .join('\n');
-      } else if (typeof content === 'string') {
+      } else {
         assistantText = content;
       }
 
@@ -874,25 +955,25 @@ export class SessionManager extends EventEmitter {
     }
     
     // Handle session completion message to stop prompt timing
-    if (output.type === 'json' && (output.data as GenericMessageData).type === 'session' && (output.data as GenericMessageData).data?.status === 'completed') {
+    if (message?.type === 'session' && message.data?.status === 'completed') {
       // Add a completion message to trigger panel-response-added event which stops the timer
-      const completionMessage = String((output.data as GenericMessageData).data?.message || 'Session completed');
+      const completionMessage = String(message.data.message || 'Session completed');
       this.addPanelConversationMessage(panelId, 'assistant', completionMessage);
     }
     
     // Handle agent messages (similar to Claude's assistant messages)
-    if (output.type === 'json' && ((output.data as GenericMessageData).type === 'agent_message' || (output.data as GenericMessageData).type === 'agent_message_delta')) {
-      const agentText = String((output.data as GenericMessageData).message || (output.data as GenericMessageData).delta || '');
-      if (agentText && (output.data as GenericMessageData).type === 'agent_message') {
+    if (message?.type === 'agent_message' || message?.type === 'agent_message_delta') {
+      const agentText = String(message.message || message.delta || '');
+      if (agentText && message.type === 'agent_message') {
         // Only add complete messages, not deltas
         this.addPanelConversationMessage(panelId, 'assistant', agentText);
       }
     }
     
     // Handle user conversation message extraction for Claude panels (same logic as sessions)
-    if (output.type === 'json' && (output.data as GenericMessageData).type === 'user' && (output.data as GenericMessageData).message?.content) {
+    if (message?.type === 'user' && messageContent) {
       // Extract text content from user messages
-      const content = (output.data as GenericMessageData).message?.content;
+      const content = messageContent;
       let promptText = '';
       
       if (Array.isArray(content)) {
@@ -901,13 +982,11 @@ export class SessionManager extends EventEmitter {
         if (textContent?.text) {
           promptText = textContent.text;
         }
-      } else if (typeof content === 'string') {
+      } else {
         promptText = content;
       }
       
       if (promptText) {
-        // Get current output count to use as index for prompt markers
-        const outputs = this.db.getPanelOutputs(panelId);
         // Note: Panel-based prompt markers would need addPanelPromptMarker method
         // For now, we rely on the explicit addPanelConversationMessage calls in IPC handlers
         // this.db.addPanelPromptMarker(panelId, promptText, outputs.length - 1);
@@ -920,13 +999,12 @@ export class SessionManager extends EventEmitter {
 
     // Capture Claude session ID per panel for proper --resume usage
     try {
-      if (output.type === 'json' && output.data && typeof output.data === 'object') {
-        const data = output.data as GenericMessageData;
-        const sessionIdFromMsg = (data.type === 'system' && data.subtype === 'init' && data.session_id) || data.session_id;
+      if (message) {
+        const sessionIdFromMsg = (message.type === 'system' && message.subtype === 'init' && message.session_id) || message.session_id;
         if (sessionIdFromMsg) {
           const panel = this.db.getPanel(panelId);
           if (panel) {
-            const currentState = panel.state as PanelStateWithCustomData || {};
+            const currentState = panel.state || {};
             const customState = currentState.customState || {};
             const updatedState = {
               ...currentState,
@@ -948,7 +1026,7 @@ export class SessionManager extends EventEmitter {
     const dbOutputs = this.db.getPanelOutputs(panelId, limit);
     return dbOutputs.map(dbOutput => ({
       sessionId: dbOutput.session_id || '', // For compatibility, though panels use panel_id
-      type: dbOutput.type as 'stdout' | 'stderr' | 'json' | 'error',
+      type: normalizeDbOutputType(dbOutput.type),
       data: (dbOutput.type === 'json' || dbOutput.type === 'error') ? JSON.parse(dbOutput.data) : dbOutput.data,
       // SQLite timestamps are in UTC but stored without timezone indicator
       // Append 'Z' to ensure proper UTC parsing as per project documentation
@@ -985,7 +1063,7 @@ export class SessionManager extends EventEmitter {
     return this.db.getPanelPromptMarkers(panelId);
   }
 
-  addPanelInitialPromptMarker(panelId: string, prompt: string): void {
+  addPanelInitialPromptMarker(_panelId: string, _prompt: string): void {
     // Prompt markers are no longer needed for panels - using conversation_messages instead
     // The prompt is already being added to conversation_messages in addPanelConversationMessage
   }
@@ -1027,8 +1105,8 @@ export class SessionManager extends EventEmitter {
       
       // Add a prompt marker for this continued conversation
       // Get current output count to use as index
-      const outputs = this.db.getSessionOutputs(id);
-      this.db.addPromptMarker(id, userMessage, outputs.length);
+      const outputCount = this.db.getSessionOutputCount(id);
+      this.db.addPromptMarker(id, userMessage, outputCount);
       
       // Emit event for the Claude Code manager to handle
       this.emit('conversation-continue', { sessionId: id, message: userMessage });
@@ -1169,7 +1247,7 @@ export class SessionManager extends EventEmitter {
       stdio: 'pipe',
       detached: true, // Create a new process group
       env: {
-        ...process.env,
+        ...inheritedProcessEnv(),
         PATH: shellPath
       }
     });
@@ -1289,9 +1367,16 @@ export class SessionManager extends EventEmitter {
               addSessionLog(sessionId, 'warn', line, 'Archive');
             });
           }
-        } catch (cmdError: unknown) {
+        } catch (cmdError) {
           console.error(`[SessionManager] Archive command failed: ${command}`, cmdError);
-          const error = cmdError as { stderr?: string; stdout?: string; message?: string };
+          let error: CommandExecutionError = {};
+          try {
+            error = decodeBoundary(cmdError, boundary.object({
+              stderr: boundary.optional(boundary.string),
+              stdout: boundary.optional(boundary.string),
+              message: boundary.optional(boundary.string),
+            }));
+          } catch { /* String(cmdError) remains the fallback. */ }
           const errorMessage = error.stderr || error.stdout || error.message || String(cmdError);
           allOutput += errorMessage;
 
@@ -1364,9 +1449,16 @@ export class SessionManager extends EventEmitter {
               addSessionLog(sessionId, 'warn', line, 'Build');
             });
           }
-        } catch (cmdError: unknown) {
+        } catch (cmdError) {
           console.error(`[SessionManager] Build command failed: ${command}`, cmdError);
-          const error = cmdError as { stderr?: string; stdout?: string; message?: string };
+          let error: CommandExecutionError = {};
+          try {
+            error = decodeBoundary(cmdError, boundary.object({
+              stderr: boundary.optional(boundary.string),
+              stdout: boundary.optional(boundary.string),
+              message: boundary.optional(boundary.string),
+            }));
+          } catch { /* String(cmdError) remains the fallback. */ }
           const errorMessage = error.stderr || error.stdout || error.message || String(cmdError);
           allOutput += errorMessage;
           
@@ -1391,8 +1483,6 @@ export class SessionManager extends EventEmitter {
   }
   
   private async execWithShellPath(command: string, options?: { cwd?: string }): Promise<{ stdout: string; stderr: string }> {
-    const { exec } = require('child_process');
-    const { promisify } = require('util');
     const execAsync = promisify(exec);
     
     const shellPath = getShellPath();
@@ -1452,7 +1542,7 @@ export class SessionManager extends EventEmitter {
           descendants.push(...this.getAllDescendantPids(pid));
         }
       }
-    } catch (error) {
+    } catch {
       // Command might fail if no children exist, which is fine
     }
     
@@ -1572,7 +1662,7 @@ export class SessionManager extends EventEmitter {
               try {
                 process.kill('SIGKILL');
                 addSessionLog(sessionId, 'info', `[Sent SIGKILL to process ${process.pid}]`, 'System');
-              } catch (error) {
+              } catch {
                 // Process might already be dead
                 addSessionLog(sessionId, 'info', `[Process ${process.pid} already terminated]`, 'System');
               }
@@ -1666,7 +1756,8 @@ export class SessionManager extends EventEmitter {
 
   getCurrentRunningSessionId(): string | null {
     // Use shared tracker for consistency
-    return scriptExecutionTracker.getRunningScriptId('session') as string | null;
+    const runningId = scriptExecutionTracker.getRunningScriptId('session');
+    return decodeBoundary(runningId, boundary.nullable(boundary.string));
   }
 
   async cleanup(): Promise<void> {
@@ -1729,7 +1820,7 @@ export class SessionManager extends EventEmitter {
   }
 
   async sendTerminalInput(sessionId: string, data: string): Promise<void> {
-    let session = this.activeSessions.get(sessionId);
+    const session = this.activeSessions.get(sessionId);
     let worktreePath: string;
     
     if (!session) {
@@ -1782,7 +1873,7 @@ export class SessionManager extends EventEmitter {
   }
 
   async preCreateTerminalSession(sessionId: string): Promise<void> {
-    let session = this.activeSessions.get(sessionId);
+    const session = this.activeSessions.get(sessionId);
     let worktreePath: string;
 
     if (!session) {
@@ -1825,18 +1916,12 @@ export class SessionManager extends EventEmitter {
 
       for (const panel of panels) {
         if (panel.type === 'terminal') {
-          const termState = panel.state?.customState as TerminalPanelState | undefined;
+          const termState = parseTerminalResumeState(panel.state?.customState);
           if (termState?.wasInterrupted && termState?.initialCommand) {
-            const agentType = termState.agentType ?? this.getTerminalAgentType(termState.initialCommand);
-            if (agentType === 'claude') {
-              // Panel ID was used as --session-id when launching Claude, so it IS the resume ID.
-              resumablePanels.push({ panelId: panel.id, panelType: 'terminal', resumeId: panel.id });
-            } else if (agentType === 'codex') {
-              resumablePanels.push({
-                panelId: panel.id,
-                panelType: 'terminal',
-                resumeId: termState.agentSessionId ?? 'interactive'
-              });
+            const agentType = termState.agentType ?? resolveAgentTypeFromCommand(termState.initialCommand);
+            const resumeId = resolveResumeId(agentType, panel.id, termState);
+            if (resumeId) {
+              resumablePanels.push({ panelId: panel.id, panelType: 'terminal', resumeId });
             }
           }
         }
@@ -1873,25 +1958,23 @@ export class SessionManager extends EventEmitter {
 
       for (const panel of panels) {
         if (panel.type === 'terminal') {
-          const termState = panel.state?.customState as TerminalPanelState | undefined;
+          const termState = parseTerminalResumeState(panel.state?.customState);
 
           if (termState?.wasInterrupted && termState?.initialCommand) {
             const state = panel.state;
-            const customState = (state.customState || {}) as TerminalPanelState;
-            const agentType = customState.agentType ?? this.getTerminalAgentType(customState.initialCommand);
+            const customState = { ...(state.customState ?? {}), ...termState };
+            const agentType = customState.agentType ?? resolveAgentTypeFromCommand(customState.initialCommand);
 
+            if (!isCliAgentType(agentType)) {
+              continue;
+            }
+            customState.agentType = agentType;
             if (agentType === 'claude') {
               customState.hasClaudeSessionId = true;
-              customState.agentType = 'claude';
-            } else if (agentType === 'codex') {
-              customState.agentType = 'codex';
-              if (customState.agentSessionId) {
-                console.log(`[SessionManager] Preparing Codex panel ${panel.id} for captured-session resume`);
-              } else {
-                console.warn(`[SessionManager] Codex panel ${panel.id} has no captured session id; terminal launch will open interactive resume picker`);
-              }
+            } else if (customState.agentSessionId) {
+              console.log(`[SessionManager] Preparing ${agentType} panel ${panel.id} for captured-session resume`);
             } else {
-              continue;
+              console.warn(`[SessionManager] ${agentType} panel ${panel.id} has no captured session id; terminal launch will use the CLI's own recovery path`);
             }
 
             state.customState = customState;
@@ -1928,10 +2011,4 @@ export class SessionManager extends EventEmitter {
     console.log(`[SessionManager] Dismissed ${sessionIds.length} interrupted sessions`);
   }
 
-  private getTerminalAgentType(command?: string): TerminalPanelState['agentType'] | undefined {
-    const lower = command?.toLowerCase() ?? '';
-    if (lower.includes('claude')) return 'claude';
-    if (lower.includes('codex')) return 'codex';
-    return undefined;
-  }
 }

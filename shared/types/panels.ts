@@ -1,9 +1,10 @@
+import type { DiffScope } from './gitDiff';
+
 /**
  * Panel and session types for Pane.
  * Note: "Sessions" are called "Panes" in the UI. Internally they remain
  * "sessions" in code, database, and IPC to avoid a massive refactor.
  */
-
 export type ProjectEnvironment = 'wsl' | 'windows' | 'linux' | 'macos';
 
 export interface ToolPanel {
@@ -15,13 +16,13 @@ export interface ToolPanel {
   metadata: ToolPanelMetadata;   // Creation time, position, etc.
 }
 
-export type ToolPanelType = 'terminal' | 'diff' | 'explorer' | 'logs' | 'dashboard' | 'setup-tasks' | 'browser'; // Will expand later
+export type ToolPanelType = 'terminal' | 'diff' | 'explorer' | 'editor' | 'logs' | 'dashboard' | 'setup-tasks' | 'browser';
 
 export interface ToolPanelState {
   isActive: boolean;
   isPinned?: boolean;
   hasBeenViewed?: boolean;       // Track if panel has ever been viewed
-  customState?: TerminalPanelState | DiffPanelState | ExplorerPanelState | LogsPanelState | DashboardPanelState | SetupTasksPanelState | BrowserPanelState | Record<string, unknown>;
+  customState?: TerminalPanelState | DiffPanelState | ExplorerPanelState | EditorPanelState | LogsPanelState | DashboardPanelState | SetupTasksPanelState | BrowserPanelState | object;
 }
 
 export interface TerminalPanelState {
@@ -37,15 +38,15 @@ export interface TerminalPanelState {
   initialInputSentAt?: string;   // Set after initialInput has been written once
   initialInputError?: string;    // Best-effort error if initialInput could not be written
   
-  // Enhanced persistence (can be added incrementally)
+  // Terminal bytes. On the way to the database these three keys are split out
+  // of the state JSON into the bounded panel_buffers table; they only appear
+  // here on the live terminal:getState path and in write patches.
   scrollbackBuffer?: string | string[];   // Full terminal output history (string for new format, array for legacy)
   alternateScreenBuffer?: string;         // Recent TUI/alternate-screen output, kept separate from shell scrollback
   isAlternateScreen?: boolean;            // Whether the live terminal is currently in alternate-screen/TUI mode
   serializedBuffer?: string;             // xterm.js serialized terminal state (includes full visual buffer)
-  commandHistory?: string[];     // Commands entered by user
   environmentVars?: Record<string, string>; // Modified env vars
   dimensions?: { cols: number; rows: number }; // Terminal size
-  lastActiveCommand?: string;    // Command running when closed
   cursorPosition?: { x: number; y: number }; // Cursor location
   selectionText?: string;        // Any selected text
   lastActivityTime?: string;     // For "idle since" indicators
@@ -57,13 +58,29 @@ export interface TerminalPanelState {
   // Auto-resume state (for graceful shutdown/restart)
   wasInterrupted?: boolean;          // Whether this terminal was active when app shutdown occurred
   hasClaudeSessionId?: boolean;      // Whether --session-id was already passed to Claude (use --resume next time)
-  agentType?: 'claude' | 'codex';    // CLI agent type for panel-local resume behavior
+  agentType?: 'claude' | 'codex' | 'cursor'; // CLI agent type for panel-local resume behavior
   agentSessionId?: string;           // Agent-generated session ID for resuming conversations
+  /** Stable orchestration identity for resumed Session terminals. */
+  orchestrationSessionId?: string;
 
   // CLI tool init state
   isCliPanel?: boolean;              // True if this terminal runs a CLI tool (claude/codex)
   isCliReady?: boolean;              // True after the CLI tool has started responding
 }
+
+export interface TerminalPanelOutputEvent {
+  sessionId: string;
+  panelId: string;
+  output: string;
+}
+
+export interface TerminalSessionOutputEvent {
+  sessionId: string;
+  type: 'stdout' | 'stderr';
+  data: string;
+}
+
+export type TerminalOutputEvent = TerminalPanelOutputEvent | TerminalSessionOutputEvent;
 
 export interface DiffPanelState {
   lastRefresh?: string;            // Last time diff was refreshed
@@ -119,6 +136,33 @@ export interface ExplorerPanelState {
   showSearch?: boolean;           // Whether search is visible
 }
 
+/**
+ * A center editor tab opened from the Files inspector, the Review panel or a
+ * terminal link. Follows VS Code's preview semantics: a single click opens a
+ * preview tab (italic title) that the next single-click re-targets; double-
+ * clicking the file or the tab, or editing the file, pins it.
+ */
+/**
+ * Which diff an editor tab shows. Mirrors the Review panel's two addressing
+ * modes: a commit hash (`'index'` = uncommitted) or an execution range
+ * (`[0]` = uncommitted, `[a, b]` = one commit, omitted = every commit).
+ */
+export type LegacyEditorDiffRef =
+  | { kind: 'commit'; hash: string }
+  | { kind: 'range'; executionIds?: number[] };
+
+export type EditorDiffRef = { kind: 'scope'; scope: DiffScope; previousPath?: string };
+
+export interface EditorPanelState {
+  filePath: string;
+  /** When set, the tab shows this file's diff instead of an editable file. */
+  diff?: EditorDiffRef;
+  isPreview?: boolean;
+  isDirty?: boolean;
+  cursorPosition?: { line: number; column: number };
+  scrollPosition?: number;
+}
+
 export interface LogsPanelState {
   isRunning: boolean;             // Process currently running
   processId?: number;             // Active process PID
@@ -136,7 +180,7 @@ export interface DashboardPanelState {
   lastRefresh?: string;           // Last time dashboard was refreshed
   filterType?: 'all' | 'stale' | 'changes' | 'pr'; // Current filter
   isRefreshing?: boolean;          // Whether dashboard is currently refreshing
-  cachedData?: Record<string, unknown>;                // Cached dashboard data
+  cachedData?: object;                // Cached dashboard data
 }
 
 export interface SetupTasksPanelState {
@@ -162,7 +206,7 @@ export interface CreatePanelRequest {
   sessionId: string;
   type: ToolPanelType;
   title?: string;                // Optional custom title
-  initialState?: TerminalPanelState | DiffPanelState | ExplorerPanelState | LogsPanelState | DashboardPanelState | SetupTasksPanelState | BrowserPanelState | { customState?: unknown };
+  initialState?: TerminalPanelState | DiffPanelState | ExplorerPanelState | EditorPanelState | LogsPanelState | DashboardPanelState | SetupTasksPanelState | BrowserPanelState | { customState?: unknown };
   metadata?: Partial<ToolPanelMetadata>; // Optional metadata overrides
   activate?: boolean;            // Defaults to true; false creates the panel in the background.
 }
@@ -188,7 +232,7 @@ export interface PanelEvent {
   type: PanelEventType;
   source: {
     panelId: string;
-    panelType: ToolPanelType;
+    panelType: ToolPanelType | 'git';
     sessionId: string;
   };
   data: unknown;
@@ -245,8 +289,19 @@ export interface PanelCapabilities {
   canAppearInWorktrees?: boolean; // Whether panel can appear in worktree sessions
 }
 
+interface PanelCapabilityRegistry {
+  terminal: PanelCapabilities;
+  diff: PanelCapabilities;
+  explorer: PanelCapabilities;
+  editor: PanelCapabilities;
+  logs: PanelCapabilities;
+  dashboard: PanelCapabilities;
+  'setup-tasks': PanelCapabilities;
+  browser: PanelCapabilities;
+}
+
 // Panel Registry - Currently only terminal is implemented
-export const PANEL_CAPABILITIES: Record<ToolPanelType, PanelCapabilities> = {
+export const PANEL_CAPABILITIES: PanelCapabilityRegistry = {
   terminal: {
     canEmit: ['terminal:command_executed', 'terminal:exit', 'files:changed'],
     canConsume: [], // Terminal doesn't consume events in Phase 1-2
@@ -271,6 +326,14 @@ export const PANEL_CAPABILITIES: Record<ToolPanelType, PanelCapabilities> = {
     singleton: false,                // Multiple explorers allowed
     canAppearInProjects: true,       // Explorer can appear in projects
     canAppearInWorktrees: true       // Explorer can appear in worktrees
+  },
+  editor: {
+    canEmit: ['explorer:file_saved', 'explorer:file_changed'],
+    canConsume: ['files:changed'],
+    requiresProcess: false,
+    singleton: false,                // One tab per open file
+    canAppearInProjects: true,
+    canAppearInWorktrees: true
   },
   logs: {
     canEmit: ['process:started', 'process:output', 'process:ended'],

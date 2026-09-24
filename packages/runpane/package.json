@@ -1,16 +1,16 @@
 {
   "name": "runpane",
-  "version": "2.4.48",
+  "version": "2.4.123",
   "description": "Thin npm installer and remote setup CLI for Pane",
   "license": "AGPL-3.0",
   "homepage": "https://runpane.com",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dcouple/Pane.git",
+    "url": "git+https://github.com/greenfield-inc/Pane.git",
     "directory": "packages/runpane"
   },
   "bugs": {
-    "url": "https://github.com/dcouple/Pane/issues"
+    "url": "https://github.com/greenfield-inc/Pane/issues"
   },
   "bin": {
     "runpane": "dist/cli.js"
@@ -23,12 +23,13 @@
   ],
   "scripts": {
     "build": "tsc && node scripts/mark-executable.js",
-    "lint": "eslint src --ext .ts",
+    "lint": "pnpm --dir ../.. run lint:ox:runpane && pnpm run lint:eslint",
+    "lint:eslint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit",
     "prepack": "pnpm run build"
   },
   "engines": {
-    "node": ">=18.17.0"
+    "node": ">=20.0.0"
   },
   "publishConfig": {
     "access": "public"
@@ -36,8 +37,6 @@
   "devDependencies": {
     "@eslint/js": "^9.17.0",
     "@types/node": "^22.10.2",
-    "@typescript-eslint/eslint-plugin": "^8.19.0",
-    "@typescript-eslint/parser": "^8.19.0",
     "eslint": "^9.17.0",
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.19.0"

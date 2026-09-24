@@ -19,6 +19,15 @@ interface ProjectDashboardProps {
   projectName: string;
 }
 
+function isProjectDashboardSeed(data: Partial<ProjectDashboardData>): data is ProjectDashboardData {
+  return data.projectId !== undefined
+    && Boolean(data.projectName)
+    && Boolean(data.projectPath)
+    && Boolean(data.mainBranch)
+    && Array.isArray(data.sessionBranches)
+    && Boolean(data.lastRefreshed);
+}
+
 export const ProjectDashboard: React.FC<ProjectDashboardProps> = React.memo(({ projectId, projectName }) => {
   const [dashboardData, setDashboardData] = useState<ProjectDashboardData | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -26,9 +35,18 @@ export const ProjectDashboard: React.FC<ProjectDashboardProps> = React.memo(({ p
   const [error, setError] = useState<string | null>(null);
   const [lastRefreshTime, setLastRefreshTime] = useState<Date | null>(null);
   const [filterType, setFilterType] = useState<'all' | 'stale' | 'changes' | 'pr'>('all');
+  const handleFilterTypeChange = (event: React.ChangeEvent<HTMLSelectElement>) => {
+    // SAFETY: The select options enumerate every valid dashboard filter.
+    setFilterType(event.target.value as typeof filterType);
+  };
   const [statusAnnouncement, setStatusAnnouncement] = useState('');
   const [isProgressive] = useState(true); // Use progressive loading by default
   const pendingSessionUpdatesRef = useRef<Map<string, SessionBranchInfo>>(new Map());
+  const dashboardDataRef = useRef<ProjectDashboardData | null>(null);
+
+  useEffect(() => {
+    dashboardDataRef.current = dashboardData;
+  }, [dashboardData]);
 
   // Debounced function to apply pending session updates
   const applyPendingSessionUpdates = useMemo(
@@ -72,10 +90,11 @@ export const ProjectDashboard: React.FC<ProjectDashboardProps> = React.memo(({ p
       }
     }
     
-    setIsLoading(!dashboardData); // Only show loading on initial load
-    setIsRefreshing(!!dashboardData); // Show refreshing if we already have data
+    const hasDashboardData = dashboardDataRef.current !== null;
+    setIsLoading(!hasDashboardData); // Only show loading on initial load
+    setIsRefreshing(hasDashboardData); // Show refreshing if we already have data
     setError(null);
-    setStatusAnnouncement(dashboardData ? 'Refreshing dashboard' : 'Loading dashboard');
+    setStatusAnnouncement(hasDashboardData ? 'Refreshing dashboard' : 'Loading dashboard');
     
     try {
       if (useProgressive && isProgressive) {
@@ -111,7 +130,7 @@ export const ProjectDashboard: React.FC<ProjectDashboardProps> = React.memo(({ p
       setIsLoading(false);
       setIsRefreshing(false);
     }
-  }, [projectId, dashboardData, isProgressive]);
+  }, [projectId, isProgressive]);
 
   // Debounced refresh function
   const debouncedRefresh = useMemo(
@@ -132,15 +151,14 @@ export const ProjectDashboard: React.FC<ProjectDashboardProps> = React.memo(({ p
     const unsubscribeUpdate = API.dashboard.onUpdate((event) => {
       if (event.projectId === projectId) {
         setDashboardData(prevData => {
-          if (!prevData && event.data) {
-            // Initial data
-            return event.data as ProjectDashboardData;
-          } else if (prevData && event.data && event.isPartial) {
+          if (!prevData) {
+            return isProjectDashboardSeed(event.data) ? event.data : null;
+          } else if (prevData && event.isPartial) {
             // Merge partial update
             return { ...prevData, ...event.data };
-          } else if (event.data) {
+          } else if (!event.isPartial) {
             // Full update
-            const data = event.data as ProjectDashboardData;
+            const data = event.data;
             if (data.projectId && data.projectName && data.sessionBranches) {
               dashboardCache.set(projectId, data);
             }
@@ -159,11 +177,9 @@ export const ProjectDashboard: React.FC<ProjectDashboardProps> = React.memo(({ p
 
     // Handle individual session updates with debouncing
     const unsubscribeSession = API.dashboard.onSessionUpdate((event) => {
-      if (event.projectId === projectId && event.data && event.sessionId) {
-        // Cast to SessionBranchInfo since we know this is the expected shape from dashboard updates
-        const sessionData = event.data as SessionBranchInfo;
+      if (event.projectId === projectId) {
         // Add to pending updates
-        pendingSessionUpdatesRef.current.set(event.sessionId, sessionData);
+        pendingSessionUpdatesRef.current.set(event.session.sessionId, event.session);
         // Trigger debounced update
         applyPendingSessionUpdates();
       }
@@ -179,10 +195,11 @@ export const ProjectDashboard: React.FC<ProjectDashboardProps> = React.memo(({ p
 
   useEffect(() => {
     // Clear previous data when switching projects to show skeleton
+    dashboardDataRef.current = null;
     setDashboardData(null);
     setError(null);
     fetchDashboardData();
-  }, [projectId]); // Only refetch when projectId changes
+  }, [fetchDashboardData]);
 
   // Memoize grouped sessions by base branch (for future use)
   // const groupedSessions = useMemo(() => {
@@ -204,12 +221,9 @@ export const ProjectDashboard: React.FC<ProjectDashboardProps> = React.memo(({ p
     const staleClass = session.isStale ? 'bg-status-warning/10' : '';
     
     const handleSessionClick = async () => {
-      console.log('[ProjectDashboard] Session clicked:', session.sessionId, session.sessionName);
       try {
         await useSessionStore.getState().setActiveSession(session.sessionId);
-        console.log('[ProjectDashboard] Session set, now navigating to sessions view');
         useNavigationStore.getState().navigateToSessions();
-        console.log('[ProjectDashboard] Navigation completed');
       } catch (error) {
         console.error('[ProjectDashboard] Error in handleSessionClick:', error);
       }
@@ -374,7 +388,7 @@ export const ProjectDashboard: React.FC<ProjectDashboardProps> = React.memo(({ p
               mainBranch={dashboardData.mainBranch}
               mainBranchStatus={dashboardData.mainBranchStatus}
               remotes={dashboardData.remotes}
-              onReviewUpdates={() => console.log('Review updates clicked')}
+              onReviewUpdates={() => {}}
             />
           )}
           
@@ -392,7 +406,7 @@ export const ProjectDashboard: React.FC<ProjectDashboardProps> = React.memo(({ p
                   <Filter className="w-4 h-4 text-text-tertiary" />
                   <select
                     value={filterType}
-                    onChange={(e) => setFilterType(e.target.value as typeof filterType)}
+                    onChange={handleFilterTypeChange}
                     className="text-sm border border-border-primary rounded px-2 py-1 bg-surface-primary text-text-primary focus:outline-none focus:ring-2 focus:ring-interactive focus:border-interactive"
                   >
                     <option value="all">All Panes</option>

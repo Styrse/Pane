@@ -3,6 +3,7 @@ export type SettingsCategoryId =
   | 'appearance'
   | 'terminal'
   | 'ai-agents'
+  | 'usage'
   | 'worktrees-git'
   | 'notifications'
   | 'remote-access'
@@ -16,9 +17,13 @@ export type RemoteAccessSubviewId = 'host-setup' | 'connections' | 'advanced-hos
 export type SettingsSettingId =
   | 'automatic-updates'
   | 'check-updates-now'
+  | 'send-feedback'
   | 'start-on-login'
   | 'keep-awake'
   | 'theme'
+  | 'appearance-mode'
+  | 'system-light-theme'
+  | 'system-dark-theme'
   | 'high-contrast'
   | 'ui-scale'
   | 'sidebar-pane-rows'
@@ -46,10 +51,10 @@ export type SettingsSettingId =
   | 'remote-advanced-host'
   | 'remote-paired-connection'
   | 'remote-existing-profile'
-  | 'cloud-workspace'
   | 'voice-transcription'
   | 'keyboard-shortcuts'
   | 'command-palette-shortcut'
+  | 'kitty-keyboard'
   | 'terminal-shortcuts'
   | 'analytics'
   | 'verbose-logging'
@@ -81,10 +86,9 @@ export const SETTINGS_PREFERENCE_KEYS = {
   atTerminalLineCount: 'at_terminal_line_count',
 } as const;
 
-export type SettingsPreferenceKey = typeof SETTINGS_PREFERENCE_KEYS[keyof typeof SETTINGS_PREFERENCE_KEYS];
 export type SidebarPaneRowLayout = 'single' | 'two-row';
-export type AtTerminalPasteMode = 'raw' | 'embed';
-export type AtTerminalLineCount = 100 | 300 | 500 | -1;
+type AtTerminalPasteMode = 'raw' | 'embed';
+type AtTerminalLineCount = 100 | 300 | 500 | -1;
 
 export interface SettingsPreferenceValues {
   autoRenameSessionsToPr: boolean;
@@ -100,7 +104,7 @@ export const DEFAULT_SETTINGS_PREFERENCES: SettingsPreferenceValues = {
   atTerminalLineCount: 500,
 };
 
-export function normalizeSidebarPaneRowLayout(value: unknown): SidebarPaneRowLayout {
+export function normalizeSidebarPaneRowLayout(value: string | null | undefined): SidebarPaneRowLayout {
   return value === 'two-row' ? 'two-row' : 'single';
 }
 
@@ -120,5 +124,5 @@ export function serializeSettingPreference<K extends keyof SettingsPreferenceVal
   _key: K,
   value: SettingsPreferenceValues[K],
 ): string {
-  return typeof value === 'boolean' ? String(value) : String(value);
+  return String(value);
 }

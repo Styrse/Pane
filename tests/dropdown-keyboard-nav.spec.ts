@@ -2,7 +2,9 @@ import { test, expect, Page } from '@playwright/test';
 import { installElectronApiMock } from './electronApiMock';
 
 test.beforeEach(async ({ page }) => {
-  await installElectronApiMock(page);
+  await installElectronApiMock(page, {
+    initialConfig: { theme: 'light-rounded', appearanceMode: 'fixed' },
+  });
   // Pin a known starting theme so arrow-key movement is deterministic.
   await page.addInitScript(() => {
     localStorage.setItem('theme', 'light-rounded');
@@ -33,7 +35,7 @@ test.describe('Dropdown keyboard navigation', () => {
     await expect(trigger).toBeVisible({ timeout: 5000 });
     await trigger.click();
 
-    const footerAction = page.getByRole('button', { name: 'Add Repository' });
+    const footerAction = page.getByRole('menu').getByRole('button', { name: 'Add Repository' });
     await expect(footerAction).toBeFocused();
     await page.keyboard.press('Enter');
 
@@ -60,13 +62,15 @@ test.describe('Dropdown keyboard navigation', () => {
     const focusedItem = page.locator('[role="menuitemradio"]:focus');
     await expect(focusedItem).toHaveText(/Light \(rounded\)/);
 
-    // ArrowDown moves to the next item (Forge), ArrowUp moves back.
+    // ArrowDown moves to the next item (Light (sharp)), ArrowUp moves back.
+    // Item order comes from THEME_OPTIONS in frontend/src/utils/themeOptions.ts.
     await page.keyboard.press('ArrowDown');
-    await expect(focusedItem).toHaveText(/Forge/);
+    await expect(focusedItem).toHaveText(/Light \(sharp\)/);
     await page.keyboard.press('ArrowUp');
     await expect(focusedItem).toHaveText(/Light \(rounded\)/);
 
-    // Navigate to Forge and select it with Enter.
+    // Navigate to Forge (third item) and select it with Enter.
+    await page.keyboard.press('ArrowDown');
     await page.keyboard.press('ArrowDown');
     await expect(focusedItem).toHaveText(/Forge/);
     await page.keyboard.press('Enter');
@@ -96,17 +100,15 @@ test.describe('Dropdown keyboard navigation', () => {
 
     await expect(page.getByRole('menu')).toBeVisible({ timeout: 5000 });
 
-    await page.keyboard.press('ArrowDown'); // move highlight to Forge
+    await page.keyboard.press('ArrowDown'); // move highlight to Light (sharp)
     await page.keyboard.press('Escape');
 
     await expect(page.getByRole('menu')).toHaveCount(0);
-    // Highlighting Forge then pressing Escape must NOT commit the theme:
+    // Highlighting another item then pressing Escape must NOT commit the theme:
     // the document still carries the original light-rounded theme classes.
     const themeClasses = await page.evaluate(() => ({
-      forge: document.documentElement.classList.contains('forge'),
       lightRounded: document.documentElement.classList.contains('light-rounded'),
     }));
-    expect(themeClasses.forge).toBe(false);
     expect(themeClasses.lightRounded).toBe(true);
   });
 });

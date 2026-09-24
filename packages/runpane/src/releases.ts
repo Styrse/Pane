@@ -1,16 +1,18 @@
 import path from 'path';
+import { boundary, decodeBoundary } from './boundaryDecoder';
 import type { ArtifactFormat } from './commands';
+import type { BoundarySchema } from './boundaryDecoder';
 import { archAliases, defaultFormat, platformParam, type PanePlatform } from './platform';
 
-const GITHUB_API_BASE = 'https://api.github.com/repos/dcouple/Pane/releases';
+const GITHUB_API_BASE = 'https://api.github.com/repos/greenfield-inc/Pane/releases';
 const DOWNLOAD_API_BASE = 'https://runpane.com/api/download';
 
-export interface GitHubReleaseAsset {
+interface GitHubReleaseAsset {
   name: string;
   browser_download_url: string;
 }
 
-export interface GitHubRelease {
+interface GitHubRelease {
   tag_name: string;
   name: string;
   body: string;
@@ -20,6 +22,20 @@ export interface GitHubRelease {
   draft: boolean;
   assets?: GitHubReleaseAsset[];
 }
+
+const githubReleaseSchema: BoundarySchema<GitHubRelease> = boundary.object({
+  tag_name: boundary.string,
+  name: boundary.string,
+  body: boundary.string,
+  html_url: boundary.string,
+  published_at: boundary.string,
+  prerelease: boundary.boolean,
+  draft: boundary.boolean,
+  assets: boundary.optional(boundary.array(boundary.object({
+    name: boundary.string,
+    browser_download_url: boundary.string,
+  }))),
+});
 
 export interface ResolvedRelease {
   release: GitHubRelease;
@@ -52,7 +68,7 @@ export async function resolveRelease(options: ResolveReleaseOptions): Promise<Re
     format,
     preferredDownloadUrl,
     fallbackDownloadUrl: artifact.browser_download_url,
-    checksumUrl: `https://github.com/dcouple/Pane/releases/download/${release.tag_name}/SHA256SUMS.txt`
+    checksumUrl: `https://github.com/greenfield-inc/Pane/releases/download/${release.tag_name}/SHA256SUMS.txt`
   };
 }
 
@@ -76,7 +92,7 @@ export async function fetchRelease(version: string, timeoutMs?: number): Promise
       throw new Error(`Failed to fetch Pane release ${version}: ${response.status} ${response.statusText}`);
     }
 
-    const release = await response.json() as GitHubRelease;
+    const release = decodeBoundary(await response.json(), githubReleaseSchema);
     if (release.draft || release.prerelease) {
       throw new Error(`Release ${release.tag_name} is not a stable public release.`);
     }

@@ -2,16 +2,31 @@ import net from 'net';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { app } from 'electron';
 import { PermissionManager } from './permissionManager';
 import { getAppSubdirectory } from '../utils/appDirectory';
+
+export function getPermissionIpcEndpoint(
+  platform: NodeJS.Platform,
+  processId: number,
+  socketDirectory: string,
+): string {
+  return platform === 'win32'
+    ? `\\\\.\\pipe\\pane-permissions-${processId}`
+    : path.posix.join(socketDirectory, `pane-permissions-${processId}.sock`);
+}
 
 export class PermissionIpcServer {
   private server: net.Server | null = null;
   private clients: Map<string, net.Socket> = new Map();
   private socketPath: string;
+  private readonly usesFilesystemSocket = process.platform !== 'win32';
 
   constructor() {
+    if (!this.usesFilesystemSocket) {
+      this.socketPath = getPermissionIpcEndpoint(process.platform, process.pid, '');
+      return;
+    }
+
     // Use a directory without spaces for better compatibility
     // DMG apps can write to user's home directory
     let socketDir: string;
@@ -32,13 +47,13 @@ export class PermissionIpcServer {
       socketDir = os.tmpdir();
     }
     
-    this.socketPath = path.join(socketDir, `pane-permissions-${process.pid}.sock`);
+    this.socketPath = getPermissionIpcEndpoint(process.platform, process.pid, socketDir);
   }
 
   start(): Promise<void> {
     return new Promise((resolve, reject) => {
-      // Clean up any existing socket file
-      if (fs.existsSync(this.socketPath)) {
+      // Clean up any existing socket file (skip on Windows: named pipes are not filesystem entries)
+      if (this.usesFilesystemSocket && fs.existsSync(this.socketPath)) {
         fs.unlinkSync(this.socketPath);
       }
 
@@ -117,8 +132,8 @@ export class PermissionIpcServer {
 
       if (this.server) {
         this.server.close(() => {
-          // Clean up socket file
-          if (fs.existsSync(this.socketPath)) {
+          // Clean up socket file (skip on Windows: named pipes are not filesystem entries)
+          if (this.usesFilesystemSocket && fs.existsSync(this.socketPath)) {
             fs.unlinkSync(this.socketPath);
           }
           resolve();

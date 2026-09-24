@@ -1,5 +1,3 @@
-import { spawnSync } from 'child_process';
-import { existsSync, readFileSync } from 'fs';
 import fs from 'fs/promises';
 import net from 'net';
 import os from 'os';
@@ -29,19 +27,37 @@ import {
   runCommand as runTailscaleCommand,
   runTailscaleServeInteractive,
   type ResolvedCommand,
+  type TailscaleSetupDependencies,
 } from './tailscaleSetup';
+import {
+  boundary,
+  decodeBoundary,
+  type JsonObject,
+} from '../../../shared/validation/boundaryDecoder';
+import {
+  assertRemoteDaemonServiceCanBeInstalled,
+  buildManualRemoteDaemonCommand,
+  installRemoteDaemonService,
+  type RemoteDaemonServiceDependencies,
+} from './remoteDaemonService';
 
 export interface SetupRemoteHostOptions extends Omit<RemoteHostSetupRequest, 'dataDirectoryMode'> {
   printOnly?: boolean;
   interactiveTailscaleSetup?: boolean;
   autoSelectListenPort?: boolean;
-  existingConfig?: unknown;
-  writeConfig?: (config: Record<string, unknown>) => Promise<void>;
+  existingConfig?: object;
+  writeConfig?: (config: RemoteHostConfigDocument) => Promise<void>;
+  serviceDependencies?: RemoteDaemonServiceDependencies;
+  tailscaleDependencies?: TailscaleSetupDependencies;
 }
 
-export type SetupRemoteHostResult = Omit<RemoteHostSetupResult, 'dataDirectoryMode'>;
+interface RemoteHostConfigDocument {
+  remoteDaemon: RemoteDaemonConfig;
+}
 
-type ServiceSetupResult = RemoteHostSetupServiceResult;
+type WritableConfigDocument = JsonObject | RemoteHostConfigDocument;
+
+export type SetupRemoteHostResult = Omit<RemoteHostSetupResult, 'dataDirectoryMode'>;
 
 interface TunnelSelection {
   baseUrl: string;
@@ -49,19 +65,14 @@ interface TunnelSelection {
   fallbackCommands: string[];
 }
 
-interface CommandResult {
-  ok: boolean;
-  stdout: string;
-  stderr: string;
-}
-
 const DEFAULT_REMOTE_PANE_DIR = '.pane_remote';
-const SERVICE_NAME = 'com.dcouple.pane.remote-daemon';
-const WINDOWS_TASK_NAME = 'PaneRemoteDaemon';
 const DEFAULT_TUNNEL_PREFERENCE: RemoteSetupTunnelPreference = 'tailscale';
 
 export async function setupRemoteHost(options: SetupRemoteHostOptions = {}): Promise<SetupRemoteHostResult> {
   const paneDir = path.resolve(options.paneDir ?? process.env.PANE_DIR ?? path.join(os.homedir(), DEFAULT_REMOTE_PANE_DIR));
+  if (!options.printOnly && options.installService !== false) {
+    assertRemoteDaemonServiceCanBeInstalled(options.serviceDependencies);
+  }
   const configPath = path.join(paneDir, 'config.json');
   const preferredListenPort = normalizePort(options.listenPort ?? DEFAULT_REMOTE_DAEMON_HOST_CONFIG.listenPort);
   const listenPort = options.autoSelectListenPort === true
@@ -69,7 +80,7 @@ export async function setupRemoteHost(options: SetupRemoteHostOptions = {}): Pro
     : preferredListenPort;
   const label = normalizeLabel(options.label);
   const channel = options.channel ?? 'stable';
-  const manualDaemonCommand = buildHeadlessDaemonCommand(paneDir);
+  const manualDaemonCommand = buildManualRemoteDaemonCommand(paneDir, options.serviceDependencies);
   const tunnelSelection = selectTunnel({
     listenPort,
     preferTunnel: options.preferTunnel ?? DEFAULT_TUNNEL_PREFERENCE,
@@ -77,6 +88,7 @@ export async function setupRemoteHost(options: SetupRemoteHostOptions = {}): Pro
     printOnly: options.printOnly === true,
     interactiveTailscaleSetup: options.interactiveTailscaleSetup === true,
     manualBaseUrl: options.baseUrl,
+    tailscaleDependencies: options.tailscaleDependencies,
   });
   const pair = createRemoteDaemonConnectionPair({
     label,
@@ -87,8 +99,8 @@ export async function setupRemoteHost(options: SetupRemoteHostOptions = {}): Pro
 
   let wroteConfig = false;
   if (!options.printOnly) {
-    const existingConfig = isRecord(options.existingConfig)
-      ? options.existingConfig
+    const existingConfig = options.existingConfig
+      ? decodeBoundary(options.existingConfig, boundary.jsonObject)
       : await readConfigFile(configPath);
     const nextRemoteDaemon = buildNextRemoteDaemonConfig(
       existingConfig.remoteDaemon,
@@ -116,19 +128,15 @@ export async function setupRemoteHost(options: SetupRemoteHostOptions = {}): Pro
         message: options.printOnly
           ? 'Print-only mode did not write config or install a daemon service.'
           : 'Service installation disabled; use the manual daemon command.',
-      } satisfies ServiceSetupResult
-    : await installBestAvailableService({
-        paneDir,
-        manualDaemonCommand,
-      });
+      } satisfies RemoteHostSetupServiceResult
+    : await installRemoteDaemonService(paneDir, options.serviceDependencies);
 
-  return {
+  const result: SetupRemoteHostResult = {
     paneDir,
     configPath,
     label,
     listenPort,
     channel,
-    ...(options.repoRef ? { repoRef: options.repoRef } : {}),
     connectionCode,
     tunnel: tunnelSelection.tunnel,
     fallbackTunnelCommands: tunnelSelection.fallbackCommands,
@@ -136,6 +144,10 @@ export async function setupRemoteHost(options: SetupRemoteHostOptions = {}): Pro
     manualDaemonCommand,
     wroteConfig,
   };
+  if (options.repoRef) {
+    result.repoRef = options.repoRef;
+  }
+  return result;
 }
 
 export function formatSetupRemoteHostResult(result: SetupRemoteHostResult): string {
@@ -182,15 +194,18 @@ export function formatSetupRemoteHostResult(result: SetupRemoteHostResult): stri
   return lines.join('\n');
 }
 
-export function createRemoteHostAccess(
+function createRemoteHostAccess(
   baseUrl: string,
   tunnel?: PaneRemoteConnectionImportPayload['tunnel'],
 ): RemoteDaemonHostAccess {
-  return {
+  const access: RemoteDaemonHostAccess = {
     baseUrl,
-    ...(tunnel ? { tunnel } : {}),
     updatedAt: new Date().toISOString(),
   };
+  if (tunnel) {
+    access.tunnel = tunnel;
+  }
+  return access;
 }
 
 export function readConfiguredTailscaleServeAccess(listenPort: number): RemoteDaemonHostAccess | null {
@@ -212,17 +227,20 @@ export function readConfiguredTailscaleServeAccess(listenPort: number): RemoteDa
   const tailscaleCommand = buildTailscaleServeCommand(tailscaleCli, listenPort);
   const tailscaleIp = readTailscaleIpv4(tailscaleCli);
 
-  return createRemoteHostAccess(serveUrl, {
+  const tunnel: NonNullable<PaneRemoteConnectionImportPayload['tunnel']> = {
     kind: 'tailscale',
     selected: true,
     command: tailscaleCommand,
     note: 'Tailscale Serve is configured for this tailnet. Keep Pane running on this host when using current data mode. If another device cannot connect immediately, wait a few minutes for Tailscale Serve to finish provisioning, then retry.',
-    ...(tailscaleIp ? { tailscaleIp } : {}),
-  });
+  };
+  if (tailscaleIp) {
+    tunnel.tailscaleIp = tailscaleIp;
+  }
+  return createRemoteHostAccess(serveUrl, tunnel);
 }
 
-function buildNextRemoteDaemonConfig(
-  value: unknown,
+function buildNextRemoteDaemonConfig<Value>(
+  value: Value,
   client: RemoteDaemonConfig['host']['clients'][number],
   listenPort: number,
   access: RemoteDaemonHostAccess,
@@ -246,10 +264,10 @@ function buildNextRemoteDaemonConfig(
   });
 }
 
-async function readConfigFile(configPath: string): Promise<Record<string, unknown>> {
+async function readConfigFile(configPath: string): Promise<JsonObject> {
   try {
     const raw = await fs.readFile(configPath, 'utf8');
-    const parsed = JSON.parse(raw) as unknown;
+    const parsed = decodeBoundary(JSON.parse(raw), boundary.json);
     return isRecord(parsed) ? parsed : {};
   } catch (error) {
     if (isNodeErrorWithCode(error, 'ENOENT')) {
@@ -262,7 +280,7 @@ async function readConfigFile(configPath: string): Promise<Record<string, unknow
 async function writeConfigFileAtomically(
   paneDir: string,
   configPath: string,
-  config: Record<string, unknown>,
+  config: WritableConfigDocument,
 ): Promise<void> {
   await fs.mkdir(paneDir, { recursive: true });
   const tmpPath = `${configPath}.${process.pid}.${Date.now()}.tmp`;
@@ -282,6 +300,7 @@ function selectTunnel(options: {
   printOnly: boolean;
   interactiveTailscaleSetup: boolean;
   manualBaseUrl?: string;
+  tailscaleDependencies?: TailscaleSetupDependencies;
 }): TunnelSelection {
   const sshCommand = buildSshForwardCommand(options.listenPort);
   const fallbackCommands = [sshCommand, buildTailscaleServeCommand(null, options.listenPort)];
@@ -317,7 +336,7 @@ function selectTunnel(options: {
   }
 
   if (options.preferTunnel === 'tailscale' || options.preferTunnel === 'auto') {
-    const initialTailscaleCli = resolveTailscaleCommand();
+    const initialTailscaleCli = resolveTailscaleCommand(options.tailscaleDependencies);
     const tailscaleCommand = buildTailscaleServeCommand(initialTailscaleCli, options.listenPort);
     return selectTailscaleTunnel({
       listenPort: options.listenPort,
@@ -327,6 +346,7 @@ function selectTunnel(options: {
       tailscaleCli: initialTailscaleCli,
       tailscaleCommand,
       fallbackCommands: [sshCommand, tailscaleCommand],
+      tailscaleDependencies: options.tailscaleDependencies,
     });
   }
 
@@ -341,6 +361,7 @@ function selectTailscaleTunnel(options: {
   tailscaleCli: ResolvedCommand | null;
   tailscaleCommand: string;
   fallbackCommands: string[];
+  tailscaleDependencies?: TailscaleSetupDependencies;
 }): TunnelSelection {
   if (!options.exposeTailscale) {
     throw new Error(`Tailscale is required for cross-device remote setup. Remove --no-tailscale-serve or choose SSH Tunnel under advanced options.\n\n${getTailscaleSetupInstructions()}`);
@@ -350,12 +371,17 @@ function selectTailscaleTunnel(options: {
     throw new Error('Tailscale setup cannot run in print-only mode because Pane must configure Tailscale Serve before it can create a cross-device connection code.');
   }
 
-  const tailscaleCli = options.tailscaleCli ?? installTailscaleCommandOrThrow();
+  const tailscaleCli = options.tailscaleCli ?? installTailscaleCommandOrThrow(options.tailscaleDependencies);
   const tailscaleCommand = buildTailscaleServeCommand(tailscaleCli, options.listenPort);
 
   const tailscaleServe = options.interactiveTailscaleSetup
-    ? runTailscaleServeInteractive(tailscaleCli, options.listenPort)
-    : runTailscaleCommand(tailscaleCli, ['serve', '--bg', '--tls-terminated-tcp=443', String(options.listenPort)]);
+    ? runTailscaleServeInteractive(tailscaleCli, options.listenPort, options.tailscaleDependencies)
+    : runTailscaleCommand(
+        tailscaleCli,
+        ['serve', '--bg', '--tls-terminated-tcp=443', String(options.listenPort)],
+        {},
+        options.tailscaleDependencies,
+      );
   if (!tailscaleServe.ok) {
     const instructions = options.interactiveTailscaleSetup
       ? getTailscaleServeSetupInstructions(options.listenPort)
@@ -363,7 +389,7 @@ function selectTailscaleTunnel(options: {
     throw new Error(`Tailscale Serve setup failed: ${firstNonEmpty(tailscaleServe.stderr, tailscaleServe.stdout, 'unknown error')}\n\n${instructions}`);
   }
 
-  const serveStatus = runTailscaleCommand(tailscaleCli, ['serve', 'status']);
+  const serveStatus = runTailscaleCommand(tailscaleCli, ['serve', 'status'], {}, options.tailscaleDependencies);
   const serveUrl = extractFirstHttpsUrl([
     tailscaleServe.stdout,
     tailscaleServe.stderr,
@@ -375,247 +401,29 @@ function selectTailscaleTunnel(options: {
     throw new Error(`Tailscale Serve was configured, but Pane could not find an HTTPS Tailscale URL in the command output. Run "${tailscaleCommand}" manually and confirm Tailscale is logged in.\n\n${getTailscaleSetupInstructions()}`);
   }
 
-  const tailscaleIp = readTailscaleIpv4(tailscaleCli);
+  const tailscaleIp = readTailscaleIpv4(tailscaleCli, options.tailscaleDependencies);
+
+  const tunnel: NonNullable<TunnelSelection['tunnel']> = {
+    kind: 'tailscale',
+    selected: true,
+    command: tailscaleCommand,
+    note: 'Tailscale Serve is configured for this tailnet. Keep Pane running on this host when using current data mode. If another device cannot connect immediately, wait a few minutes for Tailscale Serve to finish provisioning, then retry.',
+  };
+  if (tailscaleIp) {
+    tunnel.tailscaleIp = tailscaleIp;
+  }
 
   return {
     baseUrl: serveUrl,
     fallbackCommands: options.fallbackCommands.includes(tailscaleCommand)
       ? options.fallbackCommands
       : [options.fallbackCommands[0], tailscaleCommand],
-    tunnel: {
-      kind: 'tailscale',
-      selected: true,
-      command: tailscaleCommand,
-      note: 'Tailscale Serve is configured for this tailnet. Keep Pane running on this host when using current data mode. If another device cannot connect immediately, wait a few minutes for Tailscale Serve to finish provisioning, then retry.',
-      ...(tailscaleIp ? { tailscaleIp } : {}),
-    },
+    tunnel,
   };
 }
 
 function assertNeverTunnelPreference(value: never): never {
   throw new Error(`Unsupported remote setup tunnel preference: ${String(value)}`);
-}
-
-async function installBestAvailableService(options: {
-  paneDir: string;
-  manualDaemonCommand: string;
-}): Promise<ServiceSetupResult> {
-  if (process.platform === 'linux' && commandExists('systemctl')) {
-    return installSystemdUserService(options);
-  }
-
-  if (process.platform === 'darwin' && commandExists('launchctl')) {
-    return installLaunchAgent(options);
-  }
-
-  if (process.platform === 'win32' && commandExists('schtasks')) {
-    return installWindowsScheduledTask(options);
-  }
-
-  return {
-    strategy: 'manual',
-    installed: false,
-    started: false,
-    message: 'No supported user-level service manager detected; use the manual daemon command.',
-  };
-}
-
-async function installSystemdUserService(options: {
-  paneDir: string;
-  manualDaemonCommand: string;
-}): Promise<ServiceSetupResult> {
-  const launcherPath = await writePosixLauncher(options.paneDir, options.manualDaemonCommand);
-  const serviceDir = path.join(os.homedir(), '.config', 'systemd', 'user');
-  const servicePath = path.join(serviceDir, 'pane-remote-daemon.service');
-  const serviceFile = [
-    '[Unit]',
-    'Description=Pane Remote Daemon',
-    'After=default.target',
-    '',
-    '[Service]',
-    'Type=simple',
-    `Environment=${quoteForSystemd(`PANE_DIR=${options.paneDir}`)}`,
-    `ExecStart=${quoteForSystemd(launcherPath)}`,
-    'Restart=on-failure',
-    'RestartSec=3',
-    '',
-    '[Install]',
-    'WantedBy=default.target',
-    '',
-  ].join('\n');
-
-  await fs.mkdir(serviceDir, { recursive: true });
-  await fs.writeFile(servicePath, serviceFile, 'utf8');
-
-  const daemonReload = runCommand('systemctl', ['--user', 'daemon-reload']);
-  const enable = daemonReload.ok
-    ? runCommand('systemctl', ['--user', 'enable', '--now', 'pane-remote-daemon.service'])
-    : daemonReload;
-
-  return {
-    strategy: 'systemd-user',
-    installed: enable.ok,
-    started: enable.ok,
-    message: enable.ok
-      ? 'Installed and started a user systemd service.'
-      : `Wrote ${servicePath}, but systemctl failed: ${firstNonEmpty(enable.stderr, enable.stdout, 'unknown error')}`,
-  };
-}
-
-async function installLaunchAgent(options: {
-  paneDir: string;
-  manualDaemonCommand: string;
-}): Promise<ServiceSetupResult> {
-  const agentDir = path.join(os.homedir(), 'Library', 'LaunchAgents');
-  const plistPath = path.join(agentDir, `${SERVICE_NAME}.plist`);
-  const plist = [
-    '<?xml version="1.0" encoding="UTF-8"?>',
-    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
-    '<plist version="1.0">',
-    '<dict>',
-    '  <key>Label</key>',
-    `  <string>${escapeXml(SERVICE_NAME)}</string>`,
-    '  <key>ProgramArguments</key>',
-    '  <array>',
-    '    <string>/bin/sh</string>',
-    '    <string>-lc</string>',
-    `    <string>${escapeXml(options.manualDaemonCommand)}</string>`,
-    '  </array>',
-    '  <key>EnvironmentVariables</key>',
-    '  <dict>',
-    '    <key>PANE_DIR</key>',
-    `    <string>${escapeXml(options.paneDir)}</string>`,
-    '  </dict>',
-    '  <key>RunAtLoad</key>',
-    '  <true/>',
-    '  <key>KeepAlive</key>',
-    '  <true/>',
-    '</dict>',
-    '</plist>',
-    '',
-  ].join('\n');
-
-  await fs.mkdir(agentDir, { recursive: true });
-  await fs.writeFile(plistPath, plist, 'utf8');
-  runCommand('launchctl', ['unload', '-w', plistPath]);
-  const load = runCommand('launchctl', ['load', '-w', plistPath]);
-
-  return {
-    strategy: 'launch-agent',
-    installed: load.ok,
-    started: load.ok,
-    message: load.ok
-      ? 'Installed and started a LaunchAgent.'
-      : `Wrote ${plistPath}, but launchctl failed: ${firstNonEmpty(load.stderr, load.stdout, 'unknown error')}`,
-  };
-}
-
-async function installWindowsScheduledTask(options: {
-  paneDir: string;
-  manualDaemonCommand: string;
-}): Promise<ServiceSetupResult> {
-  await writeWindowsLauncher(options.paneDir, options.manualDaemonCommand);
-  const create = runCommand('schtasks', [
-    '/Create',
-    '/TN',
-    WINDOWS_TASK_NAME,
-    '/TR',
-    `cmd.exe /d /c ${options.manualDaemonCommand}`,
-    '/SC',
-    'ONLOGON',
-    '/F',
-  ]);
-  const run = create.ok
-    ? runCommand('schtasks', ['/Run', '/TN', WINDOWS_TASK_NAME])
-    : create;
-
-  return {
-    strategy: 'scheduled-task',
-    installed: create.ok,
-    started: run.ok,
-    message: create.ok && run.ok
-      ? 'Installed and started a per-user Scheduled Task.'
-      : `Scheduled Task setup failed: ${firstNonEmpty(run.stderr, run.stdout, 'unknown error')}`,
-  };
-}
-
-async function writePosixLauncher(paneDir: string, command: string): Promise<string> {
-  const scriptDir = path.join(paneDir, 'remote-daemon');
-  const scriptPath = path.join(scriptDir, 'start.sh');
-  await fs.mkdir(scriptDir, { recursive: true });
-  await fs.writeFile(scriptPath, [
-    '#!/usr/bin/env sh',
-    'set -eu',
-    `export PANE_DIR=${quoteForPosix(paneDir)}`,
-    `exec /bin/sh -lc ${quoteForPosix(command)}`,
-    '',
-  ].join('\n'), 'utf8');
-  await fs.chmod(scriptPath, 0o755);
-  return scriptPath;
-}
-
-async function writeWindowsLauncher(paneDir: string, command: string): Promise<string> {
-  const scriptDir = path.join(paneDir, 'remote-daemon');
-  const scriptPath = path.join(scriptDir, 'start.cmd');
-  await fs.mkdir(scriptDir, { recursive: true });
-  await fs.writeFile(scriptPath, [
-    '@echo off',
-    `set "PANE_DIR=${paneDir}"`,
-    command,
-    '',
-  ].join('\r\n'), 'utf8');
-  return scriptPath;
-}
-
-function buildHeadlessDaemonCommand(paneDir: string): string {
-  const sourceRoot = findSourceRoot(process.cwd());
-  if (sourceRoot) {
-    if (process.platform === 'win32') {
-      return `cd /d ${quoteForWindows(sourceRoot)} && set "PANE_DIR=${paneDir}" && pnpm daemon:headless -- --pane-dir ${quoteForWindows(paneDir)}`;
-    }
-    return `cd ${quoteForPosix(sourceRoot)} && ${buildPosixHeadlessEnvironment(paneDir)} pnpm daemon:headless --${buildLinuxHeadlessFlags()} --pane-dir ${quoteForPosix(paneDir)}`;
-  }
-
-  if (process.platform === 'win32') {
-    return `${quoteForWindows(process.execPath)} --daemon-headless --pane-dir ${quoteForWindows(paneDir)}`;
-  }
-
-  return `${buildPosixHeadlessEnvironment(paneDir)} ${quoteForPosix(process.execPath)}${buildLinuxHeadlessFlags()} --daemon-headless --pane-dir ${quoteForPosix(paneDir)}`;
-}
-
-// Ozone selects its platform before the app's main script runs, so this must be
-// passed as argv — app.commandLine.appendSwitch() is too late, and
-// ELECTRON_OZONE_PLATFORM_HINT was removed in Electron 38 (no-op since 39).
-function buildLinuxHeadlessFlags(): string {
-  return process.platform === 'linux' ? ' --ozone-platform=headless --disable-gpu' : '';
-}
-
-function buildPosixHeadlessEnvironment(paneDir: string): string {
-  const entries = [`PANE_DIR=${quoteForPosix(paneDir)}`];
-  return entries.join(' ');
-}
-
-function findSourceRoot(startDir: string): string | null {
-  let current = path.resolve(startDir);
-  while (true) {
-    const packagePath = path.join(current, 'package.json');
-    if (existsSync(packagePath)) {
-      try {
-        const parsed = JSON.parse(readFileSync(packagePath, 'utf8')) as unknown;
-        if (isRecord(parsed) && parsed.name === 'Pane') {
-          return current;
-        }
-      } catch {
-        return null;
-      }
-    }
-
-    const parent = path.dirname(current);
-    if (parent === current) {
-      return null;
-    }
-    current = parent;
-  }
 }
 
 function buildSshForwardCommand(port: number): string {
@@ -698,36 +506,6 @@ function isLoopbackPortAvailable(port: number): Promise<boolean> {
   });
 }
 
-function runCommand(
-  command: string,
-  args: string[],
-  options: { timeoutMs?: number } = {},
-): CommandResult {
-  const result = spawnSync(command, args, {
-    encoding: 'utf8',
-    stdio: 'pipe',
-    timeout: options.timeoutMs,
-  });
-
-  return {
-    ok: result.status === 0,
-    stdout: commandOutputToString(result.stdout),
-    stderr: commandOutputToString(result.stderr) || (result.error ? result.error.message : ''),
-  };
-}
-
-function commandExists(command: string): boolean {
-  return runCommand(command, ['--version']).ok;
-}
-
-function commandOutputToString(value: string | Buffer | null): string {
-  if (typeof value === 'string') {
-    return value;
-  }
-
-  return value ? value.toString('utf8') : '';
-}
-
 function extractFirstHttpsUrl(output: string): string | null {
   const httpsMatch = output.match(/https:\/\/[^\s|"'<>]+/);
   if (httpsMatch) {
@@ -742,8 +520,11 @@ function extractFirstHttpsUrl(output: string): string | null {
   return `https://${tailscaleTcpMatch[1]}`;
 }
 
-function readTailscaleIpv4(tailscaleCli: ResolvedCommand): string | null {
-  const result = runTailscaleCommand(tailscaleCli, ['ip', '-4']);
+function readTailscaleIpv4(
+  tailscaleCli: ResolvedCommand,
+  dependencies?: TailscaleSetupDependencies,
+): string | null {
+  const result = runTailscaleCommand(tailscaleCli, ['ip', '-4'], {}, dependencies);
   if (!result.ok) {
     return null;
   }
@@ -776,34 +557,27 @@ function upsertById<T extends { id: string }>(items: T[], nextItem: T): T[] {
   return items.map((item, index) => (index === existingIndex ? nextItem : item));
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+function isRecord<Value>(value: Value): value is Value & JsonObject {
+  try {
+    decodeBoundary(value, boundary.jsonObject);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-function isNodeErrorWithCode(error: unknown, code: string): boolean {
-  return error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === code;
+function isNodeErrorWithCode<ErrorValue>(error: ErrorValue, code: string): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  try {
+    const decoded = decodeBoundary(error, boundary.object({ code: boundary.string }));
+    return decoded.code === code;
+  } catch {
+    return false;
+  }
 }
 
-function quoteForPosix(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-function quoteForWindows(value: string): string {
-  return `"${value.replace(/"/g, '\\"')}"`;
-}
-
-function quoteForSystemd(value: string): string {
-  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
-}
-
-function escapeXml(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
-}
 
 function firstNonEmpty(...values: string[]): string {
   return values.find((value) => value.trim().length > 0)?.trim() ?? '';

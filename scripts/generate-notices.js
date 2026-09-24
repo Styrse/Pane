@@ -20,6 +20,10 @@ This file includes only packages with licenses that require attribution. Public 
 // Dev-only packages that aren't distributed with the built app
 const DEV_ONLY_PACKAGES = [
   '@eslint/',
+  '@eslint-community/',
+  '@oxc-parser/',
+  '@oxc-project/',
+  '@oxlint/',
   '@playwright/',
   '@types/',
   '@typescript-eslint/',
@@ -30,14 +34,21 @@ const DEV_ONLY_PACKAGES = [
   'electron-rebuild',
   'eslint',
   'globals',
+  'knip',
   'mkdirp',
+  'oxc-parser',
+  'oxlint',
   'playwright',
   'postcss',
+  'react-scan',
   'rimraf',
   'tailwindcss',
   'typescript',
   'typescript-eslint',
+  'unplugin',
   'vite',
+  'vitest',
+  '@vitest/',
   'wait-on'
 ];
 
@@ -196,21 +207,14 @@ function collectPackagesFromPnpm(pnpmPath, licenses, processedPaths) {
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     
-    // pnpm stores packages as package@version format
-    // Handle scoped packages like @org+package@version
-    const scopedMatch = entry.name.match(/^(.+)\+(.+)@(.+)$/);
-    const regularMatch = entry.name.match(/^([^@]+)@(.+)$/);
-    
-    let packageName;
-    if (scopedMatch) {
-      // Scoped package: convert @org+package to @org/package
-      packageName = `${scopedMatch[1]}/${scopedMatch[2]}`;
-    } else if (regularMatch) {
-      // Regular package
-      packageName = regularMatch[1];
-    } else {
-      continue;
-    }
+    // pnpm names each directory `<name>@<version>`, with `/` written as `+` in
+    // scoped names, plus an optional `_<peers>` suffix when the package was
+    // resolved against peer dependencies. That suffix carries its own `@` and
+    // `+`, so the name ends at the first `@` past position 0.
+    const separator = entry.name.indexOf('@', 1);
+    if (separator < 0) continue;
+    const rawName = entry.name.slice(0, separator);
+    const packageName = rawName.startsWith('@') ? rawName.replace('+', '/') : rawName;
     
     const fullPath = path.join(pnpmPath, entry.name, 'node_modules', packageName);
     
@@ -279,19 +283,23 @@ function collectAllLicenses() {
   return licenses;
 }
 
+function isPlainObject(value) {
+  return Object.prototype.toString.call(value) === '[object Object]';
+}
+
 function formatLicenseEntry(info) {
   let entry = `Package: ${info.name}\n`;
   entry += `Version: ${info.version}\n`;
   
   if (info.author) {
-    const author = typeof info.author === 'object' ? info.author.name : info.author;
+    const author = isPlainObject(info.author) ? info.author.name : info.author;
     if (author) entry += `Author: ${author}\n`;
   }
   
   if (info.homepage) {
     entry += `Homepage: ${info.homepage}\n`;
   } else if (info.repository) {
-    const repo = typeof info.repository === 'object' ? info.repository.url : info.repository;
+    const repo = isPlainObject(info.repository) ? info.repository.url : info.repository;
     if (repo) entry += `Repository: ${repo}\n`;
   }
   
@@ -348,7 +356,7 @@ function generateNotices() {
       for (const { info } of packages) {
         notices += `  - ${info.name} (${info.version})`;
         if (info.author) {
-          const author = typeof info.author === 'object' ? info.author.name : info.author;
+          const author = isPlainObject(info.author) ? info.author.name : info.author;
           if (author) notices += ` - ${author}`;
         }
         notices += '\n';
@@ -392,7 +400,7 @@ function main() {
     const { notices, totalPackages } = generateNotices();
     const outputPath = path.join(__dirname, '..', 'NOTICES');
     
-    fs.writeFileSync(outputPath, notices);
+    fs.writeFileSync(outputPath, notices.replace(/[ \t]+$/gm, ''));
     console.log(`\nNOTICES file generated successfully at: ${outputPath}`);
     
     console.log(`Total packages included: ${totalPackages}`);

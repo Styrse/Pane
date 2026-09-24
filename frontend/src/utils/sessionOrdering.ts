@@ -19,7 +19,7 @@ function getPinnedSessionLabel(projectName: string | undefined, sessionName: str
 }
 
 function hasDisplayOrder(session: Session): boolean {
-  return typeof session.displayOrder === 'number' && Number.isFinite(session.displayOrder);
+  return Number.isFinite(session.displayOrder ?? Number.NaN);
 }
 
 function compareCreatedAt(a: Session, b: Session, ascending: boolean): number {
@@ -40,7 +40,7 @@ function pinnedAtTime(session: Session): number {
   return Number.isNaN(createdAt) ? 0 : createdAt;
 }
 
-export function compareSessionsForSidebar(
+function compareSessionsForSidebar(
   a: Session,
   b: Session,
   createdAtAscending: boolean

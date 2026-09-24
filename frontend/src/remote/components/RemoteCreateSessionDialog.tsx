@@ -10,6 +10,7 @@ import type { RemoteBranchInfo, RemoteProjectWithSessions, RemoteRuntimeAdapter 
  * desktop session preference store because it writes through window.electronAPI.
  */
 const REMOTE_START_PINNED_PREFERENCE_KEY = 'pane.remoteCreateSession.startPinned';
+const EMPTY_REMOTE_BRANCHES: RemoteBranchInfo[] = [];
 
 interface RemoteCreateSessionDialogProps {
   adapter: RemoteRuntimeAdapter;
@@ -28,13 +29,12 @@ export function RemoteCreateSessionDialog({
   onClose,
   onCreated,
 }: RemoteCreateSessionDialogProps) {
-  const [branches, setBranches] = useState<RemoteBranchInfo[]>([]);
+  const [loadedBranches, setLoadedBranches] = useState<RemoteBranchInfo[] | null>(null);
   const [baseBranch, setBaseBranch] = useState('');
   const [paneName, setPaneName] = useState('');
   const [branchSearch, setBranchSearch] = useState('');
   const [useWorktree, setUseWorktree] = useState(true);
   const [startPinned, setStartPinned] = useState(() => loadRemoteStartPinnedPreference());
-  const [loadingBranches, setLoadingBranches] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [branchOpen, setBranchOpen] = useState(false);
@@ -49,6 +49,8 @@ export function RemoteCreateSessionDialog({
   const nameHelpId = useId();
   const errorId = useId();
   const paneNameInvalid = error === 'Pane name is required.';
+  const branches = loadedBranches ?? EMPTY_REMOTE_BRANCHES;
+  const loadingBranches = loadedBranches === null;
 
   const existingNames = useMemo(() => new Set((project.sessions ?? []).map(session => session.name)), [project.sessions]);
 
@@ -87,7 +89,7 @@ export function RemoteCreateSessionDialog({
     let cancelled = false;
 
     async function loadBranches() {
-      setLoadingBranches(true);
+      setLoadedBranches(null);
       setError(null);
       try {
         const [branchList, detectedBranch] = await Promise.all([
@@ -96,7 +98,7 @@ export function RemoteCreateSessionDialog({
         ]);
         if (cancelled) return;
 
-        setBranches(branchList);
+        setLoadedBranches(branchList);
         const remoteMain = branchList.find(branch => branch.isRemote && (branch.name === 'origin/main' || branch.name === 'origin/master'));
         const detected = branchList.find(branch => branch.name === detectedBranch || branch.name === `origin/${detectedBranch}`);
         const current = branchList.find(branch => branch.isCurrent);
@@ -108,11 +110,8 @@ export function RemoteCreateSessionDialog({
         }
       } catch (loadError) {
         if (!cancelled) {
+          setLoadedBranches([]);
           setError(loadError instanceof Error ? loadError.message : 'Failed to load branches');
-        }
-      } finally {
-        if (!cancelled) {
-          setLoadingBranches(false);
         }
       }
     }
@@ -126,6 +125,7 @@ export function RemoteCreateSessionDialog({
   useEffect(() => {
     if (!branchOpen) return;
     const handleClickOutside = (event: MouseEvent) => {
+      // SAFETY: The registered DOM/custom-event source establishes this target and detail shape.
       if (branchDropdownRef.current && !branchDropdownRef.current.contains(event.target as Node)) {
         setBranchOpen(false);
         setBranchSearch('');
@@ -213,7 +213,7 @@ export function RemoteCreateSessionDialog({
   return (
     <Dialog.Root open onOpenChange={(open) => { if (!open && !submitting) onClose(); }}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-[70] bg-black/65" />
+        <Dialog.Overlay className="pane-scrim fixed inset-0 z-[70] bg-black/65" />
         <Dialog.Content
           asChild
           aria-describedby={undefined}
@@ -235,7 +235,7 @@ export function RemoteCreateSessionDialog({
           <form
             onSubmit={handleSubmit}
             aria-busy={loadingBranches || submitting}
-            className="fixed inset-x-0 bottom-0 z-[71] flex max-h-[92dvh] w-full flex-col overflow-hidden rounded-t-xl border border-border-primary bg-surface-primary shadow-2xl outline-none sm:inset-auto sm:left-1/2 sm:top-1/2 sm:max-w-xl sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-xl"
+            className="pane-sheet fixed inset-x-0 bottom-0 z-[71] flex max-h-[92dvh] w-full flex-col overflow-hidden rounded-t-xl border border-border-primary bg-surface-primary shadow-2xl outline-none sm:inset-auto sm:left-1/2 sm:top-1/2 sm:max-w-xl sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-xl"
           >
             <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">{announcement}</div>
         <div className="flex shrink-0 items-center justify-between border-b border-border-primary px-5 py-4">
@@ -359,7 +359,7 @@ export function RemoteCreateSessionDialog({
                   className="peer sr-only"
                   aria-label="Start pinned"
                 />
-                <span className={`absolute top-1 h-5 w-5 rounded-full bg-text-primary transition-transform ${startPinned ? 'translate-x-6' : 'translate-x-1'}`} />
+                <span className={`absolute top-1 h-5 w-5 rounded-full bg-text-on-interactive shadow-sm ring-1 ring-border-primary transition-transform ${startPinned ? 'translate-x-6' : 'translate-x-1'}`} />
               </span>
             </label>
           </section>
@@ -381,7 +381,7 @@ export function RemoteCreateSessionDialog({
                   className="peer sr-only"
                   aria-label="Use worktree"
                 />
-                <span className={`absolute top-1 h-5 w-5 rounded-full bg-text-primary transition-transform ${useWorktree ? 'translate-x-6' : 'translate-x-1'}`} />
+                <span className={`absolute top-1 h-5 w-5 rounded-full bg-text-on-interactive shadow-sm ring-1 ring-border-primary transition-transform ${useWorktree ? 'translate-x-6' : 'translate-x-1'}`} />
               </span>
             </label>
           </section>
@@ -421,7 +421,7 @@ export function RemoteCreateSessionDialog({
 
 function loadRemoteStartPinnedPreference(): boolean {
   try {
-    return typeof window !== 'undefined' && window.localStorage.getItem(REMOTE_START_PINNED_PREFERENCE_KEY) === 'true';
+    return window.localStorage.getItem(REMOTE_START_PINNED_PREFERENCE_KEY) === 'true';
   } catch {
     return false;
   }
@@ -429,9 +429,7 @@ function loadRemoteStartPinnedPreference(): boolean {
 
 function saveRemoteStartPinnedPreference(value: boolean): void {
   try {
-    if (typeof window !== 'undefined') {
-      window.localStorage.setItem(REMOTE_START_PINNED_PREFERENCE_KEY, value ? 'true' : 'false');
-    }
+    window.localStorage.setItem(REMOTE_START_PINNED_PREFERENCE_KEY, value ? 'true' : 'false');
   } catch {
     // Ignore storage failures so the current create flow can still use local state.
   }

@@ -1,7 +1,8 @@
 import type { DatabaseService } from '../database/database';
 import type { Session, ConversationMessage, PromptMarker, ExecutionDiff } from '../database/models';
 import type { SessionOutput } from '../types/session';
-import { formatDuration, getTimeDifference, parseTimestamp } from './timestampUtils';
+import { formatDuration, getTimeDifference } from './timestampUtils';
+import { boundary, decodeBoundary } from '../../../shared/validation/boundaryDecoder';
 
 interface CompactionData {
   session: Session;
@@ -17,12 +18,6 @@ interface FileModification {
   changeCount: number;
 }
 
-interface ToolCall {
-  name: string;
-  input: unknown;
-  id: string;
-}
-
 interface PromptAnalysis {
   promptText: string;
   isCompleted: boolean;
@@ -36,6 +31,30 @@ interface Todo {
   id: string;
   content: string;
   status: 'pending' | 'in_progress' | 'completed';
+}
+
+const compactionMessageSchema = boundary.object({
+  type: boundary.optional(boundary.string),
+  message: boundary.optional(boundary.object({
+    content: boundary.optional(boundary.array(boundary.object({
+      type: boundary.optional(boundary.string),
+      name: boundary.optional(boundary.string),
+      input: boundary.optional(boundary.object({
+        file_path: boundary.optional(boundary.string),
+        todos: boundary.optional(boundary.array(boundary.object({
+          id: boundary.string,
+          content: boundary.string,
+          status: boundary.enumeration('pending', 'in_progress', 'completed'),
+        }))),
+        edits: boundary.optional(boundary.array(boundary.json)),
+      })),
+      text: boundary.optional(boundary.string),
+    }))),
+  })),
+});
+
+function decodeSessionOutputData(value: SessionOutput['data']) {
+  return decodeBoundary(value, compactionMessageSchema);
 }
 
 interface GitStatus {
@@ -123,25 +142,15 @@ export class ProgrammaticCompactor {
       if (output.type === 'json') {
         try {
           // output.data is already parsed by sessionManager.getSessionOutputs
-          const message = output.data as {
-            type?: string;
-            message?: {
-              content?: Array<{
-                type?: string;
-                name?: string;
-                input?: { file_path?: string; todos?: Todo[]; edits?: unknown[] };
-                text?: string;
-              }>;
-            };
-          };
+          const message = decodeSessionOutputData(output.data);
           if (message.type === 'assistant' && message.message?.content) {
             message.message.content.forEach((content) => {
               if (content.type === 'tool_use') {
                 const path = content.input?.file_path;
                 if (path && content.name && ['Edit', 'Write', 'MultiEdit'].includes(content.name)) {
-                  const existing = fileMap.get(path) || {
+                  const existing: FileModification = fileMap.get(path) || {
                     path,
-                    operations: [] as Array<'create' | 'edit'>,
+                    operations: [],
                     changeCount: 0
                   };
                   
@@ -159,7 +168,7 @@ export class ProgrammaticCompactor {
               }
             });
           }
-        } catch (e) {
+        } catch {
           // Skip invalid JSON
         }
       }
@@ -175,17 +184,7 @@ export class ProgrammaticCompactor {
       if (output.type === 'json') {
         try {
           // output.data is already parsed by sessionManager.getSessionOutputs
-          const message = output.data as {
-            type?: string;
-            message?: {
-              content?: Array<{
-                type?: string;
-                name?: string;
-                input?: { file_path?: string; todos?: Todo[]; edits?: unknown[] };
-                text?: string;
-              }>;
-            };
-          };
+          const message = decodeSessionOutputData(output.data);
           if (message.type === 'assistant' && message.message?.content) {
             message.message.content.forEach((content) => {
               if (content.type === 'tool_use' && content.input?.file_path) {
@@ -195,7 +194,7 @@ export class ProgrammaticCompactor {
               }
             });
           }
-        } catch (e) {
+        } catch {
           // Skip invalid JSON
         }
       }
@@ -211,17 +210,7 @@ export class ProgrammaticCompactor {
       if (output.type === 'json') {
         try {
           // output.data is already parsed by sessionManager.getSessionOutputs
-          const message = output.data as {
-            type?: string;
-            message?: {
-              content?: Array<{
-                type?: string;
-                name?: string;
-                input?: { file_path?: string; todos?: Todo[]; edits?: unknown[] };
-                text?: string;
-              }>;
-            };
-          };
+          const message = decodeSessionOutputData(output.data);
           if (message.type === 'assistant' && message.message?.content) {
             message.message.content.forEach((content) => {
               if (content.type === 'tool_use' && content.name === 'TodoWrite' && content.input?.todos) {
@@ -231,7 +220,7 @@ export class ProgrammaticCompactor {
               }
             });
           }
-        } catch (e) {
+        } catch {
           // Skip invalid JSON
         }
       }
@@ -256,7 +245,7 @@ export class ProgrammaticCompactor {
     };
   }
 
-  private detectInterruption(session: Session, prompts: PromptMarker[], outputs: SessionOutput[]): boolean {
+  private detectInterruption(session: Session, prompts: PromptMarker[], _outputs: SessionOutput[]): boolean {
     // Check if session ended without completing the last prompt
     if (prompts.length === 0) return false;
     
@@ -275,17 +264,7 @@ export class ProgrammaticCompactor {
       if (output.type === 'json') {
         try {
           // output.data is already parsed by sessionManager.getSessionOutputs
-          const message = output.data as {
-            type?: string;
-            message?: {
-              content?: Array<{
-                type?: string;
-                name?: string;
-                input?: { file_path?: string; todos?: Todo[]; edits?: unknown[] };
-                text?: string;
-              }>;
-            };
-          };
+          const message = decodeSessionOutputData(output.data);
           if (message.type === 'assistant' && message.message?.content && Array.isArray(message.message.content)) {
             // Look for text content
             for (const content of message.message.content) {
@@ -295,7 +274,7 @@ export class ProgrammaticCompactor {
               }
             }
           }
-        } catch (e) {
+        } catch {
           // Skip invalid JSON
         }
       }
@@ -312,7 +291,7 @@ export class ProgrammaticCompactor {
     wasInterrupted: boolean;
     conversationMessages: ConversationMessage[];
   }): string {
-    const { session, promptAnalysis, fileModifications, todos, gitStatus, wasInterrupted } = data;
+    const { promptAnalysis, fileModifications, todos, gitStatus, wasInterrupted } = data;
     
     let summary = `<session_context>\n`;
     

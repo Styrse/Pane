@@ -7,8 +7,15 @@ import { PathResolver } from '../utils/pathResolver';
 import { CommandRunner } from '../utils/commandRunner';
 import { getGitAttributionEnv } from '../utils/attribution';
 import { worktreePoolManager } from './worktreePoolManager';
+import { ensureFastGitConfig, forceRemoveWorktree } from './gitPerformanceConfig';
+import { boundary, decodeBoundary } from '../../../shared/validation/boundaryDecoder';
 
-export type WorktreeAuditSource = 'session-delete' | 'project-delete' | 'create-cleanup';
+type WorktreeAuditSource = 'session-delete' | 'project-delete' | 'create-cleanup';
+
+interface WorktreeEntry {
+  path: string;
+  branch?: string;
+}
 
 export interface WorktreeAuditContext {
   source: WorktreeAuditSource;
@@ -16,15 +23,40 @@ export interface WorktreeAuditContext {
   projectId?: number;
 }
 
-function formatWorktreeAuditDetails(details: Record<string, unknown>): string {
+interface WorktreeAuditDetails {
+  source?: WorktreeAuditSource;
+  sessionId?: string;
+  projectId?: number;
+  projectPath?: string;
+  worktreeName?: string;
+  worktreePath?: string;
+  reason?: string;
+}
+
+function formatWorktreeAuditDetails(details: WorktreeAuditDetails): string {
   return Object.entries(details)
     .filter(([, value]) => value !== undefined && value !== null)
     .map(([key, value]) => `${key}=${JSON.stringify(String(value))}`)
     .join(' ');
 }
 
-function logWorktreeAudit(phase: string, details: Record<string, unknown>): void {
+function logWorktreeAudit(phase: string, details: WorktreeAuditDetails): void {
   console.log(`[WorktreeAudit] ${phase} ${formatWorktreeAuditDetails(details)}`);
+}
+
+const commandErrorSchema = boundary.object({
+  message: boundary.optional(boundary.string),
+  stderr: boundary.optional(boundary.string),
+  stdout: boundary.optional(boundary.string),
+});
+
+class GitOperationError extends Error {
+  gitCommand?: string;
+  gitCommands?: string[];
+  gitOutput?: string;
+  workingDirectory?: string;
+  projectPath?: string;
+  originalError?: { message?: string; stderr?: string; stdout?: string };
 }
 
 // Interface for raw commit data
@@ -185,6 +217,7 @@ export class WorktreeManager {
 
   async initializeProject(projectPath: string, worktreeFolder: string | undefined, pathResolver: PathResolver, commandRunner: CommandRunner): Promise<void> {
     const { baseDir } = this.getProjectPaths(projectPath, worktreeFolder, pathResolver);
+    void ensureFastGitConfig(projectPath, commandRunner);
     try {
       await mkdir(pathResolver.toFileSystem(baseDir), { recursive: true });
     } catch (error) {
@@ -192,21 +225,22 @@ export class WorktreeManager {
     }
   }
 
+  getWorktreePath(projectPath: string, name: string, worktreeFolder: string | undefined, pathResolver: PathResolver): string {
+    return pathResolver.join(this.getProjectPaths(projectPath, worktreeFolder, pathResolver).baseDir, name);
+  }
+
   async createWorktree(projectPath: string, name: string, branch: string | undefined, baseBranch: string | undefined, worktreeFolder: string | undefined, pathResolver: PathResolver, commandRunner: CommandRunner): Promise<{ worktreePath: string; baseCommit: string; baseBranch: string }> {
     return await withLock(`worktree-create-${projectPath}-${name}`, async () => {
 
-      const { baseDir } = this.getProjectPaths(projectPath, worktreeFolder, pathResolver);
-      const worktreePath = pathResolver.join(baseDir, name);
+      const worktreePath = this.getWorktreePath(projectPath, name, worktreeFolder, pathResolver);
       const branchName = branch || name;
     
 
     try {
       // First check if this is a git repository
-      let isGitRepo = false;
       try {
         await commandRunner.execAsync(`git rev-parse --is-inside-work-tree`, projectPath);
-        isGitRepo = true;
-      } catch (error) {
+      } catch {
         // Initialize git repository
         await commandRunner.execAsync(`git init`, projectPath);
       }
@@ -227,7 +261,7 @@ export class WorktreeManager {
             worktreeName: name,
             worktreePath,
           });
-          await commandRunner.execAsync(`git worktree remove "${worktreePath}" --force`, projectPath);
+          await forceRemoveWorktree(worktreePath, projectPath, commandRunner);
           logWorktreeAudit('remove_succeeded', {
             source: 'create-cleanup',
             projectPath,
@@ -250,11 +284,9 @@ export class WorktreeManager {
       }
 
       // Check if the repository has any commits
-      let hasCommits = false;
       try {
         await commandRunner.execAsync(`git rev-parse HEAD`, projectPath);
-        hasCommits = true;
-      } catch (error) {
+      } catch {
         // Repository has no commits yet, create initial commit
         // Use cross-platform approach without shell operators
         try {
@@ -263,8 +295,9 @@ export class WorktreeManager {
           // Ignore add errors (no files to add)
         }
         await commandRunner.execAsync('git commit -m "Initial commit" --allow-empty', projectPath, { env: getGitAttributionEnv(this.configManager?.getConfig()) });
-        hasCommits = true;
       }
+
+      await ensureFastGitConfig(projectPath, commandRunner);
 
       // Check if branch already exists
       const checkBranchCmd = `git show-ref --verify --quiet refs/heads/${branchName}`;
@@ -404,7 +437,7 @@ export class WorktreeManager {
 
       try {
         logWorktreeAudit('remove_started', auditDetails);
-        await commandRunner.execAsync(`git worktree remove "${worktreePath}" --force`, projectPath);
+        await forceRemoveWorktree(worktreePath, projectPath, commandRunner);
         logWorktreeAudit('remove_succeeded', auditDetails);
 
         // Track worktree cleanup
@@ -415,7 +448,7 @@ export class WorktreeManager {
           });
         }
       } catch (error: unknown) {
-        const err = error as Error & { stderr?: string; stdout?: string };
+        const err = decodeBoundary(error, commandErrorSchema);
         const errorMessage = err.stderr || err.stdout || err.message || String(err);
 
         // If the worktree is not found, that's okay - it might have been manually deleted
@@ -440,22 +473,19 @@ export class WorktreeManager {
     });
   }
 
-  async listWorktrees(projectPath: string, commandRunner: CommandRunner): Promise<Array<{ path: string; branch: string }>> {
+  async listWorktrees(projectPath: string, commandRunner: CommandRunner): Promise<WorktreeEntry[]> {
     try {
       const { stdout } = await commandRunner.execAsync(`git worktree list --porcelain`, projectPath);
       
-      const worktrees: Array<{ path: string; branch: string }> = [];
+      const worktrees: WorktreeEntry[] = [];
       const lines = stdout.split('\n');
       
-      let currentWorktree: { path?: string; branch?: string } = {};
+      let currentWorktree: Partial<WorktreeEntry> = {};
       
       for (const line of lines) {
         if (line.startsWith('worktree ')) {
-          if (currentWorktree.path && currentWorktree.branch) {
-            worktrees.push({ 
-              path: currentWorktree.path, 
-              branch: currentWorktree.branch 
-            });
+          if (currentWorktree.path) {
+            worktrees.push({ ...currentWorktree, path: currentWorktree.path });
           }
           currentWorktree = { path: line.substring(9) };
         } else if (line.startsWith('branch ')) {
@@ -463,11 +493,8 @@ export class WorktreeManager {
         }
       }
       
-      if (currentWorktree.path && currentWorktree.branch) {
-        worktrees.push({ 
-          path: currentWorktree.path, 
-          branch: currentWorktree.branch 
-        });
+      if (currentWorktree.path) {
+        worktrees.push({ ...currentWorktree, path: currentWorktree.path });
       }
       
       return worktrees;
@@ -499,7 +526,7 @@ export class WorktreeManager {
 
       // Get all worktrees to identify which branches have worktrees
       const worktrees = await this.listWorktrees(projectPath, commandRunner);
-      const worktreeBranches = new Set(worktrees.map(w => w.branch));
+      const worktreeBranches = new Set(worktrees.flatMap(w => w.branch ? [w.branch] : []));
 
       // Parse local branches
       const localBranches: Array<{ name: string; isCurrent: boolean; hasWorktree: boolean; isRemote: boolean }> = [];
@@ -508,7 +535,7 @@ export class WorktreeManager {
       for (const line of localLines) {
         const isCurrent = line.startsWith('*');
         // Remove leading *, +, and spaces. The + indicates uncommitted changes
-        const name = line.replace(/^[\*\+]?\s*[\+]?\s*/, '').trim();
+        const name = line.replace(/^[*+]?\s*[+]?\s*/, '').trim();
         if (name) {
           localBranches.push({
             name,
@@ -809,8 +836,7 @@ export class WorktreeManager {
 
         return { hasConflicts: false, canAutoMerge: true };
 
-      } catch (error: unknown) {
-        const err = error as Error & { stderr?: string; stdout?: string };
+      } catch {
         // If merge-tree is not available (older git), fall back to checking modified files
         console.log(`[WorktreeManager] merge-tree not available, using fallback conflict detection`);
 
@@ -890,7 +916,7 @@ export class WorktreeManager {
           });
         }
       } catch (error: unknown) {
-        const err = error as Error & { stderr?: string; stdout?: string };
+        const err = decodeBoundary(error, commandErrorSchema);
         console.error(`[WorktreeManager] Failed to rebase ${mainBranch} into worktree:`, err);
 
         // Check if conflict occurred
@@ -915,12 +941,7 @@ export class WorktreeManager {
         }
 
         // Create detailed error with git command output
-        const gitError = new Error(`Failed to rebase ${mainBranch} into worktree`) as Error & {
-          gitCommand?: string;
-          gitOutput?: string;
-          workingDirectory?: string;
-          originalError?: Error;
-        };
+        const gitError = new GitOperationError(`Failed to rebase ${mainBranch} into worktree`);
         gitError.gitCommand = executedCommands.join(' && ');
         gitError.gitOutput = err.stderr || err.stdout || lastOutput || err.message || '';
         gitError.workingDirectory = worktreePath;
@@ -935,17 +956,17 @@ export class WorktreeManager {
     try {
       // Check if we're in the middle of a rebase
       const statusCommand = `git status --porcelain=v1`;
-      const { stdout: statusOut } = await commandRunner.execAsync(statusCommand, worktreePath);
+      await commandRunner.execAsync(statusCommand, worktreePath);
 
       // Abort the rebase
       const command = `git rebase --abort`;
-      const { stdout, stderr } = await commandRunner.execAsync(command, worktreePath);
+      const { stderr } = await commandRunner.execAsync(command, worktreePath);
 
       if (stderr && !stderr.includes('No rebase in progress')) {
         throw new Error(`Failed to abort rebase: ${stderr}`);
       }
     } catch (error: unknown) {
-      const err = error as Error;
+      const err = decodeBoundary(error, commandErrorSchema);
       console.error(`[WorktreeManager] Error aborting rebase:`, err);
       throw new Error(`Failed to abort rebase: ${err.message}`);
     }
@@ -990,7 +1011,7 @@ export class WorktreeManager {
           lastOutput = rebaseWorktreeResult.stdout || rebaseWorktreeResult.stderr || '';
           console.log(`[WorktreeManager] Successfully rebased worktree onto ${mainBranch} before squashing`);
         } catch (error: unknown) {
-          const err = error as Error & { stderr?: string; stdout?: string };
+          const err = decodeBoundary(error, commandErrorSchema);
           // If rebase fails, abort it in the worktree
           try {
             await commandRunner.execAsync(`git rebase --abort`, worktreePath);
@@ -1041,7 +1062,7 @@ Co-Authored-By: Pane <runpane@users.noreply.github.com>` : commitMessage;
           lastOutput = mergeResult.stdout || mergeResult.stderr || '';
           console.log(`[WorktreeManager] Successfully fast-forwarded ${mainBranch} to ${branchName}`);
         } catch (error: unknown) {
-          const err = error as Error & { stderr?: string; stdout?: string };
+          const err = decodeBoundary(error, commandErrorSchema);
           throw new Error(
             `Failed to fast-forward ${mainBranch} to ${branchName}.\n\n` +
             `This usually means ${mainBranch} has commits that ${branchName} doesn't have.\n` +
@@ -1066,7 +1087,7 @@ Co-Authored-By: Pane <runpane@users.noreply.github.com>` : commitMessage;
           });
         }
       } catch (error: unknown) {
-        const err = error as Error & { stderr?: string; stdout?: string };
+        const err = decodeBoundary(error, commandErrorSchema);
         console.error(`[WorktreeManager] Failed to squash and merge worktree to ${mainBranch}:`, err);
 
         // Track failed squash
@@ -1090,13 +1111,7 @@ Co-Authored-By: Pane <runpane@users.noreply.github.com>` : commitMessage;
         }
 
         // Create detailed error with git command output
-        const gitError = new Error(`Failed to squash and merge worktree to ${mainBranch}`) as Error & {
-          gitCommands?: string[];
-          gitOutput?: string;
-          workingDirectory?: string;
-          projectPath?: string;
-          originalError?: Error;
-        };
+        const gitError = new GitOperationError(`Failed to squash and merge worktree to ${mainBranch}`);
         gitError.gitCommands = executedCommands;
         // Prioritize actual error messages over lastOutput (which may contain unrelated data like commit counts)
         gitError.gitOutput = err.stderr || err.stdout || err.message || lastOutput || '';
@@ -1140,7 +1155,7 @@ Co-Authored-By: Pane <runpane@users.noreply.github.com>` : commitMessage;
           lastOutput = rebaseWorktreeResult.stdout || rebaseWorktreeResult.stderr || '';
           console.log(`[WorktreeManager] Successfully rebased worktree onto ${mainBranch}`);
         } catch (error: unknown) {
-          const err = error as Error & { stderr?: string; stdout?: string };
+          const err = decodeBoundary(error, commandErrorSchema);
           // If rebase fails, abort it in the worktree
           try {
             await commandRunner.execAsync(`git rebase --abort`, worktreePath);
@@ -1169,7 +1184,7 @@ Co-Authored-By: Pane <runpane@users.noreply.github.com>` : commitMessage;
           lastOutput = mergeResult.stdout || mergeResult.stderr || '';
           console.log(`[WorktreeManager] Successfully fast-forwarded ${mainBranch} to ${branchName}`);
         } catch (error: unknown) {
-          const err = error as Error & { stderr?: string; stdout?: string };
+          const err = decodeBoundary(error, commandErrorSchema);
           throw new Error(
             `Failed to fast-forward ${mainBranch} to ${branchName}.\n\n` +
             `This usually means ${mainBranch} has commits that ${branchName} doesn't have.\n` +
@@ -1180,17 +1195,11 @@ Co-Authored-By: Pane <runpane@users.noreply.github.com>` : commitMessage;
 
         console.log(`[WorktreeManager] Successfully merged worktree to ${mainBranch} (without squashing)`);
       } catch (error: unknown) {
-        const err = error as Error & { stderr?: string; stdout?: string };
+        const err = decodeBoundary(error, commandErrorSchema);
         console.error(`[WorktreeManager] Failed to merge worktree to ${mainBranch}:`, err);
 
         // Create detailed error with git command output
-        const gitError = new Error(`Failed to merge worktree to ${mainBranch}`) as Error & {
-          gitCommands?: string[];
-          gitOutput?: string;
-          workingDirectory?: string;
-          projectPath?: string;
-          originalError?: Error;
-        };
+        const gitError = new GitOperationError(`Failed to merge worktree to ${mainBranch}`);
         gitError.gitCommands = executedCommands;
         // Prioritize actual error messages over lastOutput (which may contain unrelated data like commit counts)
         gitError.gitOutput = err.stderr || err.stdout || err.message || lastOutput || '';
@@ -1241,11 +1250,8 @@ Co-Authored-By: Pane <runpane@users.noreply.github.com>` : commitMessage;
 
       return { output };
     } catch (error: unknown) {
-      const err = error as Error & { stderr?: string; stdout?: string };
-      const gitError = new Error(err.message || 'Git pull failed') as Error & {
-        gitOutput?: string;
-        workingDirectory?: string;
-      };
+      const err = decodeBoundary(error, commandErrorSchema);
+      const gitError = new GitOperationError(err.message || 'Git pull failed');
       gitError.gitOutput = err.stderr || err.stdout || err.message || '';
       gitError.workingDirectory = worktreePath;
       throw gitError;
@@ -1271,11 +1277,8 @@ Co-Authored-By: Pane <runpane@users.noreply.github.com>` : commitMessage;
 
       return { output };
     } catch (error: unknown) {
-      const err = error as Error & { stderr?: string; stdout?: string };
-      const gitError = new Error(err.message || 'Git push failed') as Error & {
-        gitOutput?: string;
-        workingDirectory?: string;
-      };
+      const err = decodeBoundary(error, commandErrorSchema);
+      const gitError = new GitOperationError(err.message || 'Git push failed');
       gitError.gitOutput = err.stderr || err.stdout || err.message || '';
       gitError.workingDirectory = worktreePath;
       throw gitError;
@@ -1289,11 +1292,8 @@ Co-Authored-By: Pane <runpane@users.noreply.github.com>` : commitMessage;
 
       return { output };
     } catch (error: unknown) {
-      const err = error as Error & { stderr?: string; stdout?: string };
-      const gitError = new Error(err.message || 'Git fetch failed') as Error & {
-        gitOutput?: string;
-        workingDirectory?: string;
-      };
+      const err = decodeBoundary(error, commandErrorSchema);
+      const gitError = new GitOperationError(err.message || 'Git fetch failed');
       gitError.gitOutput = err.stderr || err.stdout || err.message || '';
       gitError.workingDirectory = worktreePath;
       throw gitError;
@@ -1309,11 +1309,8 @@ Co-Authored-By: Pane <runpane@users.noreply.github.com>` : commitMessage;
 
       return { output };
     } catch (error: unknown) {
-      const err = error as Error & { stderr?: string; stdout?: string };
-      const gitError = new Error(err.message || 'Git stash failed') as Error & {
-        gitOutput?: string;
-        workingDirectory?: string;
-      };
+      const err = decodeBoundary(error, commandErrorSchema);
+      const gitError = new GitOperationError(err.message || 'Git stash failed');
       gitError.gitOutput = err.stderr || err.stdout || err.message || '';
       gitError.workingDirectory = worktreePath;
       throw gitError;
@@ -1327,11 +1324,8 @@ Co-Authored-By: Pane <runpane@users.noreply.github.com>` : commitMessage;
 
       return { output };
     } catch (error: unknown) {
-      const err = error as Error & { stderr?: string; stdout?: string };
-      const gitError = new Error(err.message || 'Git stash pop failed') as Error & {
-        gitOutput?: string;
-        workingDirectory?: string;
-      };
+      const err = decodeBoundary(error, commandErrorSchema);
+      const gitError = new GitOperationError(err.message || 'Git stash pop failed');
       gitError.gitOutput = err.stderr || err.stdout || err.message || '';
       gitError.workingDirectory = worktreePath;
       throw gitError;
@@ -1387,11 +1381,8 @@ Co-Authored-By: Pane <runpane@users.noreply.github.com>` : commitMessage;
       const output = stdout || stderr || `Tracking set to ${remoteBranch}`;
       return { output };
     } catch (error: unknown) {
-      const err = error as Error & { stderr?: string; stdout?: string };
-      const gitError = new Error(err.message || 'Failed to set upstream') as Error & {
-        gitOutput?: string;
-        workingDirectory?: string;
-      };
+      const err = decodeBoundary(error, commandErrorSchema);
+      const gitError = new GitOperationError(err.message || 'Failed to set upstream');
       gitError.gitOutput = err.stderr || err.stdout || err.message || '';
       gitError.workingDirectory = worktreePath;
       throw gitError;
@@ -1431,11 +1422,8 @@ Co-Authored-By: Pane <runpane@users.noreply.github.com>` : commitMessage;
 
       return { output };
     } catch (error: unknown) {
-      const err = error as Error & { stderr?: string; stdout?: string };
-      const gitError = new Error(err.message || 'Git commit failed') as Error & {
-        gitOutput?: string;
-        workingDirectory?: string;
-      };
+      const err = decodeBoundary(error, commandErrorSchema);
+      const gitError = new GitOperationError(err.message || 'Git commit failed');
       gitError.gitOutput = err.stderr || err.stdout || err.message || '';
       gitError.workingDirectory = worktreePath;
       throw gitError;
@@ -1491,11 +1479,8 @@ Co-Authored-By: Pane <runpane@users.noreply.github.com>` : commitMessage;
 
       return commits;
     } catch (error: unknown) {
-      const err = error as Error & { stderr?: string; stdout?: string };
-      const gitError = new Error(err.message || 'Failed to get commits') as Error & {
-        gitOutput?: string;
-        workingDirectory?: string;
-      };
+      const err = decodeBoundary(error, commandErrorSchema);
+      const gitError = new GitOperationError(err.message || 'Failed to get commits');
       gitError.gitOutput = err.stderr || err.stdout || err.message || '';
       gitError.workingDirectory = worktreePath;
       throw gitError;

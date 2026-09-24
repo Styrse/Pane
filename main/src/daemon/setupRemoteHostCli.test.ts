@@ -1,23 +1,29 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import path from 'path';
 import {
-  formatSetupRemoteHostResult,
-  setupRemoteHost,
+  formatSetupRemoteHostResult as formatSetupRemoteHostResultImpl,
+  setupRemoteHost as setupRemoteHostImpl,
 } from './setupRemoteHost';
 import {
-  ensureTailscaleInstalledInteractive,
-  runTailscaleUpInteractive,
+  ensureTailscaleInstalledInteractive as ensureTailscaleInstalledInteractiveImpl,
+  runTailscaleUpInteractive as runTailscaleUpInteractiveImpl,
 } from './tailscaleSetup';
-import { runRemoteSetupCli } from './setupRemoteHostCli';
+import { runRemoteSetupCli, type RemoteSetupCliDependencies } from './setupRemoteHostCli';
+import { repairRemoteDaemonService as repairRemoteDaemonServiceImpl } from './remoteDaemonService';
 
-vi.mock('./setupRemoteHost', () => ({
-  formatSetupRemoteHostResult: vi.fn(() => 'formatted remote setup result'),
-  setupRemoteHost: vi.fn(),
-}));
-
-vi.mock('./tailscaleSetup', () => ({
-  ensureTailscaleInstalledInteractive: vi.fn(),
-  runTailscaleUpInteractive: vi.fn(),
-}));
+const formatSetupRemoteHostResult = vi.fn<typeof formatSetupRemoteHostResultImpl>()
+  .mockReturnValue('formatted remote setup result');
+const setupRemoteHost = vi.fn<typeof setupRemoteHostImpl>();
+const repairRemoteDaemonService = vi.fn<typeof repairRemoteDaemonServiceImpl>();
+const ensureTailscaleInstalledInteractive = vi.fn<typeof ensureTailscaleInstalledInteractiveImpl>();
+const runTailscaleUpInteractive = vi.fn<typeof runTailscaleUpInteractiveImpl>();
+const dependencies: RemoteSetupCliDependencies = {
+  ensureTailscaleInstalledInteractive,
+  formatSetupRemoteHostResult,
+  repairRemoteDaemonService,
+  runTailscaleUpInteractive,
+  setupRemoteHost,
+};
 
 describe('runRemoteSetupCli', () => {
   afterEach(() => {
@@ -25,6 +31,7 @@ describe('runRemoteSetupCli', () => {
     vi.mocked(setupRemoteHost).mockReset();
     vi.mocked(ensureTailscaleInstalledInteractive).mockReset();
     vi.mocked(runTailscaleUpInteractive).mockReset();
+    vi.mocked(repairRemoteDaemonService).mockReset();
   });
 
   it('installs and authenticates Tailscale before running remote setup in interactive mode', async () => {
@@ -68,7 +75,7 @@ describe('runRemoteSetupCli', () => {
       '--prefer-tunnel',
       'tailscale',
       '--no-install-service',
-    ]);
+    ], dependencies);
 
     expect(exitCode).toBe(0);
     expect(ensureTailscaleInstalledInteractive).toHaveBeenCalledOnce();
@@ -82,5 +89,47 @@ describe('runRemoteSetupCli', () => {
       interactiveTailscaleSetup: true,
     }));
     expect(formatSetupRemoteHostResult).toHaveBeenCalledOnce();
+  });
+
+  it('repairs only service assets when routed through remote setup', async () => {
+    vi.mocked(repairRemoteDaemonService).mockResolvedValue({
+      ok: true,
+      changed: true,
+      paneDir: '/tmp/pane-remote',
+      strategy: 'systemd-user',
+      launcherPath: '/tmp/pane-remote/remote-daemon/start.sh',
+      before: {
+        launcherPath: '/tmp/pane-remote/remote-daemon/start.sh',
+        launcherExists: true,
+        launcherCurrent: false,
+        savedExecutablePath: '/opt/Pane/Pane',
+        savedExecutableExists: false,
+        resolvedExecutablePath: '/opt/Pane/pane',
+        restartStatus: 'ready',
+      },
+      after: {
+        launcherPath: '/tmp/pane-remote/remote-daemon/start.sh',
+        launcherExists: true,
+        launcherCurrent: true,
+        savedExecutablePath: null,
+        savedExecutableExists: null,
+        resolvedExecutablePath: '/opt/Pane/pane',
+        restartStatus: 'ready',
+      },
+      message: 'Repaired and restarted the user systemd service.',
+    });
+
+    const exitCode = await runRemoteSetupCli([
+      '--remote-setup',
+      '--remote-repair-service',
+      '--pane-dir',
+      '/tmp/pane-remote',
+      '--json',
+    ], dependencies);
+
+    expect(exitCode).toBe(0);
+    expect(repairRemoteDaemonService).toHaveBeenCalledWith(path.resolve('/tmp/pane-remote'));
+    expect(setupRemoteHost).not.toHaveBeenCalled();
+    expect(ensureTailscaleInstalledInteractive).not.toHaveBeenCalled();
   });
 });

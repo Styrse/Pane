@@ -2,15 +2,18 @@ import { EventEmitter } from 'events';
 import * as pty from '@lydell/node-pty';
 import * as path from 'path';
 import * as os from 'os';
+import * as fs from 'fs';
+import { boundary, decodeBoundary, type JsonObject, type JsonValue } from '../../../../../shared/validation/boundaryDecoder';
 import { execSync, exec } from 'child_process';
 import { promisify } from 'util';
 import type { Logger } from '../../../utils/logger';
 import { getPtyHostRuntime, type PtyHandleLike } from '../../../core/runtime';
 import type { ConfigManager } from '../../configManager';
 import type { ConversationMessage } from '../../../database/models';
-import { getShellPath, findExecutableInPath } from '../../../utils/shellPath';
+import { getShellPath } from '../../../utils/shellPath';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
 import { getGitAttributionEnv } from '../../../utils/attribution';
+import { inheritedProcessEnv } from '../../../utils/inheritedProcessEnv';
 
 const LAST_OUTPUT_TAIL_BYTES = 16 * 1024;
 
@@ -65,7 +68,23 @@ export interface CliSpawnOptions {
   worktreePath: string;
   prompt: string;
   isResume?: boolean;
-  [key: string]: unknown; // Allow CLI-specific options
+  [key: string]: JsonValue | undefined; // Allow CLI-specific serializable options
+}
+
+export interface CliEnvironment {
+  [key: string]: string;
+}
+
+export interface CliSpawnTuple {
+  cmd: string;
+  args: string[];
+  env: CliEnvironment;
+}
+
+const nodeFallbackTools = new Set<string>();
+
+class PtyHostUnavailableError extends Error {
+  readonly code = 'OTHER';
 }
 
 interface CliOutputEvent {
@@ -74,24 +93,6 @@ interface CliOutputEvent {
   type: 'json' | 'stdout' | 'stderr';
   data: unknown;
   timestamp: Date;
-}
-
-interface CliExitEvent {
-  panelId: string;
-  sessionId: string;
-  exitCode: number | null;
-  signal: number | null;
-}
-
-interface CliErrorEvent {
-  panelId: string;
-  sessionId: string;
-  error: string;
-}
-
-interface CliSpawnedEvent {
-  panelId: string;
-  sessionId: string;
 }
 
 /**
@@ -140,8 +141,8 @@ export abstract class AbstractCliManager extends EventEmitter {
   protected wrapSpawnArgs(
     cmd: string,
     args: string[],
-    env: { [key: string]: string }
-  ): { cmd: string; args: string[]; env: { [key: string]: string } } {
+    env: CliEnvironment
+  ): CliSpawnTuple {
     return { cmd, args, env };
   }
 
@@ -162,7 +163,7 @@ export abstract class AbstractCliManager extends EventEmitter {
   /**
    * Handle CLI-specific initialization (e.g., setup config files, environment)
    */
-  protected abstract initializeCliEnvironment(options: CliSpawnOptions): Promise<{ [key: string]: string }>;
+  protected abstract initializeCliEnvironment(options: CliSpawnOptions): Promise<CliEnvironment>;
 
   /**
    * Clean up CLI-specific resources (e.g., config files, temporary files)
@@ -172,7 +173,7 @@ export abstract class AbstractCliManager extends EventEmitter {
   /**
    * Get CLI-specific environment variables
    */
-  protected abstract getCliEnvironment(options: CliSpawnOptions): Promise<{ [key: string]: string }>;
+  protected abstract getCliEnvironment(options: CliSpawnOptions): Promise<CliEnvironment>;
 
   /**
    * Hook called when a CLI process exits. Override in subclasses to clean up process-specific state.
@@ -250,7 +251,7 @@ export abstract class AbstractCliManager extends EventEmitter {
       this.setupProcessHandlers(ptyProcess, panelId, sessionId);
 
       // Emit spawned event
-      this.emit('spawned', { panelId, sessionId } as CliSpawnedEvent);
+      this.emit('spawned', { panelId, sessionId });
 
       this.logger?.info(`${this.getCliToolName()} spawned successfully for panel ${panelId} (session ${sessionId})`);
     } catch (error) {
@@ -261,7 +262,7 @@ export abstract class AbstractCliManager extends EventEmitter {
         panelId: options.panelId,
         sessionId: options.sessionId,
         error: errorMessage
-      } as CliErrorEvent);
+      });
       throw error;
     }
   }
@@ -324,7 +325,7 @@ export abstract class AbstractCliManager extends EventEmitter {
           type: 'stdout',
           data: message,
           timestamp: new Date()
-        } as CliOutputEvent);
+        });
       }
 
       if (!success) {
@@ -400,7 +401,7 @@ export abstract class AbstractCliManager extends EventEmitter {
         this.logger?.info(`[${this.getCliToolName()}] Sent Ctrl+C to panel ${panelId} (session ${cliProcess.sessionId})`);
         count++;
       } catch (error) {
-        this.logger?.warn(`[${this.getCliToolName()}] Failed to send Ctrl+C to panel ${panelId}:`, error as Error);
+        this.logger?.warn(`[${this.getCliToolName()}] Failed to send Ctrl+C to panel ${panelId}:`, error instanceof Error ? error : new Error(String(error)));
       }
     }
     this.logger?.info(`[${this.getCliToolName()}] Gracefully signaled ${count} processes`);
@@ -496,8 +497,6 @@ export abstract class AbstractCliManager extends EventEmitter {
   ): Promise<void> {
     try {
       const fs = await import('fs').then(m => m.promises);
-      const path = await import('path');
-      
       // Check if session directory exists
       try {
         await fs.access(sessionIdPath);
@@ -526,7 +525,10 @@ export abstract class AbstractCliManager extends EventEmitter {
           const panel = await panelManager.getPanel(panelId);
           if (panel) {
             const currentState = panel.state || {};
-            const customState = (currentState.customState as Record<string, unknown>) || {};
+            let customState: JsonObject = {};
+            try {
+              customState = decodeBoundary(currentState.customState ?? {}, boundary.jsonObject);
+            } catch { /* Replace malformed persisted state with a clean object. */ }
             
             // Only update if we don't already have a session ID
             const toolSessionKey = `${this.getCliToolName().toLowerCase()}SessionId`;
@@ -552,7 +554,7 @@ export abstract class AbstractCliManager extends EventEmitter {
   /**
    * Get cached availability result or perform fresh check
    */
-  protected async getCachedAvailability(): Promise<{ available: boolean; error?: string; version?: string; path?: string }> {
+  async getCachedAvailability(): Promise<{ available: boolean; error?: string; version?: string; path?: string }> {
     if (this.availabilityCache &&
         (Date.now() - this.availabilityCache.timestamp) < this.CACHE_TTL) {
       this.logger?.verbose(`Using cached ${this.getCliToolName()} availability check`);
@@ -595,7 +597,7 @@ export abstract class AbstractCliManager extends EventEmitter {
       type: 'json',
       data: errorMessage,
       timestamp: new Date()
-    } as CliOutputEvent);
+    });
 
     // Add dedicated error output
     this.sessionManager.addSessionError(
@@ -644,10 +646,10 @@ export abstract class AbstractCliManager extends EventEmitter {
     const pathWithNode = nodeDir + pathSeparator + shellPath;
 
     return {
-      ...process.env,
+      ...inheritedProcessEnv(),
       ...getGitAttributionEnv(this.configManager?.getConfig()),
       PATH: pathWithNode
-    } as { [key: string]: string };
+    };
   }
 
 
@@ -675,6 +677,12 @@ export abstract class AbstractCliManager extends EventEmitter {
     this.logger?.verbose(`Executing ${this.getCliToolName()} command: ${fullCommand}`);
     this.logger?.verbose(`Working directory: ${cwd}`);
 
+    // A missing cwd (e.g. a worktree removed while the session was archived)
+    // makes node-pty fail with an opaque spawn error; report it clearly instead.
+    if (!fs.existsSync(cwd)) {
+      throw new Error(`Cannot start ${this.getCliToolName()}: working directory does not exist: ${cwd}. Restore or recreate the session's worktree and try again.`);
+    }
+
     let ptyProcess: PtyLike;
     let spawnAttempt = 0;
     let lastError: unknown;
@@ -686,7 +694,7 @@ export abstract class AbstractCliManager extends EventEmitter {
     // 2. Even if we could execute them, they use relative paths that break when cwd differs
     if (os.platform() === 'win32') {
       this.logger?.verbose(`[${this.getCliToolName()}] Windows detected, using Node.js fallback proactively`);
-      (global as typeof global & Record<string, boolean>)[needsNodeFallbackKey] = true;
+      nodeFallbackTools.add(needsNodeFallbackKey);
     }
 
     // Try normal spawn first, then fallback to Node.js invocation if it fails
@@ -702,7 +710,7 @@ export abstract class AbstractCliManager extends EventEmitter {
         const supervisor = getPtyHostRuntime();
         const useHost = (this.configManager?.getUsePtyHost() ?? false) && supervisor !== null;
 
-        if (spawnAttempt === 0 && !(global as typeof global & Record<string, boolean>)[needsNodeFallbackKey]) {
+        if (spawnAttempt === 0 && !nodeFallbackTools.has(needsNodeFallbackKey)) {
           // First attempt: normal spawn
           ptyProcess = useHost
             ? await this.spawnViaHost(command, args, cwd, env, 80, 30)
@@ -735,7 +743,7 @@ export abstract class AbstractCliManager extends EventEmitter {
               scriptPath = foundScript;
               this.logger?.verbose(`[${this.getCliToolName()}] Found script at: ${scriptPath}`);
             }
-          } catch (e) {
+          } catch {
             // If we can't find the script helper, just use the command as-is
             this.logger?.verbose(`[${this.getCliToolName()}] Using command directly for Node.js invocation`);
           }
@@ -766,7 +774,7 @@ export abstract class AbstractCliManager extends EventEmitter {
         lastError = spawnError;
         spawnAttempt++;
 
-        if (spawnAttempt === 1 && !(global as typeof global & Record<string, boolean>)[needsNodeFallbackKey]) {
+        if (spawnAttempt === 1 && !nodeFallbackTools.has(needsNodeFallbackKey)) {
           const errorMsg = spawnError instanceof Error ? spawnError.message : String(spawnError);
           this.logger?.error(`First ${this.getCliToolName()} spawn attempt failed: ${errorMsg}`);
 
@@ -780,7 +788,7 @@ export abstract class AbstractCliManager extends EventEmitter {
               errorMsg.includes('error code: 193') ||
               errorMsg.includes('not a valid Win32 application')) {
             this.logger?.verbose(`Error suggests shebang issue or Windows executable format error, will try Node.js fallback`);
-            (global as typeof global & Record<string, boolean>)[needsNodeFallbackKey] = true;
+            nodeFallbackTools.add(needsNodeFallbackKey);
             continue;
           }
         }
@@ -821,9 +829,7 @@ export abstract class AbstractCliManager extends EventEmitter {
     if (!supervisor) {
       // Guard: caller must have checked already; if we got here without one,
       // surface a classifier-agnostic OTHER to avoid accidental fallback.
-      const err = new Error('ptyHost supervisor not available') as Error & { code?: string };
-      err.code = 'OTHER';
-      throw err;
+      throw new PtyHostUnavailableError('ptyHost supervisor not available');
     }
 
     const { ptyId, pid } = await supervisor.spawn({
@@ -840,9 +846,7 @@ export abstract class AbstractCliManager extends EventEmitter {
     if (!handle) {
       // This shouldn't happen: supervisor.spawn() registers the handle before
       // resolving. If it does, treat as OTHER so the fallback path doesn't fire.
-      const err = new Error(`ptyHost returned ptyId ${ptyId} but no handle`) as Error & { code?: string };
-      err.code = 'OTHER';
-      throw err;
+      throw new PtyHostUnavailableError(`ptyHost returned ptyId ${ptyId} but no handle`);
     }
 
     return this.wrapPtyHandle(handle, pid);
@@ -858,12 +862,14 @@ export abstract class AbstractCliManager extends EventEmitter {
     return {
       pid,
       write(data: string | Buffer): Promise<void> {
-        return handle.write(typeof data === 'string' ? data : data.toString('utf8'));
+        return handle.write(Buffer.isBuffer(data) ? data.toString('utf8') : data);
       },
       resize(columns: number, rowsValue: number): Promise<void> {
         return handle.resize(columns, rowsValue);
       },
       kill(signal?: string): Promise<void> {
+        // SAFETY: PtyLike callers use Node signal names; this adapter merely
+        // narrows the legacy string signature for the typed ptyHost handle.
         return handle.kill(signal as NodeJS.Signals | undefined);
       },
       pause(): Promise<void> {
@@ -944,7 +950,7 @@ export abstract class AbstractCliManager extends EventEmitter {
           type: 'stderr',
           data: `\n[${this.getCliToolName()}] ptyHost restarted mid-spawn; non-interactive prompt lost. Start a new message to continue.\n`,
           timestamp: new Date()
-        } as CliOutputEvent);
+        });
         return { panelId, skipped: 'non-interactive' as const };
       }
 
@@ -1041,7 +1047,7 @@ export abstract class AbstractCliManager extends EventEmitter {
             type: 'stdout',
             data: message,
             timestamp: new Date()
-          } as CliOutputEvent);
+          });
         }
       }
 
@@ -1055,8 +1061,7 @@ export abstract class AbstractCliManager extends EventEmitter {
 
       // Detect crash signals (SIGSEGV=11, SIGABRT=6, SIGBUS=7)
       if (signal && [6, 7, 11].includes(signal)) {
-        const signalNames: Record<number, string> = { 6: 'SIGABRT', 7: 'SIGBUS', 11: 'SIGSEGV' };
-        const signalName = signalNames[signal] || `signal ${signal}`;
+        const signalName = signal === 6 ? 'SIGABRT' : signal === 7 ? 'SIGBUS' : 'SIGSEGV';
         this.logger?.error(`${this.getCliToolName()} process crashed with ${signalName} for session ${sessionId} (panel ${panelId})`);
 
         const crashMessage = `\n[Process Crash] ${this.getCliToolName()} was terminated by ${signalName}. Your system may be under memory pressure — check RAM usage.\n`;
@@ -1066,7 +1071,7 @@ export abstract class AbstractCliManager extends EventEmitter {
           type: 'stderr',
           data: crashMessage,
           timestamp: new Date()
-        } as CliOutputEvent);
+        });
       }
 
       if (exitCode !== 0) {
@@ -1092,7 +1097,7 @@ export abstract class AbstractCliManager extends EventEmitter {
         sessionId,
         exitCode,
         signal: signal ?? null
-      } as CliExitEvent);
+      });
       this.processes.delete(panelId);
     });
   }
@@ -1100,7 +1105,7 @@ export abstract class AbstractCliManager extends EventEmitter {
   /**
    * Handle process startup failure
    */
-  protected async handleProcessStartupFailure(exitCode: number | null, signal: number | undefined, panelId: string, sessionId: string, lastOutput: string): Promise<void> {
+  protected async handleProcessStartupFailure(exitCode: number | null, signal: number | undefined, panelId: string, sessionId: string, _lastOutput: string): Promise<void> {
     this.logger?.error(`No output received from ${this.getCliToolName()}. This might indicate a startup failure.`);
 
     const errorMessage = {
@@ -1129,7 +1134,7 @@ export abstract class AbstractCliManager extends EventEmitter {
       type: 'json',
       data: errorMessage,
       timestamp: new Date()
-    } as CliOutputEvent);
+    });
   }
 
   /**
@@ -1153,7 +1158,7 @@ export abstract class AbstractCliManager extends EventEmitter {
       type: 'json',
       data: errorMessage,
       timestamp: new Date()
-    } as CliOutputEvent);
+    });
   }
 
   // Process management utilities
@@ -1196,7 +1201,7 @@ export abstract class AbstractCliManager extends EventEmitter {
         }
       }
     } catch (error) {
-      this.logger?.warn(`Error getting descendant PIDs for ${parentPid}:`, error as Error);
+      this.logger?.warn(`Error getting descendant PIDs for ${parentPid}:`, error instanceof Error ? error : new Error(String(error)));
     }
 
     return [...new Set(descendants)];
@@ -1231,7 +1236,7 @@ export abstract class AbstractCliManager extends EventEmitter {
         }
 
         processInfo.push({ pid, name: name || 'unknown' });
-      } catch (error) {
+      } catch {
         processInfo.push({ pid, name: 'unknown' });
       }
     }
@@ -1256,11 +1261,11 @@ export abstract class AbstractCliManager extends EventEmitter {
           await this.execAsync(`taskkill /F /T /PID ${pid}`);
           this.logger?.verbose(`[${this.getCliToolName()}] Successfully killed Windows process tree ${pid}`);
         } catch (error) {
-          this.logger?.warn(`[${this.getCliToolName()}] Error killing Windows process tree: ${error as Error}`);
+          this.logger?.warn(`[${this.getCliToolName()}] Error killing Windows process tree: ${error instanceof Error ? error : new Error(String(error))}`);
           for (const childPid of descendantPids) {
             try {
               await this.execAsync(`taskkill /F /PID ${childPid}`);
-            } catch (e) {
+            } catch {
               // Process might already be dead
             }
           }
@@ -1270,7 +1275,7 @@ export abstract class AbstractCliManager extends EventEmitter {
         try {
           process.kill(pid, 'SIGTERM');
         } catch (error) {
-          this.logger?.warn(`[${this.getCliToolName()}] SIGTERM failed:`, error as Error);
+          this.logger?.warn(`[${this.getCliToolName()}] SIGTERM failed:`, error instanceof Error ? error : new Error(String(error)));
         }
 
         // Kill the entire process group
@@ -1286,7 +1291,7 @@ export abstract class AbstractCliManager extends EventEmitter {
         // Force kill
         try {
           process.kill(pid, 'SIGKILL');
-        } catch (error) {
+        } catch {
           // Process might already be dead
         }
 
@@ -1301,7 +1306,7 @@ export abstract class AbstractCliManager extends EventEmitter {
           try {
             await this.execAsync(`kill -9 ${childPid}`);
             this.logger?.verbose(`[${this.getCliToolName()}] Killed descendant process ${childPid}`);
-          } catch (error) {
+          } catch {
             this.logger?.verbose(`[${this.getCliToolName()}] Process ${childPid} already terminated`);
           }
         }
@@ -1309,7 +1314,7 @@ export abstract class AbstractCliManager extends EventEmitter {
         // Final cleanup attempt
         try {
           await this.execAsync(`pkill -9 -P ${pid}`);
-        } catch (error) {
+        } catch {
           // Ignore errors - processes might already be dead
         }
       }
@@ -1331,10 +1336,10 @@ export abstract class AbstractCliManager extends EventEmitter {
           type: 'stderr',
           data: `\n[WARNING] Failed to terminate ${remainingPids.length} child process${remainingPids.length > 1 ? 'es' : ''}: ${processReport}\nPlease manually kill these processes.\n`,
           timestamp: new Date()
-        } as CliOutputEvent);
+        });
       }
     } catch (error) {
-      this.logger?.error(`[${this.getCliToolName()}] Error in killProcessTree:`, error as Error);
+      this.logger?.error(`[${this.getCliToolName()}] Error in killProcessTree:`, error instanceof Error ? error : new Error(String(error)));
       success = false;
     }
 
@@ -1344,7 +1349,7 @@ export abstract class AbstractCliManager extends EventEmitter {
       if (cliProcess) {
         cliProcess.process.kill();
       }
-    } catch (error) {
+    } catch {
       // Process might already be dead
     }
 

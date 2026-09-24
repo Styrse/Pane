@@ -11,41 +11,18 @@ export function formatForDatabase(date: Date = new Date()): string {
   return date.toISOString();
 }
 
+function toDate(timestamp: string | Date): Date {
+  return timestamp instanceof Date ? timestamp : new Date(timestamp);
+}
+
 /**
  * Formats a timestamp for display to users
  * @param timestamp - The timestamp string from database or Date object
  * @returns Localized time string
  */
 export function formatForDisplay(timestamp: string | Date): string {
-  const date = typeof timestamp === 'string' ? new Date(timestamp) : timestamp;
+  const date = toDate(timestamp);
   return date.toLocaleTimeString();
-}
-
-/**
- * Formats a timestamp with full date and time for display
- * @param timestamp - The timestamp string from database or Date object
- * @returns Localized date and time string
- */
-export function formatFullDateTime(timestamp: string | Date): string {
-  const date = typeof timestamp === 'string' ? new Date(timestamp) : timestamp;
-  return date.toLocaleString();
-}
-
-/**
- * Parses a database timestamp string to a Date object
- * @param timestamp - The timestamp string from database
- * @returns Date object
- */
-export function parseTimestamp(timestamp: string): Date {
-  return new Date(timestamp);
-}
-
-/**
- * Gets the current timestamp in ISO format for database storage
- * @returns ISO 8601 formatted string
- */
-export function getCurrentTimestamp(): string {
-  return new Date().toISOString();
 }
 
 /**
@@ -55,18 +32,8 @@ export function getCurrentTimestamp(): string {
  */
 export function isValidTimestamp(timestamp: string | Date | null | undefined): boolean {
   if (!timestamp) return false;
-  const date = typeof timestamp === 'string' ? new Date(timestamp) : timestamp;
+  const date = toDate(timestamp);
   return !isNaN(date.getTime());
-}
-
-/**
- * Converts a timestamp to UTC
- * @param timestamp - The timestamp to convert
- * @returns UTC ISO string
- */
-export function toUTC(timestamp: string | Date): string {
-  const date = typeof timestamp === 'string' ? new Date(timestamp) : timestamp;
-  return date.toISOString();
 }
 
 /**
@@ -76,8 +43,8 @@ export function toUTC(timestamp: string | Date): string {
  * @returns Duration in milliseconds
  */
 export function getTimeDifference(start: string | Date, end: string | Date = new Date()): number {
-  const startDate = typeof start === 'string' ? new Date(start) : start;
-  const endDate = typeof end === 'string' ? new Date(end) : end;
+  const startDate = toDate(start);
+  const endDate = toDate(end);
   return endDate.getTime() - startDate.getTime();
 }
 

@@ -22,6 +22,7 @@ export function ShortcutsSettings({ persistence, onDirtyChange, onShowKeyboardSh
   const [shortcuts, setShortcuts] = useState<TerminalShortcut[]>(persistedShortcuts);
   const dirty = JSON.stringify(shortcuts) !== persistedKey;
 
+  // SAFETY: App-owned storage writes this value through the matching typed serializer.
   useEffect(() => setShortcuts(JSON.parse(persistedKey) as TerminalShortcut[]), [persistedKey]);
   useEffect(() => onDirtyChange(dirty), [dirty, onDirtyChange]);
   useEffect(() => () => onDirtyChange(false), [onDirtyChange]);
@@ -81,6 +82,23 @@ export function ShortcutsSettings({ persistence, onDirtyChange, onShowKeyboardSh
         >
           View all Pane keyboard shortcuts
         </button>
+      </SettingsSection>
+      <SettingsSection
+        title="Terminal key reporting"
+        description="How Pane encodes keystrokes for the program running inside a terminal."
+      >
+        <SettingRow
+          settingId="kitty-keyboard"
+          label="Kitty keyboard protocol"
+          description="Lets a program ask for precise key reporting: key releases and repeats as distinct events, and modifier keys such as Ctrl or Shift reported on their own. Games and full-screen apps need it to tell a held key from a tapped one. Most terminal programs never ask, and are unaffected either way, so this changes nothing for an ordinary shell or for CLI agents that do not request it. Turn it off if a program misreads your keystrokes after asking for the protocol."
+          saveState={persistence.saveStates['kitty-keyboard']}
+        >
+          <ImmediateToggle
+            label="Kitty keyboard protocol"
+            value={config.kittyKeyboardEnabled !== false}
+            onSave={(value) => persistence.saveConfig('kitty-keyboard', { kittyKeyboardEnabled: value })}
+          />
+        </SettingRow>
       </SettingsSection>
       <SettingsSection title="Terminal snippets">
         <SettingRow

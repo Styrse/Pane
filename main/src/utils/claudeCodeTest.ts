@@ -4,13 +4,14 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { getShellPath, findExecutableInPath } from './shellPath';
+import { boundary, decodeBoundary } from '../../../shared/validation/boundaryDecoder';
 
 const execAsync = promisify(exec);
 
 /**
  * Get augmented PATH that includes common installation directories
  */
-export function getAugmentedPath(): string {
+function getAugmentedPath(): string {
   const platform = os.platform();
   const homeDir = os.homedir();
   const pathSeparator = platform === 'win32' ? ';' : ':';
@@ -71,7 +72,7 @@ export function getAugmentedPath(): string {
               paths.push(fullPath);
             }
           }
-        } catch (e) {
+        } catch {
           // Ignore errors reading directories
         }
       }
@@ -86,7 +87,7 @@ export function getAugmentedPath(): string {
 /**
  * Find the claude executable in common locations
  */
-export async function findClaudeExecutable(): Promise<string | null> {
+async function findClaudeExecutable(): Promise<string | null> {
   const platform = os.platform();
   const executableName = platform === 'win32' ? 'claude.exe' : 'claude';
   const augmentedPath = getAugmentedPath();
@@ -123,7 +124,7 @@ export async function testClaudeCodeAvailability(customClaudePath?: string): Pro
       try {
         await fs.promises.access(customClaudePath, fs.constants.X_OK);
         claudePath = customClaudePath;
-      } catch (error) {
+      } catch {
         console.error(`[ClaudeTest] Custom Claude path is not accessible or not executable: ${customClaudePath}`);
         return { 
           available: false, 
@@ -201,13 +202,26 @@ export async function testClaudeCodeInDirectory(directory: string, customClaudeP
     return { success: true, output: stdout + stderr };
   } catch (error) {
     console.error(`[ClaudeTest] Directory test failed: ${error instanceof Error ? error.message : error}`);
-    if (error instanceof Error && 'code' in error) {
-      console.error(`[ClaudeTest] Error code: ${(error as NodeJS.ErrnoException).code}`);
+    const processError = (() => {
+      try {
+        return decodeBoundary(error, boundary.object({
+          code: boundary.optional(boundary.string),
+          stdout: boundary.optional(boundary.string),
+          stderr: boundary.optional(boundary.string),
+        }));
+      } catch {
+        return { code: undefined, stdout: undefined, stderr: undefined };
+      }
+    })();
+    if (processError.code) {
+      console.error(`[ClaudeTest] Error code: ${processError.code}`);
     }
     return { 
       success: false, 
       error: error instanceof Error ? error.message : 'Unknown error testing Claude Code in directory',
-      output: error instanceof Error && 'stdout' in error ? String((error as Error & {stdout?: string; stderr?: string}).stdout || '') + String((error as Error & {stdout?: string; stderr?: string}).stderr || '') : undefined
+      output: processError.stdout || processError.stderr
+        ? `${processError.stdout ?? ''}${processError.stderr ?? ''}`
+        : undefined
     };
   }
 }

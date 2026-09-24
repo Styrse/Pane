@@ -1,40 +1,40 @@
+import type { JsonObject } from '../../../shared/validation/boundaryDecoder';
+
 // Claude message content types
-export interface TextContent {
+interface TextContent {
   type: 'text';
   text: string;
 }
 
-export interface ToolUseContent {
+interface ToolUseContent {
   type: 'tool_use';
   id: string;
   name: string;
-  input: Record<string, unknown>;
+  input: JsonObject;
 }
 
-export interface ToolResultContent {
+interface ToolResultContent {
   type: 'tool_result';
   tool_use_id: string;
   content: string;
   is_error?: boolean;
 }
 
-export type MessageContent = TextContent | ToolUseContent | ToolResultContent;
+type MessageContent = TextContent | ToolUseContent | ToolResultContent;
 
 // Tool definition interface
-export interface ToolDefinition {
+interface ToolDefinition {
   name: string;
   description?: string;
-  input_schema?: Record<string, unknown>;
-  [key: string]: unknown;
+  input_schema?: JsonObject;
 }
 
 // MCP server definition interface  
-export interface McpServerDefinition {
+interface McpServerDefinition {
   name: string;
   command?: string;
   args?: string[];
   env?: Record<string, string>;
-  [key: string]: unknown;
 }
 
 // JSON message structure from Claude
@@ -43,13 +43,12 @@ export interface ClaudeJsonMessage {
   type: 'user' | 'assistant' | 'system' | 'tool_use' | 'tool_result' | 'result' | 'thinking';
   role?: 'user' | 'assistant' | 'system';
   content?: string | MessageContent[];
-  message?: { 
+  message?: {
     content?: string | MessageContent[];
-    [key: string]: unknown;
   };
   timestamp: string;
   name?: string;
-  input?: Record<string, unknown>;
+  input?: JsonObject;
   tool_use_id?: string;
   parent_tool_use_id?: string;
   session_id?: string;
@@ -71,7 +70,6 @@ export interface ClaudeJsonMessage {
   num_turns?: number;
   cost_usd?: number;
   thinking?: string;
-  [key: string]: unknown;
 }
 
 export interface Session {
@@ -94,6 +92,7 @@ export interface Session {
   permissionMode?: 'approve' | 'ignore';
   runStartedAt?: string;
   isMainRepo?: boolean;
+  worktreeOwnership?: 'pane' | 'external';
   displayOrder?: number;
   isFavorite?: boolean;
   favoritePinnedAt?: string;
@@ -104,6 +103,7 @@ export interface Session {
   baseCommit?: string;
   baseBranch?: string;
   activateOnCreate?: boolean;
+  createDefaultTerminalOnCreate?: boolean;
 }
 
 export interface GitStatus {
@@ -194,28 +194,21 @@ export interface GitErrorDetails {
 // Import Folder from the proper types file
 import type { Folder } from './folder';
 
-// FolderWithProjectId is just an alias for Folder since it already has projectId
-export type FolderWithProjectId = Folder;
-
 export type ContextMenuPayload = Session | Folder;
 
 // Version update info interface
-export interface VersionUpdateInfo {
-  version: string;
+export interface VersionInfo {
   current: string;
   latest: string;
   hasUpdate: boolean;
   releaseUrl?: string;
   releaseNotes?: string;
   downloadUrl?: string;
-  mandatory?: boolean;
 }
 
-// Permission request input types  
-export interface PermissionInput {
-  tool_name?: string;
-  args?: Record<string, unknown>;
-  [key: string]: unknown;
+export interface VersionUpdateInfo extends VersionInfo {
+  version: string;
+  mandatory?: boolean;
 }
 
 // Attachment types for Claude Code config

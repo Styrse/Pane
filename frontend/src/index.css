@@ -30,6 +30,19 @@ html, body, #root {
 body {
   overflow: hidden;
   font-family: var(--font-family-sans);
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Light surfaces read crisper with the platform's default (subpixel) smoothing. */
+body.light,
+body.light-rounded,
+body.folio,
+body.newsprint,
+body.haar,
+body.low-fatigue,
+body.high-legibility {
+  -webkit-font-smoothing: auto;
 }
 
 /* Body colors using design tokens */
@@ -62,10 +75,58 @@ body.light-rounded {
     linear-gradient(180deg, #f7fafc 0%, #eef3f7 100%);
 }
 
-/* Scrollbars stay functional but visually hidden */
+body.synthwave {
+  background:
+    radial-gradient(circle at top center, rgba(255, 95, 215, 0.10), transparent 30%),
+    radial-gradient(circle at top right, rgba(61, 227, 255, 0.07), transparent 26%),
+    linear-gradient(180deg, #120b1f 0%, #0e0819 100%);
+}
+
+body.tokyo-rain {
+  background:
+    radial-gradient(circle at top center, rgba(255, 79, 154, 0.09), transparent 28%),
+    radial-gradient(circle at top right, rgba(92, 179, 255, 0.08), transparent 26%),
+    linear-gradient(180deg, #0d1120 0%, #0a0e1b 100%);
+}
+
+body.amber-crt {
+  background:
+    radial-gradient(ellipse at top center, rgba(255, 176, 0, 0.05), transparent 36%),
+    linear-gradient(180deg, #140f08 0%, #100c06 100%);
+}
+
+body.teletype {
+  background:
+    radial-gradient(circle at top center, rgba(181, 69, 27, 0.05), transparent 30%),
+    linear-gradient(180deg, #f5efe2 0%, #ece4d2 100%);
+}
+
+/* Haar — a fog bank thins toward the top of the frame */
+body.haar {
+  background:
+    radial-gradient(circle at top center, rgba(255, 255, 255, 0.55), transparent 34%),
+    linear-gradient(180deg, #f1f4f7 0%, #e6ebf0 100%);
+}
+
+/* Abyss — faint bioluminescent bloom rising from the deep */
+body.abyss {
+  background:
+    radial-gradient(circle at bottom center, rgba(77, 184, 171, 0.10), transparent 36%),
+    linear-gradient(180deg, #07111c 0%, #050c15 100%);
+}
+
+/* Understory — light filtering down through a canopy onto bark */
+body.understory {
+  background:
+    radial-gradient(circle at top center, rgba(211, 221, 168, 0.07), transparent 32%),
+    linear-gradient(180deg, #1e1914 0%, #131911 100%);
+}
+
+/* Scrollbars: 6px overlay-style, thumb visible only while the surface is
+   hovered, so scrollable regions read as flat until you reach for them. */
 ::-webkit-scrollbar {
-  width: 0;
-  height: 0;
+  width: 6px;
+  height: 6px;
 }
 
 ::-webkit-scrollbar-track {
@@ -74,18 +135,19 @@ body.light-rounded {
 
 ::-webkit-scrollbar-thumb {
   background: transparent;
-  border-radius: 0;
-  transition: none;
+  border-radius: 3px;
+}
+
+:hover::-webkit-scrollbar-thumb {
+  background: var(--color-border-hover);
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: transparent;
+  background: var(--color-text-muted);
 }
 
-/* Firefox scrollbar support */
-* {
-  scrollbar-width: none;
-  scrollbar-color: transparent transparent;
+::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 /* Tab indicator — default fill mode */
@@ -98,12 +160,29 @@ body.light-rounded {
 :root.ember .panel-tab-bar [aria-selected="true"],
 :root.night-owl .panel-tab-bar [aria-selected="true"],
 :root.night-owl-oled .panel-tab-bar [aria-selected="true"],
-:root.terracotta .panel-tab-bar [aria-selected="true"] {
+:root.terracotta .panel-tab-bar [aria-selected="true"],
+:root.synthwave .panel-tab-bar [aria-selected="true"],
+:root.acid .panel-tab-bar [aria-selected="true"],
+:root.tokyo-rain .panel-tab-bar [aria-selected="true"],
+:root.folio .panel-tab-bar [aria-selected="true"],
+:root.newsprint .panel-tab-bar [aria-selected="true"],
+:root.walnut .panel-tab-bar [aria-selected="true"],
+:root.amber-crt .panel-tab-bar [aria-selected="true"],
+:root.teletype .panel-tab-bar [aria-selected="true"],
+:root.dot-matrix .panel-tab-bar [aria-selected="true"],
+:root.abyss .panel-tab-bar [aria-selected="true"],
+:root.understory .panel-tab-bar [aria-selected="true"],
+:root.colorblind-safe .panel-tab-bar [aria-selected="true"],
+:root.low-fatigue .panel-tab-bar [aria-selected="true"],
+:root.high-legibility .panel-tab-bar [aria-selected="true"] {
   background-color: transparent;
   box-shadow: inset 0 calc(-1 * var(--tab-indicator-height, 4px)) 0 0 var(--tab-indicator-color, #3574F0);
 }
 
-/* Theme-aware structural shells */
+/* Theme-aware structural shells.
+   Folio, Newsprint and Walnut are intentionally absent from the shell selector
+   lists below — the print themes use the flat base layout with rule-line
+   borders (see effects.css). */
 .pane-main-layout {
   padding: var(--app-frame-padding);
   gap: var(--app-frame-gap);
@@ -112,274 +191,82 @@ body.light-rounded {
 .pane-sidebar-slot,
 .pane-session-shell,
 .pane-session-content,
+.pane-project-content,
+.pane-center-column,
 .pane-editor-stage,
 .pane-terminal-shell-body,
 .pane-detail-panel-inner {
   min-height: 0;
+  min-width: 0;
 }
 
 .pane-session-shell {
   min-width: 0;
 }
 
-:root.dusk .pane-sidebar-shell,
-:root.forge .pane-sidebar-shell,
-:root.ember .pane-sidebar-shell,
-:root.aurora .pane-sidebar-shell,
-:root.night-owl .pane-sidebar-shell,
-:root.night-owl-oled .pane-sidebar-shell,
-:root.terracotta .pane-sidebar-shell,
-:root.light-rounded .pane-sidebar-shell {
-  border: 3px solid var(--color-border-primary);
-  border-radius: var(--app-shell-radius);
-  overflow: hidden;
-  box-shadow: var(--panel-shell-shadow);
+.pane-outer-resize-separator {
+  position: absolute;
+  z-index: 20;
+  touch-action: none;
+  outline: none;
 }
 
-:root.dusk .pane-session-shell,
-:root.forge .pane-session-shell,
-:root.ember .pane-session-shell,
-:root.aurora .pane-session-shell,
-:root.night-owl .pane-session-shell,
-:root.night-owl-oled .pane-session-shell,
-:root.terracotta .pane-session-shell,
-:root.light-rounded .pane-session-shell {
-  gap: var(--panel-shell-gap);
+.pane-outer-resize-separator-vertical {
+  top: 0;
+  bottom: 0;
+  left: -4px;
+  width: 8px;
+  cursor: col-resize;
 }
 
-:root.dusk .panel-tab-bar,
-:root.forge .panel-tab-bar,
-:root.ember .panel-tab-bar,
-:root.aurora .panel-tab-bar,
-:root.night-owl .panel-tab-bar,
-:root.night-owl-oled .panel-tab-bar,
-:root.terracotta .panel-tab-bar,
-:root.light-rounded .panel-tab-bar {
-  border: 1px solid var(--color-border-primary);
-  border-radius: var(--panel-shell-radius);
-  overflow: hidden;
-  box-shadow: var(--panel-shell-shadow);
+.pane-outer-resize-separator-horizontal {
+  top: -4px;
+  right: 0;
+  left: 0;
+  height: 8px;
+  cursor: row-resize;
 }
 
-:root.dusk .pane-editor-stage,
-:root.forge .pane-editor-stage,
-:root.ember .pane-editor-stage,
-:root.aurora .pane-editor-stage,
-:root.night-owl .pane-editor-stage,
-:root.night-owl-oled .pane-editor-stage,
-:root.terracotta .pane-editor-stage,
-:root.light-rounded .pane-editor-stage {
-  border: 1px solid var(--color-border-primary);
-  border-radius: var(--panel-shell-radius);
-  overflow: hidden;
-  box-shadow: var(--panel-shell-shadow);
+.pane-outer-resize-separator-rule {
+  position: absolute;
+  background: var(--color-border-secondary);
 }
 
-:root.dusk .pane-terminal-dock,
-:root.forge .pane-terminal-dock,
-:root.ember .pane-terminal-dock,
-:root.aurora .pane-terminal-dock,
-:root.night-owl .pane-terminal-dock,
-:root.night-owl-oled .pane-terminal-dock,
-:root.terracotta .pane-terminal-dock,
-:root.light-rounded .pane-terminal-dock {
-  margin-top: var(--panel-shell-gap);
-  border: 1px solid var(--color-border-primary);
-  border-radius: var(--panel-shell-radius);
-  overflow: hidden;
-  box-shadow: var(--panel-shell-shadow);
+.pane-outer-resize-separator-vertical .pane-outer-resize-separator-rule {
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
 }
 
-:root.dusk .pane-terminal-rail,
-:root.forge .pane-terminal-rail,
-:root.ember .pane-terminal-rail,
-:root.aurora .pane-terminal-rail,
-:root.night-owl .pane-terminal-rail,
-:root.night-owl-oled .pane-terminal-rail,
-:root.terracotta .pane-terminal-rail,
-:root.light-rounded .pane-terminal-rail,
-:root.dusk .pane-detail-panel,
-:root.forge .pane-detail-panel,
-:root.ember .pane-detail-panel,
-:root.aurora .pane-detail-panel,
-:root.night-owl .pane-detail-panel,
-:root.night-owl-oled .pane-detail-panel,
-:root.terracotta .pane-detail-panel,
-:root.light-rounded .pane-detail-panel {
-  border-color: transparent !important;
-  background: transparent;
+.pane-outer-resize-separator-horizontal .pane-outer-resize-separator-rule {
+  top: 50%;
+  right: 0;
+  left: 0;
+  height: 1px;
+  transform: translateY(-50%);
 }
 
-:root.dusk .pane-terminal-rail-shell,
-:root.forge .pane-terminal-rail-shell,
-:root.ember .pane-terminal-rail-shell,
-:root.aurora .pane-terminal-rail-shell,
-:root.night-owl .pane-terminal-rail-shell,
-:root.night-owl-oled .pane-terminal-rail-shell,
-:root.terracotta .pane-terminal-rail-shell,
-:root.light-rounded .pane-terminal-rail-shell,
-:root.dusk .pane-detail-panel-inner,
-:root.forge .pane-detail-panel-inner,
-:root.ember .pane-detail-panel-inner,
-:root.aurora .pane-detail-panel-inner,
-:root.night-owl .pane-detail-panel-inner,
-:root.night-owl-oled .pane-detail-panel-inner,
-:root.terracotta .pane-detail-panel-inner,
-:root.light-rounded .pane-detail-panel-inner {
-  border: 1px solid var(--color-border-primary);
-  border-radius: var(--panel-shell-radius);
-  overflow: hidden;
-  box-shadow: var(--panel-shell-shadow);
+.pane-outer-resize-separator:hover .pane-outer-resize-separator-rule,
+.pane-outer-resize-separator:active .pane-outer-resize-separator-rule,
+.pane-outer-resize-separator:focus-visible .pane-outer-resize-separator-rule {
+  background: var(--color-border-hover);
 }
 
-:root.dusk .pane-terminal-rail-shell,
-:root.forge .pane-terminal-rail-shell,
-:root.ember .pane-terminal-rail-shell,
-:root.aurora .pane-terminal-rail-shell,
-:root.night-owl .pane-terminal-rail-shell,
-:root.night-owl-oled .pane-terminal-rail-shell,
-:root.terracotta .pane-terminal-rail-shell,
-:root.light-rounded .pane-terminal-rail-shell,
-:root.dusk .pane-detail-panel-vertical .pane-detail-panel-inner,
-:root.forge .pane-detail-panel-vertical .pane-detail-panel-inner,
-:root.ember .pane-detail-panel-vertical .pane-detail-panel-inner,
-:root.aurora .pane-detail-panel-vertical .pane-detail-panel-inner,
-:root.night-owl .pane-detail-panel-vertical .pane-detail-panel-inner,
-:root.night-owl-oled .pane-detail-panel-vertical .pane-detail-panel-inner,
-:root.terracotta .pane-detail-panel-vertical .pane-detail-panel-inner,
-:root.light-rounded .pane-detail-panel-vertical .pane-detail-panel-inner {
-  margin-left: var(--panel-shell-gap);
+.pane-outer-resize-separator:focus-visible {
+  box-shadow: 0 0 0 2px var(--color-focus-ring-subtle);
 }
 
-:root.dusk .pane-detail-panel-horizontal .pane-detail-panel-inner,
-:root.forge .pane-detail-panel-horizontal .pane-detail-panel-inner,
-:root.ember .pane-detail-panel-horizontal .pane-detail-panel-inner,
-:root.aurora .pane-detail-panel-horizontal .pane-detail-panel-inner,
-:root.night-owl .pane-detail-panel-horizontal .pane-detail-panel-inner,
-:root.night-owl-oled .pane-detail-panel-horizontal .pane-detail-panel-inner,
-:root.terracotta .pane-detail-panel-horizontal .pane-detail-panel-inner,
-:root.light-rounded .pane-detail-panel-horizontal .pane-detail-panel-inner {
-  margin-top: var(--panel-shell-gap);
+/* Flat chrome. Every theme shares one edge-to-edge layout: surfaces are
+   separated by a single hairline and a tonal step, never by cards, radii or
+   shadows. Theme personality lives in colour tokens, not in the frame. */
+.pane-sidebar-shell {
+  border-right: var(--border-hairline) solid var(--color-border-primary);
 }
 
-:root.dusk .panel-tab-bar,
-:root.dusk .pane-editor-stage,
-:root.dusk .pane-terminal-dock,
-:root.dusk .pane-terminal-rail-shell,
-:root.dusk .pane-detail-panel-inner {
-  border-width: 1.25px;
-  border-color: rgba(255, 255, 255, 0.16);
-  box-shadow:
-    0 10px 22px rgba(0, 0, 0, 0.22),
-    0 0 0 1px rgba(255, 255, 255, 0.03),
-    inset 0 1px 0 rgba(255, 255, 255, 0.05);
-}
-
-:root.forge .panel-tab-bar,
-:root.forge .pane-editor-stage,
-:root.forge .pane-terminal-dock,
-:root.forge .pane-terminal-rail-shell,
-:root.forge .pane-detail-panel-inner {
-  border-width: 1.25px;
-  border-color: var(--forge-gray5);
-  box-shadow:
-    0 10px 22px rgba(0, 0, 0, 0.18),
-    0 0 0 1px rgba(255, 255, 255, 0.025),
-    inset 0 1px 0 rgba(255, 255, 255, 0.035);
-}
-
-:root.night-owl .panel-tab-bar,
-:root.night-owl .pane-editor-stage,
-:root.night-owl .pane-terminal-dock,
-:root.night-owl .pane-terminal-rail-shell,
-:root.night-owl .pane-detail-panel-inner,
-:root.night-owl-oled .panel-tab-bar,
-:root.night-owl-oled .pane-editor-stage,
-:root.night-owl-oled .pane-terminal-dock,
-:root.night-owl-oled .pane-terminal-rail-shell,
-:root.night-owl-oled .pane-detail-panel-inner {
-  border-width: 1.25px;
-  border-color: rgba(196, 92, 92, 0.18);
-  box-shadow:
-    0 10px 22px rgba(0, 0, 0, 0.22),
-    0 0 0 1px rgba(196, 92, 92, 0.04),
-    inset 0 1px 0 rgba(196, 92, 92, 0.06);
-}
-
-:root.terracotta .panel-tab-bar,
-:root.terracotta .pane-editor-stage,
-:root.terracotta .pane-terminal-dock,
-:root.terracotta .pane-terminal-rail-shell,
-:root.terracotta .pane-detail-panel-inner {
-  border-width: 1.25px;
-  border-color: rgba(192, 112, 80, 0.18);
-  box-shadow:
-    0 10px 22px rgba(0, 0, 0, 0.22),
-    0 0 0 1px rgba(192, 112, 80, 0.04),
-    inset 0 1px 0 rgba(192, 112, 80, 0.06);
-}
-
-:root.ember .panel-tab-bar,
-:root.ember .pane-editor-stage,
-:root.ember .pane-terminal-dock,
-:root.ember .pane-terminal-rail-shell,
-:root.ember .pane-detail-panel-inner {
-  border-width: 1.25px;
-  border-color: rgba(255, 106, 193, 0.22);
-  box-shadow:
-    0 12px 26px rgba(7, 2, 17, 0.32),
-    0 0 0 1px rgba(255, 106, 193, 0.08),
-    inset 0 1px 0 rgba(255, 214, 244, 0.08);
-}
-
-:root.aurora .panel-tab-bar,
-:root.aurora .pane-editor-stage,
-:root.aurora .pane-terminal-dock,
-:root.aurora .pane-terminal-rail-shell,
-:root.aurora .pane-detail-panel-inner {
-  border-width: 1.25px;
-  border-color: rgba(196, 167, 231, 0.2);
-  box-shadow:
-    0 12px 24px rgba(15, 12, 28, 0.24),
-    0 0 0 1px rgba(196, 167, 231, 0.06),
-    inset 0 1px 0 rgba(246, 193, 119, 0.04);
-}
-
-:root.light-rounded .panel-tab-bar,
-:root.light-rounded .pane-editor-stage,
-:root.light-rounded .pane-terminal-dock,
-:root.light-rounded .pane-terminal-rail-shell,
-:root.light-rounded .pane-detail-panel-inner {
-  border-width: 1.25px;
-  border-color: rgba(31, 35, 40, 0.1);
-  box-shadow:
-    0 8px 20px rgba(15, 23, 42, 0.06),
-    0 0 0 1px rgba(255, 255, 255, 0.6),
-    inset 0 1px 0 rgba(255, 255, 255, 0.85);
-}
-
-/* Theme-specific terminal rounding should come from shell containers first */
-:root.dusk .xterm {
-  border-radius: var(--panel-shell-radius);
-}
-
-:root.forge .xterm {
-  border-radius: var(--panel-shell-radius);
-}
-
-:root.night-owl .xterm,
-:root.night-owl-oled .xterm {
-  border-radius: var(--panel-shell-radius);
-}
-
-:root.terracotta .xterm {
-  border-radius: var(--panel-shell-radius);
-}
-
-:root.ember .xterm,
-:root.aurora .xterm,
-:root.light-rounded .xterm {
-  border-radius: var(--panel-shell-radius);
+.panel-tab-bar {
+  border-bottom: var(--border-hairline) solid var(--color-border-primary);
 }
 
 /* Hide scrollbar completely */
@@ -426,6 +313,187 @@ body.light-rounded {
 
 .scrollbar-thin::-webkit-scrollbar-thumb:hover {
   background-color: transparent;
+}
+
+/* ---------------------------------------------------------------------------
+   Motion primitives
+   --------------------------------------------------------------------------- */
+
+/* Press feedback. The interface confirming it heard the pointer, before any
+   actual work has happened, is the cheapest way for an app to feel fast. The
+   press is quicker than the release on purpose: the acknowledgement lands under
+   the finger, and the settle back is allowed to be the leisurely half.
+   This also replaces `transition: all`, which animated layout properties off the
+   compositor every time a button changed colour. */
+.pane-press {
+  transition-property: background-color, border-color, color, box-shadow, opacity, transform;
+  transition-duration: var(--duration-press-release);
+  transition-timing-function: var(--ease-out-strong);
+}
+
+.pane-press:active:not(:disabled):not([aria-disabled='true']) {
+  transform: scale(0.97);
+  transition-duration: var(--duration-press);
+}
+
+/* `.pane-reveal` marks a width/height reveal — the sidebar slot, the terminal
+   rail, the terminal dock. It carries no styles of its own: the transition lives
+   on the element as Tailwind utilities, and this is the handle reduced motion
+   uses to collapse all three at once. Deliberately not `will-change`, which
+   cannot promote a layout property and would only cost. */
+
+/* Press feedback for touch. `.pane-press` assumes a pointer that can hover, so
+   its colour half does the confirming and the scale is a bonus. A finger has no
+   hover state at all: the scale is the entire acknowledgement, and it competes
+   with the grey rectangle mobile browsers flash over a tapped control by
+   default — which is the wrong shape on a rounded button and arrives on the
+   browser's schedule, not the app's. So this suppresses that and takes the job
+   over. Same curve and durations as `.pane-press`; reduced motion is handled
+   there, since this composes with it rather than replacing it. */
+.pane-press-touch {
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+/* `.pane-joystick-return` marks the scroll joystick's thumb. The transition is
+   applied inline and only on release — never while a finger is down, where any
+   easing would put the thumb behind the finger — so this class exists purely as
+   the handle reduced motion switches off. */
+
+/* ---------------------------------------------------------------------------
+   Edge-anchored surfaces (Remote Pane PWA)
+
+   The drawer and the create-pane sheet are pinned to a screen edge, and the
+   whole of their entrance is the claim that they came from it. Offsets are
+   percentages rather than pixels so a surface starts exactly off its own edge
+   on any handset.
+
+   These are plain classes rather than Tailwind utilities because the create
+   sheet changes what it *is* at the `sm` breakpoint — a sheet rising off the
+   bottom of a phone, a centred dialog in a browser window — and that is a
+   different animation, not a different value. A responsive utility can swap a
+   duration; it cannot swap the keyframes.
+   --------------------------------------------------------------------------- */
+
+@keyframes pane-sheet-enter {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+
+@keyframes pane-sheet-exit {
+  from { transform: translateY(0); }
+  to { transform: translateY(100%); }
+}
+
+@keyframes pane-drawer-enter {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
+}
+
+@keyframes pane-drawer-exit {
+  from { transform: translateX(0); }
+  to { transform: translateX(-100%); }
+}
+
+@keyframes pane-scrim-enter {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes pane-scrim-exit {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+/* The status dot while the PWA is trying to find its host again. A ring expands
+   out of the dot and fades, which reads as reaching rather than as an error —
+   the dot itself never moves or dims, so the state stays legible at a glance
+   and the motion is pure addition. Slow on purpose: this is ambient, not an
+   interaction, and the one thing it must not do is look urgent. */
+@keyframes pane-status-reaching {
+  0% { opacity: 0.55; transform: scale(1); }
+  70% { opacity: 0; transform: scale(2.6); }
+  100% { opacity: 0; transform: scale(2.6); }
+}
+
+/* Keyed off Radix's own `data-state` rather than a class the component has to
+   toggle: Radix holds the node mounted while a CSS animation on it is still
+   running, so the exit is the one animation React does not have to be told
+   about. */
+.pane-sheet[data-state='open'] { animation: pane-sheet-enter var(--duration-sheet) var(--ease-drawer); }
+.pane-sheet[data-state='closed'] { animation: pane-sheet-exit var(--duration-sheet-exit) var(--ease-drawer); }
+.pane-drawer[data-state='open'] { animation: pane-drawer-enter var(--duration-sheet) var(--ease-drawer); }
+.pane-drawer[data-state='closed'] { animation: pane-drawer-exit var(--duration-sheet-exit) var(--ease-drawer); }
+.pane-scrim[data-state='open'] { animation: pane-scrim-enter var(--duration-sheet) var(--ease-drawer); }
+.pane-scrim[data-state='closed'] { animation: pane-scrim-exit var(--duration-sheet-exit) var(--ease-drawer); }
+
+.pane-status-reaching { animation: pane-status-reaching 1.8s var(--ease-out-strong) infinite; }
+
+/* Above the `sm` breakpoint (640px — Tailwind's default, which is where the
+   create sheet's own `sm:` classes re-centre it) the sheet stops being a sheet.
+   It is a dialog in a browser window, so it gets exactly the entrance #480 gave
+   the desktop app's dialogs, and the centring translate has to be carried
+   through every keyframe or the animation would drop the surface into the
+   corner for its duration. */
+@media (min-width: 640px) {
+  @keyframes pane-sheet-enter-centered {
+    from { opacity: 0; transform: translate(-50%, -50%) scale(0.97); }
+    to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  }
+
+  @keyframes pane-sheet-exit-centered {
+    from { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+    to { opacity: 0; transform: translate(-50%, -50%) scale(0.97); }
+  }
+
+  .pane-sheet[data-state='open'] { animation: pane-sheet-enter-centered var(--duration-modal) var(--ease-out-strong); }
+  .pane-sheet[data-state='closed'] { animation: pane-sheet-exit-centered var(--duration-sheet-exit) var(--ease-out-strong); }
+}
+
+/* ---------------------------------------------------------------------------
+   Reduced motion
+
+   Fewer and gentler, not none. Opacity and colour still carry meaning and cost
+   nothing vestibular, so they stay; movement — translate, scale, the layout
+   reveals — collapses. Spinners and pulses stay too: they are how the app says
+   "busy", and removing them would remove information rather than motion.
+   --------------------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  /* No scale under the pointer; the colour change still confirms the press. */
+  .pane-press:active:not(:disabled):not([aria-disabled='true']) {
+    transform: none;
+  }
+
+  /* "Still looking for the host" is information, so the reaching ring keeps
+     running — it just breathes in place instead of expanding. Same rule that
+     keeps the spinners and the typing dots. */
+  .pane-status-reaching {
+    animation: pane-status-breathe 1.8s ease-in-out infinite;
+  }
+
+  /* Decorative loops that translate. The bar and the accent stay visible; only
+     the sweep stops. */
+  .animate-slide-progress,
+  .animate-status-working {
+    animation: none;
+  }
+
+  /* The typing indicator keeps its colour cycle and loses the scale pulse. */
+  .animate-typing-dot {
+    animation: typing-dots-color 1.5s ease-in-out infinite;
+  }
+}
+
+@keyframes pane-status-breathe {
+  0%, 100% { opacity: 0.45; transform: scale(1); }
+  50% { opacity: 0.1; transform: scale(1); }
+}
+
+@keyframes typing-dots-color {
+  0%, 20% { color: rgb(96 165 250); }
+  50% { color: rgb(167 139 250); }
+  100% { color: rgb(96 165 250); }
 }
 
 /* Custom animations for the working indicator */
@@ -538,21 +606,6 @@ body.light-rounded {
 }
 
 /* Custom animations for UX improvements */
-@keyframes fadeIn {
-  0% {
-    opacity: 0;
-    transform: scale(0.95);
-  }
-  100% {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
-
-.animate-fadeIn {
-  animation: fadeIn 0.3s ease-out;
-}
-
 @keyframes slideDown {
   0% {
     opacity: 0;
@@ -790,12 +843,132 @@ body.light-rounded {
   --vscode-editorWidget-foreground: #e6d0be !important;
 }
 
+/* Synthwave theme overrides — violet-black editor */
+:root.synthwave {
+  --vscode-editor-background: #0b0714 !important;
+  --vscode-editor-foreground: #f1eafc !important;
+  --vscode-editorWidget-background: #0b0714 !important;
+  --vscode-editorWidget-foreground: #f1eafc !important;
+}
+
+/* Acid Terminal theme overrides — charcoal-black editor */
+:root.acid {
+  --vscode-editor-background: #0a0b0a !important;
+  --vscode-editor-foreground: #eaf2ea !important;
+  --vscode-editorWidget-background: #0a0b0a !important;
+  --vscode-editorWidget-foreground: #eaf2ea !important;
+}
+
+/* Tokyo Rain theme overrides — blue-black editor */
+:root.tokyo-rain {
+  --vscode-editor-background: #080b16 !important;
+  --vscode-editor-foreground: #e6ebf4 !important;
+  --vscode-editorWidget-background: #080b16 !important;
+  --vscode-editorWidget-foreground: #e6ebf4 !important;
+}
+
+/* Amber CRT theme overrides — amber phosphor on glass */
+:root.amber-crt {
+  --vscode-editor-background: #0c0905 !important;
+  --vscode-editor-foreground: #f0d9a8 !important;
+  --vscode-editorWidget-background: #0c0905 !important;
+  --vscode-editorWidget-foreground: #f0d9a8 !important;
+}
+
+/* Dot Matrix theme overrides — LCD green on olive-black */
+:root.dot-matrix {
+  --vscode-editor-background: #0a0d08 !important;
+  --vscode-editor-foreground: #dcecb0 !important;
+  --vscode-editorWidget-background: #0a0d08 !important;
+  --vscode-editorWidget-foreground: #dcecb0 !important;
+}
+
+/* Colorblind Safe theme overrides — neutral sunken editor */
+:root.colorblind-safe {
+  --vscode-editor-background: #0b0e12 !important;
+  --vscode-editor-foreground: #e7ebf0 !important;
+  --vscode-editorWidget-background: #0b0e12 !important;
+  --vscode-editorWidget-foreground: #e7ebf0 !important;
+}
+
+/* Low Fatigue theme overrides — warm sepia editor */
+:root.low-fatigue {
+  --vscode-editor-background: #1f1b17 !important;
+  --vscode-editor-foreground: #e6dcc7 !important;
+  --vscode-editorWidget-background: #1f1b17 !important;
+  --vscode-editorWidget-foreground: #e6dcc7 !important;
+}
+
 /* Light theme overrides */
 :root.light {
   --vscode-editor-background: #ffffff !important;
   --vscode-editor-foreground: #1f2328 !important;
   --vscode-editorWidget-background: #ffffff !important;
   --vscode-editorWidget-foreground: #1f2328 !important;
+}
+
+/* Folio theme overrides — ink on the sheet */
+:root.folio {
+  --vscode-editor-background: #fbf7ee !important;
+  --vscode-editor-foreground: #1f1b17 !important;
+  --vscode-editorWidget-background: #fbf7ee !important;
+  --vscode-editorWidget-foreground: #1f1b17 !important;
+}
+
+/* Newsprint theme overrides — graphite on cool stock */
+:root.newsprint {
+  --vscode-editor-background: #f8f8f6 !important;
+  --vscode-editor-foreground: #24272b !important;
+  --vscode-editorWidget-background: #f8f8f6 !important;
+  --vscode-editorWidget-foreground: #24272b !important;
+}
+
+/* Walnut theme overrides — parchment on walnut */
+:root.walnut {
+  --vscode-editor-background: #120e0b !important;
+  --vscode-editor-foreground: #ede1cd !important;
+  --vscode-editorWidget-background: #120e0b !important;
+  --vscode-editorWidget-foreground: #ede1cd !important;
+}
+
+/* Teletype theme overrides — ink on paper */
+:root.teletype {
+  --vscode-editor-background: #fbf8f1 !important;
+  --vscode-editor-foreground: #2b2116 !important;
+  --vscode-editorWidget-background: #fbf8f1 !important;
+  --vscode-editorWidget-foreground: #2b2116 !important;
+}
+
+/* Abyss theme overrides — trench editor colors */
+:root.abyss {
+  --vscode-editor-background: #04090f !important;
+  --vscode-editor-foreground: #dbeaf1 !important;
+  --vscode-editorWidget-background: #04090f !important;
+  --vscode-editorWidget-foreground: #dbeaf1 !important;
+}
+
+/* Understory theme overrides — moss floor editor colors */
+:root.understory {
+  --vscode-editor-background: #0d110c !important;
+  --vscode-editor-foreground: #e4e9d9 !important;
+  --vscode-editorWidget-background: #0d110c !important;
+  --vscode-editorWidget-foreground: #e4e9d9 !important;
+}
+
+/* Haar theme overrides — fog editor colors (after .light so the theme wins) */
+:root.haar {
+  --vscode-editor-background: #f5f7f9 !important;
+  --vscode-editor-foreground: #252d36 !important;
+  --vscode-editorWidget-background: #f5f7f9 !important;
+  --vscode-editorWidget-foreground: #252d36 !important;
+}
+
+/* High Legibility theme overrides — near-black on white (18.9:1) */
+:root.high-legibility {
+  --vscode-editor-background: #ffffff !important;
+  --vscode-editor-foreground: #111111 !important;
+  --vscode-editorWidget-background: #ffffff !important;
+  --vscode-editorWidget-foreground: #111111 !important;
 }
 
 /* Additional Monaco editor style overrides */
@@ -809,4 +982,163 @@ body.light-rounded {
 .monaco-editor .view-overlays,
 .monaco-editor .margin-view-overlays {
   background: transparent !important;
+}
+
+/* ==========================================================================
+   Diff view (@git-diff-view) palette overrides for the accessibility themes.
+   The library sets its colors on [data-theme] .diff-style-root; these selectors
+   are more specific so the theme wins. Add/remove tints reuse each theme's
+   success/error hue so the diff reads the same as the rest of the UI.
+   ========================================================================== */
+
+/* Colorblind Safe — Okabe-Ito bluish green (add) vs vermillion (remove) */
+:root.colorblind-safe .diff-tailwindcss-wrapper[data-theme] .diff-style-root {
+  --diff-border--: #2a323b;
+  --diff-add-content--: var(--color-diff-add-bg);
+  --diff-del-content--: var(--color-diff-del-bg);
+  --diff-add-lineNumber--: var(--color-diff-add-gutter);
+  --diff-del-lineNumber--: var(--color-diff-del-gutter);
+  --diff-add-content-highlight--: var(--color-diff-add-highlight);
+  --diff-del-content-highlight--: var(--color-diff-del-highlight);
+  --diff-plain-content--: #0b0e12;
+  --diff-expand-content--: #12161b;
+  --diff-plain-lineNumber--: #12161b;
+  --diff-expand-lineNumber--: #12161b;
+  --diff-empty-content--: #12161b;
+  --diff-plain-lineNumber-color--: #a5aeb8;
+  --diff-expand-lineNumber-color--: #a5aeb8;
+  --diff-hunk-content--: var(--color-diff-hunk-bg);
+  --diff-hunk-lineNumber--: var(--color-diff-hunk-gutter);
+  --diff-hunk-lineNumber-hover--: #56B4E9;
+  --diff-hunk-content-color--: #a5aeb8;
+  --diff-add-widget--: #0072B2;
+  --diff-add-widget-color--: #ffffff;
+}
+
+/* Low Fatigue — sage (add) vs soft brick (remove) on sepia */
+:root.low-fatigue .diff-tailwindcss-wrapper[data-theme] .diff-style-root {
+  --diff-border--: #433b33;
+  --diff-add-content--: var(--color-diff-add-bg);
+  --diff-del-content--: var(--color-diff-del-bg);
+  --diff-add-lineNumber--: var(--color-diff-add-gutter);
+  --diff-del-lineNumber--: var(--color-diff-del-gutter);
+  --diff-add-content-highlight--: var(--color-diff-add-highlight);
+  --diff-del-content-highlight--: var(--color-diff-del-highlight);
+  --diff-plain-content--: #1f1b17;
+  --diff-expand-content--: #27221d;
+  --diff-plain-lineNumber--: #27221d;
+  --diff-expand-lineNumber--: #27221d;
+  --diff-empty-content--: #27221d;
+  --diff-plain-lineNumber-color--: #b3a48c;
+  --diff-expand-lineNumber-color--: #b3a48c;
+  --diff-hunk-content--: var(--color-diff-hunk-bg);
+  --diff-hunk-lineNumber--: var(--color-diff-hunk-gutter);
+  --diff-hunk-lineNumber-hover--: #d1a54a;
+  --diff-hunk-content-color--: #b3a48c;
+  --diff-add-widget--: #d1a54a;
+  --diff-add-widget-color--: #1f1b17;
+}
+
+/* High Legibility — stronger tints and 10:1 gutter numbers */
+:root.high-legibility .diff-tailwindcss-wrapper[data-theme] .diff-style-root {
+  --diff-border--: #767676;
+  --diff-add-content--: var(--color-diff-add-bg);
+  --diff-del-content--: var(--color-diff-del-bg);
+  --diff-add-lineNumber--: var(--color-diff-add-gutter);
+  --diff-del-lineNumber--: var(--color-diff-del-gutter);
+  --diff-add-content-highlight--: var(--color-diff-add-highlight);
+  --diff-del-content-highlight--: var(--color-diff-del-highlight);
+  --diff-plain-content--: #ffffff;
+  --diff-expand-content--: #f5f5f5;
+  --diff-plain-lineNumber--: #f5f5f5;
+  --diff-expand-lineNumber--: #f5f5f5;
+  --diff-empty-content--: #f5f5f5;
+  --diff-plain-lineNumber-color--: #3b3b3b;
+  --diff-expand-lineNumber-color--: #3b3b3b;
+  --diff-hunk-content--: var(--color-diff-hunk-bg);
+  --diff-hunk-lineNumber--: var(--color-diff-hunk-gutter);
+  --diff-hunk-lineNumber-hover--: #1e40af;
+  --diff-hunk-content-color--: #262626;
+  --diff-add-widget--: #1e40af;
+  --diff-add-widget-color--: #ffffff;
+}
+
+/* ---------------------------------------------------------------------------
+   No chrome motion. Layout reveals, hover colour fades, menu/dialog entrances
+   and exits all happen instantly. The only motion left is information:
+   spinners, pulses, progress sweeps and status rings that say "busy".
+   --------------------------------------------------------------------------- */
+*, *::before, *::after {
+  transition-duration: 0s !important;
+  transition-delay: 0s !important;
+}
+
+.pane-press:active:not(:disabled):not([aria-disabled='true']) {
+  transform: none;
+}
+
+.animate-dropdown-enter,
+.animate-dropdown-enter-up,
+.animate-modal-enter,
+.animate-modal-overlay-enter,
+.animate-title-pill-enter,
+.animate-fade-in,
+.animate-sidebar-active-label,
+[class*="animate-zoom-in"],
+.pane-sheet[data-state='open'],
+.pane-sheet[data-state='closed'],
+.pane-drawer[data-state='open'],
+.pane-drawer[data-state='closed'],
+.pane-scrim[data-state='open'],
+.pane-scrim[data-state='closed'] {
+  animation: none !important;
+}
+
+/* The host is a flex row with one hosted panel: the panel fills the rail
+   instead of sizing to its content, whatever width the user drags the rail to. */
+.pane-inspector-host > * {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.pane-changes-list { container-type: inline-size; }
+
+.pane-changes-list-row {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto 18px;
+  align-items: center;
+  column-gap: 6px;
+  height: 32px;
+  padding: 0 10px 0 8px;
+  color: var(--color-text-primary);
+  cursor: default;
+}
+.pane-changes-list-row:hover { background: var(--color-surface-hover); }
+.pane-changes-list-row.is-selected { background: var(--color-surface-selected); }
+.pane-changes-list-row.is-active { box-shadow: inset 0 0 0 2px var(--color-interactive); }
+
+/* The dir prefix absorbs all truncation; the basename always renders in full. */
+.pane-changes-list-path {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+  font-size: 13px;
+  font-family: theme('fontFamily.mono');
+}
+.pane-changes-list-dir {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-muted);
+}
+.pane-changes-list-name { flex: 0 0 auto; white-space: nowrap; color: var(--color-text-primary); }
+
+.pane-changes-list-stats { color: var(--color-text-tertiary); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pane-changes-list-status { color: var(--color-text-secondary); font-size: 11px; font-weight: 600; }
+
+@container (max-width: 320px) {
+  .pane-changes-list-stats { display: none; }
+  .pane-changes-list-row { grid-template-columns: 16px minmax(0, 1fr) 18px; }
 }

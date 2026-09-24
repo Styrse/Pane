@@ -4,9 +4,10 @@ import { getPtyHostRuntime, getRuntimeConfigManager, type PtyHandleLike, type Pt
 import { getShellPath } from '../utils/shellPath';
 import { ShellDetector } from '../utils/shellDetector';
 import * as os from 'os';
-import { exec } from 'child_process';
+import { exec, execSync } from 'child_process';
 import { promisify } from 'util';
 import { getGitAttributionEnv } from '../utils/attribution';
+import { inheritedProcessEnv } from '../utils/inheritedProcessEnv';
 
 /**
  * IPty-compatible shim over a ptyHost `PtyHandle`.
@@ -54,7 +55,7 @@ class TerminalSessionPtyShim implements pty.IPty {
   resize(columns: number, rows: number): void {
     this.cols = columns;
     this.rows = rows;
-    this.handle.resize(columns, rows).catch((err: unknown) => {
+    this.handle.resize(columns, rows).catch((err: Error) => {
       console.warn('[ptyHost] terminal-session resize failed', err);
     });
   }
@@ -64,26 +65,28 @@ class TerminalSessionPtyShim implements pty.IPty {
   }
 
   write(data: string | Buffer): void {
-    const str = typeof data === 'string' ? data : data.toString();
-    this.handle.write(str).catch((err: unknown) => {
+    const str = Buffer.isBuffer(data) ? data.toString() : data;
+    this.handle.write(str).catch((err: Error) => {
       console.warn('[ptyHost] terminal-session write failed', err);
     });
   }
 
   kill(signal?: string): void {
-    this.handle.kill(signal as NodeJS.Signals | undefined).catch((err: unknown) => {
+    // SAFETY: node-pty declares this shim method as string, while callers pass
+    // Node signal names and the host handle accepts that same finite set.
+    this.handle.kill(signal as NodeJS.Signals | undefined).catch((err: Error) => {
       console.warn('[ptyHost] terminal-session kill failed', err);
     });
   }
 
   pause(): void {
-    this.handle.pause().catch((err: unknown) => {
+    this.handle.pause().catch((err: Error) => {
       console.warn('[ptyHost] terminal-session pause failed', err);
     });
   }
 
   resume(): void {
-    this.handle.resume().catch((err: unknown) => {
+    this.handle.resume().catch((err: Error) => {
       console.warn('[ptyHost] terminal-session resume failed', err);
     });
   }
@@ -123,15 +126,15 @@ export class TerminalSessionManager extends EventEmitter {
     console.log(`Using shell: ${shellInfo.path} (${shellInfo.name})`);
     
     // Build spawn env once so both paths see identical values.
-    const rawEnv: Record<string, string | undefined> = {
-      ...process.env,
+    const rawEnv = {
+      ...inheritedProcessEnv(),
       ...getGitAttributionEnv(getRuntimeConfigManager().getConfig()),
       PATH: shellPath,
       WORKTREE_PATH: worktreePath,
       TERM: 'xterm-256color',      // Ensure TERM is set for color support
       COLORTERM: 'truecolor',      // Enable 24-bit color
       LANG: process.env.LANG || 'en_US.UTF-8',  // Set locale for proper character handling
-    };
+    } satisfies NodeJS.ProcessEnv;
 
     const spawnCols = 80;
     const spawnRows = 24;
@@ -159,7 +162,7 @@ export class TerminalSessionManager extends EventEmitter {
       // RPC DTO requires `Record<string, string>`; drop undefined keys.
       const envStr: Record<string, string> = {};
       for (const [key, value] of Object.entries(rawEnv)) {
-        if (typeof value === 'string') {
+        if (value !== undefined) {
           envStr[key] = value;
         }
       }
@@ -185,7 +188,7 @@ export class TerminalSessionManager extends EventEmitter {
         cwd: worktreePath,
         cols: spawnCols,
         rows: spawnRows,
-        env: rawEnv as { [key: string]: string },
+        env: Object.fromEntries(Object.entries(rawEnv).filter((entry): entry is [string, string] => entry[1] !== undefined)),
       });
     }
 
@@ -262,7 +265,7 @@ export class TerminalSessionManager extends EventEmitter {
         // Also try to kill via pty interface as fallback
         try {
           session.pty.kill();
-        } catch (error) {
+        } catch {
           // PTY might already be dead
         }
       } catch (error) {
@@ -296,7 +299,7 @@ export class TerminalSessionManager extends EventEmitter {
     try {
       if (platform === 'win32') {
         // Windows: Use WMIC to get child processes
-        const result = require('child_process').execSync(
+        const result = execSync(
           `wmic process where (ParentProcessId=${parentPid}) get ProcessId`,
           { encoding: 'utf8' }
         );
@@ -312,7 +315,7 @@ export class TerminalSessionManager extends EventEmitter {
         }
       } else {
         // Unix/Linux/macOS: Use ps command
-        const result = require('child_process').execSync(
+        const result = execSync(
           `ps -o pid= --ppid ${parentPid} 2>/dev/null || true`,
           { encoding: 'utf8' }
         );
@@ -359,7 +362,7 @@ export class TerminalSessionManager extends EventEmitter {
           for (const childPid of descendantPids) {
             try {
               await execAsync(`taskkill /F /PID ${childPid}`);
-            } catch (e) {
+            } catch {
               // Process might already be dead
             }
           }
@@ -382,7 +385,7 @@ export class TerminalSessionManager extends EventEmitter {
           if (!isNaN(foundPgid)) {
             pgid = foundPgid;
           }
-        } catch (error) {
+        } catch {
           // Use original PID as fallback
         }
         
@@ -398,7 +401,7 @@ export class TerminalSessionManager extends EventEmitter {
         // Now forcefully kill the main process
         try {
           process.kill(pid, 'SIGKILL');
-        } catch (error) {
+        } catch {
           // Process might already be dead
         }
         
@@ -413,7 +416,7 @@ export class TerminalSessionManager extends EventEmitter {
         for (const childPid of descendantPids) {
           try {
             await execAsync(`kill -9 ${childPid}`);
-          } catch (error) {
+          } catch {
             // Process already terminated
           }
         }
@@ -421,7 +424,7 @@ export class TerminalSessionManager extends EventEmitter {
         // Final cleanup attempt using pkill
         try {
           await execAsync(`pkill -9 -P ${pid}`);
-        } catch (error) {
+        } catch {
           // Ignore errors - processes might already be dead
         }
       }

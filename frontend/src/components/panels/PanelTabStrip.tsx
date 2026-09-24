@@ -6,7 +6,7 @@
  */
 
 import React, { useCallback, useEffect, useState, useRef, useMemo } from 'react';
-import { X, Terminal, GitBranch, FileCode, FolderTree, BarChart3, Globe } from 'lucide-react';
+import { X, Terminal, GitBranch, FileCode, FileDiff, FileText, FolderTree, BarChart3, Globe } from 'lucide-react';
 import { cn } from '../../utils/cn';
 import { ToolPanel, ToolPanelType, LogsPanelState } from '../../../../shared/types/panels';
 import { useHotkeyStore } from '../../stores/hotkeyStore';
@@ -14,9 +14,11 @@ import { formatKeyDisplay } from '../../utils/hotkeyUtils';
 import { Tooltip } from '../ui/Tooltip';
 import { Kbd } from '../ui/Kbd';
 import { usePanelStore } from '../../stores/panelStore';
-import { ClaudeIcon, OpenAIIcon } from '../ui/BrandIcons';
+import { getCliBrandIcon } from '../ui/brandIconRegistry';
 import { PanelTabStatusDot } from './PanelTabStatusDot';
 import type { PanelTabPresentationResolver } from '../../types/panelComponents';
+import { getPanelTabId, getPanelTabPanelId } from './panelTabIds';
+import { editorPanelState, pinEditorPanel } from '../../services/openFileInEditor';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -61,18 +63,6 @@ export interface PanelTabStripProps {
   idNamespace: string;
 }
 
-function safeDomId(value: string): string {
-  return value.replace(/[^a-zA-Z0-9_-]/g, '-');
-}
-
-export function getPanelTabId(namespace: string, panelId: string): string {
-  return `panel-tab-${safeDomId(namespace)}-${safeDomId(panelId)}`;
-}
-
-export function getPanelTabPanelId(namespace: string, panelId: string): string {
-  return `panel-content-${safeDomId(namespace)}-${safeDomId(panelId)}`;
-}
-
 // ---------------------------------------------------------------------------
 // Icon helper (existing icons from PanelTabBar)
 // ---------------------------------------------------------------------------
@@ -81,9 +71,8 @@ function getPanelIcon(type: ToolPanelType, panel?: ToolPanel, iconClass = 'w-4 h
   switch (type) {
     case 'terminal': {
       if (panel?.title) {
-        const lowerTitle = panel.title.toLowerCase();
-        if (lowerTitle.includes('claude')) return <ClaudeIcon className={iconClass} />;
-        if (lowerTitle.includes('codex')) return <OpenAIIcon className={iconClass} />;
+        const brandIcon = getCliBrandIcon(panel.title, iconClass);
+        if (brandIcon) return brandIcon;
       }
       return <Terminal className={iconClass} />;
     }
@@ -91,6 +80,8 @@ function getPanelIcon(type: ToolPanelType, panel?: ToolPanel, iconClass = 'w-4 h
       return <GitBranch className={iconClass} />;
     case 'explorer':
       return <FolderTree className={iconClass} />;
+    case 'editor':
+      return panel && editorPanelState(panel)?.diff ? <FileDiff className={iconClass} /> : <FileText className={iconClass} />;
     case 'logs':
       return <FileCode className={iconClass} />;
     case 'dashboard':
@@ -193,6 +184,7 @@ export const PanelTabStrip: React.FC<PanelTabStripProps> = React.memo(({
     e.stopPropagation();
     // Prevent closing logs panel while it's running
     if (panel.type === 'logs') {
+      // SAFETY: The panel type discriminator determines the corresponding custom-state shape.
       const logsState = panel.state?.customState as LogsPanelState;
       if (logsState?.isRunning) {
         alert('Cannot close logs panel while process is running. Please stop the process first.');
@@ -325,7 +317,9 @@ export const PanelTabStrip: React.FC<PanelTabStripProps> = React.memo(({
       ref={stripRef}
       className={cn(
         "flex items-center overflow-x-auto scrollbar-none min-w-0",
-        compact ? "max-w-full" : "flex-1",
+        // The strip hugs its tabs so the "+" sits right after the last one;
+        // while a tab is being dragged it grows to offer the trailing drop zone.
+        compact ? "max-w-full" : isTabDragging ? "flex-1" : "flex-initial max-w-full",
       )}
       onDragLeave={handleStripDragLeave}
     >
@@ -350,6 +344,7 @@ export const PanelTabStrip: React.FC<PanelTabStripProps> = React.memo(({
         const isActive = panel.id === activePanelId;
         const isDragged = panel.id === draggedPanelId;
         const isCompactTab = panel.type === 'diff' || panel.type === 'explorer' || panel.type === 'browser';
+        const isPreviewTab = editorPanelState(panel)?.isPreview === true;
         const shortcutHint = shortcutHints[index];
         const tabId = getPanelTabId(idNamespace, panel.id);
         const tabPanelId = getPanelTabPanelId(idNamespace, panel.id);
@@ -357,7 +352,7 @@ export const PanelTabStrip: React.FC<PanelTabStripProps> = React.memo(({
           <span className="flex flex-col items-start gap-1">
             <span className="text-text-secondary">{presentation?.disabledReason ?? displayTitle}</span>
             {shortcutHint && (
-              <Kbd size="xs" variant="muted" className="origin-left scale-[0.8]">{shortcutHint}</Kbd>
+              <Kbd variant="inline">{shortcutHint}</Kbd>
             )}
           </span>
         ) : null;
@@ -375,7 +370,10 @@ export const PanelTabStrip: React.FC<PanelTabStripProps> = React.memo(({
             onFocus={() => setRovingPanelId(panel.id)}
             onClick={() => { if (!isDisabled) onPanelSelect(panel); }}
             onDoubleClick={(event) => {
-              if (!isDisabled && !isPermanent && !isDiffPanel) handleStartRename(event, panel);
+              if (isDisabled) return;
+              // Editor tabs pin on double-click (VS Code); other tabs rename.
+              if (panel.type === 'editor') { void pinEditorPanel(panel); return; }
+              if (!isPermanent && !isDiffPanel) handleStartRename(event, panel);
             }}
             onKeyDown={(event) => handleTabKeyDown(event, index)}
             className="absolute inset-0 z-0 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-focus-ring-subtle"
@@ -453,7 +451,7 @@ export const PanelTabStrip: React.FC<PanelTabStripProps> = React.memo(({
                     The title is the only shrinkable element in the tab, so
                     squeezed tabs truncate the text instead of crushing the
                     status dot / icon or spilling under the close button. */}
-                <span className={cn("min-w-0 truncate", compact && isPrimary && "font-semibold")}>{displayTitle}</span>
+                <span className={cn("min-w-0 truncate", compact && isPrimary && "font-semibold", isPreviewTab && "italic")}>{displayTitle}</span>
               </span>
             )}
 

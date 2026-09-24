@@ -1,5 +1,6 @@
 import posthog from 'posthog-js';
 import type { AnalyticsIdentity } from '../types/config';
+import type { JsonValue } from '../../../shared/validation/boundaryDecoder';
 
 const DEFAULT_API_KEY = 'phc_wir25CCsjr2NsZGEdlWNdvwcNG1XDjhxc9RyL5KDCf1';
 const DEFAULT_HOST = 'https://runpane.com/api/c';
@@ -9,9 +10,12 @@ let currentHost: string | undefined;
 let currentEnabled: boolean | undefined;
 let currentIdentity: AnalyticsIdentity | undefined;
 
+type AnalyticsPropertyValue = JsonValue | undefined;
+export interface AnalyticsProperties { [key: string]: AnalyticsPropertyValue }
+
 export interface PendingAnalyticsEvent {
   eventName: string;
-  properties?: Record<string, unknown>;
+  properties?: AnalyticsProperties;
 }
 
 let pendingEvents: PendingAnalyticsEvent[] = [];
@@ -27,13 +31,25 @@ export interface PostHogInitOptions {
   flushPendingEvents?: boolean;
 }
 
-function compactProperties(properties: Record<string, unknown>): Record<string, unknown> {
-  return Object.fromEntries(
-    Object.entries(properties).filter(([, value]) => value !== undefined)
-  );
+interface CompactAnalyticsProperties {
+  [key: string]: JsonValue;
 }
 
-function personProperties(identity?: AnalyticsIdentity): Record<string, unknown> {
+interface DirectCaptureTarget {
+  token: string;
+  host: string;
+  distinctId: string;
+}
+
+function compactProperties(properties: AnalyticsProperties): CompactAnalyticsProperties {
+  const compacted: CompactAnalyticsProperties = {};
+  for (const [key, value] of Object.entries(properties)) {
+    if (value !== undefined) compacted[key] = value;
+  }
+  return compacted;
+}
+
+function personProperties(identity?: AnalyticsIdentity): Record<string, JsonValue> {
   if (!identity) return {};
 
   return compactProperties({
@@ -49,7 +65,7 @@ function personProperties(identity?: AnalyticsIdentity): Record<string, unknown>
   });
 }
 
-function contextProperties(identity = currentIdentity): Record<string, unknown> {
+function contextProperties(identity = currentIdentity): Record<string, JsonValue> {
   if (!identity) return {};
 
   return compactProperties({
@@ -81,16 +97,16 @@ function identifyUser(config: PostHogConfig): void {
   posthog.identify(config.identity.distinctId, personProperties(config.identity));
 }
 
-function directCaptureTarget(identity = currentIdentity): { token: string; host: string; distinctId: string } {
+function directCaptureTarget(identity = currentIdentity): DirectCaptureTarget {
   const posthogDistinctId = posthog.get_distinct_id?.();
 
   return {
     token: currentApiKey || DEFAULT_API_KEY,
     host: currentHost || DEFAULT_HOST,
     distinctId:
-      typeof identity?.distinctId === 'string' && identity.distinctId.length > 0
+      identity?.distinctId
         ? identity.distinctId
-        : typeof posthogDistinctId === 'string' && posthogDistinctId.length > 0
+        : posthogDistinctId
         ? posthogDistinctId
         : `anon_${crypto.randomUUID()}`,
   };
@@ -98,13 +114,13 @@ function directCaptureTarget(identity = currentIdentity): { token: string; host:
 
 async function directCapture(
   eventName: string,
-  properties?: Record<string, unknown>,
+  properties?: AnalyticsProperties,
   identity = currentIdentity,
   options: { processPersonProfile?: boolean; distinctId?: string } = {}
 ): Promise<void> {
   const { token, host, distinctId } = directCaptureTarget(identity);
   const eventDistinctId =
-    typeof options.distinctId === 'string' && options.distinctId.length > 0
+    options.distinctId
       ? options.distinctId
       : distinctId;
   const shouldProcessPersonProfile = Boolean(options.processPersonProfile && identity);
@@ -186,14 +202,6 @@ export function initPostHog(config: PostHogConfig, options: PostHogInitOptions =
   }
 }
 
-export function optIn(): void {
-  posthog.opt_in_capturing();
-}
-
-export function optOut(): void {
-  posthog.opt_out_capturing();
-}
-
 export function queuePendingEvent(event: PendingAnalyticsEvent): void {
   pendingEvents.push({
     eventName: event.eventName,
@@ -273,7 +281,7 @@ export async function aliasInstallIdentityDirect(identity = currentIdentity): Pr
  */
 export async function captureAndOptOut(
   eventName: string,
-  properties?: Record<string, unknown>,
+  properties?: AnalyticsProperties,
   identity = currentIdentity
 ): Promise<void> {
   currentIdentity = identity;
@@ -284,7 +292,7 @@ export async function captureAndOptOut(
   currentEnabled = false;
 }
 
-export function capture(eventName: string, properties?: Record<string, unknown>): void {
+export function capture(eventName: string, properties?: AnalyticsProperties): void {
   try {
     posthog.capture(eventName, compactProperties({
       ...contextProperties(),
@@ -304,12 +312,13 @@ export function capture(eventName: string, properties?: Record<string, unknown>)
  * Same network path as captureAndOptOut, just without the opt-out flip.
  *
  * Use this sparingly. The legitimate cases are funnel-completeness and
- * consent-decision events that must be captured in a strict order:
- * consent_dialog_shown, analytics_opted_in, and app_first_opened.
+ * disclosure/choice events that must be captured in a strict order:
+ * analytics_default_enabled, settings disclosure/explicit choices, and
+ * app_first_opened.
  */
 export async function captureUnconditionally(
   eventName: string,
-  properties?: Record<string, unknown>,
+  properties?: AnalyticsProperties,
   identity = currentIdentity
 ): Promise<void> {
   currentIdentity = identity;

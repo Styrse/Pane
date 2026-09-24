@@ -6,9 +6,16 @@ import { panelManager } from '../../panelManager';
 import { addSessionLog, cleanupSessionLogs } from '../../../ipc/logs';
 import { getShellPath } from '../../../utils/shellPath';
 import type { AnalyticsManager } from '../../analyticsManager';
+import type { PaneEventArgument } from '../../../core/eventSink';
 import { WSLContext, buildWSLENV } from '../../../utils/wslUtils';
 
-export class LogsManager {
+function getLogsPanelState(panel: ToolPanel): LogsPanelState {
+  // SAFETY: This manager only creates and receives panels with type `logs`,
+  // whose custom state is owned here and always initialized as LogsPanelState.
+  return panel.state.customState as LogsPanelState;
+}
+
+class LogsManager {
   private static instance: LogsManager;
   private activeProcesses = new Map<string, ChildProcess>(); // panelId -> process
   private scriptStartTimes = new Map<string, number>(); // panelId -> start timestamp
@@ -28,7 +35,7 @@ export class LogsManager {
     this.analyticsManager = analyticsManager;
   }
 
-  private sendRendererEvent(channel: string, ...args: unknown[]): void {
+  private sendRendererEvent(channel: string, ...args: PaneEventArgument[]): void {
     getPaneEventSink().send(channel, ...args);
   }
 
@@ -84,7 +91,7 @@ export class LogsManager {
           errorCount: 0,
           warningCount: 0,
           lastActivityTime: undefined
-        } as LogsPanelState
+        }
       }
     });
   }
@@ -122,7 +129,7 @@ export class LogsManager {
           errorCount: 0,
           warningCount: 0,
           lastActivityTime: startTime
-        } as LogsPanelState
+        }
       }
     });
 
@@ -189,9 +196,9 @@ export class LogsManager {
         state: {
           ...panel.state,
           customState: {
-            ...(panel.state.customState as LogsPanelState),
+            ...getLogsPanelState(panel),
             processId: childProcess.pid
-          } as LogsPanelState
+          }
         }
       });
       
@@ -258,7 +265,7 @@ export class LogsManager {
             // Recursively get children of this process
             descendants.push(...this.getAllDescendantPids(pid));
           }
-        } catch (e) {
+        } catch {
           // If that fails, try macOS/BSD style
           try {
             // Get all processes with their parent PIDs, then filter
@@ -272,12 +279,12 @@ export class LogsManager {
               // Recursively get children of this process
               descendants.push(...this.getAllDescendantPids(pid));
             }
-          } catch (e2) {
+          } catch {
             // Could not find children
           }
         }
       }
-    } catch (error) {
+    } catch {
       // Command might fail if no children exist, which is fine
     }
     
@@ -359,7 +366,7 @@ export class LogsManager {
         for (const targetPid of allPids) {
           try {
             process.kill(targetPid, 'SIGKILL');
-          } catch (error: unknown) {
+          } catch {
             // Process might already be dead or inaccessible
           }
         }
@@ -409,7 +416,7 @@ export class LogsManager {
     // Update panel state
     const panel = await panelManager.getPanel(panelId);
     if (panel) {
-      const currentState = panel.state.customState as LogsPanelState || {};
+      const currentState = getLogsPanelState(panel);
       const outputBuffer = currentState.outputBuffer || [];
       outputBuffer.push(content);
       
@@ -438,7 +445,7 @@ export class LogsManager {
             errorCount,
             warningCount,
             lastActivityTime: new Date().toISOString()
-          } as LogsPanelState
+          }
         }
       });
     }
@@ -469,7 +476,7 @@ export class LogsManager {
     // Update panel state
     const panel = await panelManager.getPanel(panelId);
     if (panel) {
-      const currentState = panel.state.customState as LogsPanelState || {};
+      const currentState = getLogsPanelState(panel);
       await panelManager.updatePanel(panelId, {
         state: {
           ...panel.state,
@@ -478,7 +485,7 @@ export class LogsManager {
             isRunning: false,
             endTime: new Date().toISOString(),
             exitCode: code ?? undefined
-          } as LogsPanelState
+          }
         }
       });
     }
@@ -517,7 +524,7 @@ export class LogsManager {
     
     if (!logsPanel) return false;
     
-    const state = logsPanel.state.customState as LogsPanelState;
+    const state = getLogsPanelState(logsPanel);
     return state?.isRunning || false;
   }
   
@@ -538,7 +545,7 @@ export class LogsManager {
    */
   async cleanup(): Promise<void> {
     // Stop all running processes
-    for (const [panelId, process] of this.activeProcesses) {
+    for (const panelId of this.activeProcesses.keys()) {
       await this.stopScript(panelId);
     }
     this.activeProcesses.clear();

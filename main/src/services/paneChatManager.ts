@@ -16,13 +16,15 @@ import {
   type PaneChatState,
 } from '../../../shared/types/paneChat';
 import { RUNPANE_CONTRACT } from '../../../shared/types/generatedRunpaneContract';
+import { isAgentSupportedOnPlatform } from '../../../shared/constants/agentLaunchPresets';
+import { isCliAgentType } from './agents/agentIdentity';
 
 const PANE_CHAT_TITLE = 'Pane Chat';
 const PANE_CHAT_BOOTSTRAP_VERSION = 9;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-function isValidUuid(value: unknown): value is string {
-  return typeof value === 'string' && UUID_PATTERN.test(value);
+function isValidUuid(value: string | undefined): value is string {
+  return value !== undefined && UUID_PATTERN.test(value);
 }
 
 export class PaneChatManager {
@@ -42,12 +44,14 @@ export class PaneChatManager {
   async setAgent(agent: PaneChatAgent): Promise<PaneChatState<Session>> {
     return withLock('pane-chat-session', async () => {
       const normalizedAgent = normalizePaneChatAgent(agent);
+      this.assertAgentSupported(normalizedAgent);
       await this.configManager.updateConfig({ defaultOrchestratorAgent: normalizedAgent });
       return this.getOrCreateForAgent(normalizedAgent);
     });
   }
 
   private async getOrCreateForAgent(agent: PaneChatAgent): Promise<PaneChatState<Session>> {
+    this.assertAgentSupported(agent);
     const guidePath = await this.ensureGuidePath();
     const cwd = getAppDirectory();
     const session = this.ensureSession(cwd);
@@ -63,6 +67,12 @@ export class PaneChatManager {
       guidePath,
       started: terminalPanelManager.isTerminalInitialized(panel.id),
     };
+  }
+
+  private assertAgentSupported(agent: PaneChatAgent): void {
+    if (!isAgentSupportedOnPlatform(agent, process.platform)) {
+      throw new Error(`${RUNPANE_CONTRACT.agentTemplates[agent].title} is not supported on ${process.platform}.`);
+    }
   }
 
   private async ensureGuidePath(): Promise<string> {
@@ -104,13 +114,15 @@ export class PaneChatManager {
     const existingPanel = panelManager.getPanel(panelId);
     if (existingPanel) {
       const existingAgent = this.resolvePanelAgent(existingPanel) ?? agent;
-      const needsRepair = existingAgent !== agent || this.needsLaunchStateRepair(existingPanel, existingAgent);
-      if (needsRepair && terminalPanelManager.isTerminalInitialized(existingPanel.id)) {
+      const isInitialized = terminalPanelManager.isTerminalInitialized(existingPanel.id);
+      const needsAgentSwitch = existingAgent !== agent;
+      const needsRepair = needsAgentSwitch || (!isInitialized && this.needsLaunchStateRepair(existingPanel, existingAgent));
+      if (needsAgentSwitch && isInitialized) {
         terminalPanelManager.destroyTerminal(existingPanel.id);
       }
 
-      if (!terminalPanelManager.isTerminalInitialized(existingPanel.id) || needsRepair) {
-        await this.updatePanelLaunchState(existingPanel, agent, guidePath);
+      if (!isInitialized || needsRepair) {
+        await this.updatePanelLaunchState(existingPanel, agent, guidePath, isInitialized && !needsAgentSwitch);
       }
       return panelManager.getPanel(panelId) ?? existingPanel;
     }
@@ -119,39 +131,30 @@ export class PaneChatManager {
       id: panelId,
       sessionId,
       type: 'terminal',
-      title: agent === 'codex' ? `${PANE_CHAT_TITLE} - Codex` : PANE_CHAT_TITLE,
+      title: agent === 'claude'
+        ? PANE_CHAT_TITLE
+        : `${PANE_CHAT_TITLE} - ${RUNPANE_CONTRACT.agentTemplates[agent].title}`,
       initialState: this.buildTerminalState(agent, guidePath),
       metadata: { permanent: true },
     });
   }
 
-  private async updatePanelLaunchState(panel: ToolPanel, agent: PaneChatAgent, guidePath: string): Promise<void> {
+  private async updatePanelLaunchState(panel: ToolPanel, agent: PaneChatAgent, guidePath: string, wasInitialized: boolean): Promise<void> {
+    // SAFETY: Pane Chat owns this terminal panel and writes its custom state exclusively as TerminalPanelState.
     const previousCustomState = panel.state.customState as TerminalPanelState | undefined;
-    const shouldRefreshBootstrap = this.needsBootstrapRefresh(previousCustomState);
-    const shouldResetClaudeLaunch = agent === 'claude' && (
-      shouldRefreshBootstrap ||
-      !isValidUuid(previousCustomState?.agentSessionId) ||
-      (previousCustomState?.hasClaudeSessionId === true && !previousCustomState.initialInputSentAt)
-    );
-    const shouldResetLaunchState = shouldRefreshBootstrap || shouldResetClaudeLaunch;
+    const shouldResetClaudeLaunch = agent === 'claude' && !isValidUuid(previousCustomState?.agentSessionId) && !wasInitialized;
+    // Bootstrap metadata may change after an app upgrade. An initialized panel
+    // already owns a live conversation, so refreshing the launch metadata must
+    // never clear its durable scrollback, serialized buffer, or captured agent id.
     const nextCustomState: TerminalPanelState = {
       ...previousCustomState,
       ...this.buildTerminalState(agent, guidePath, previousCustomState, shouldResetClaudeLaunch),
-      initialInputSentAt: undefined,
-      initialInputError: undefined,
+      initialInputSentAt: wasInitialized ? previousCustomState?.initialInputSentAt : undefined,
+      initialInputError: wasInitialized ? previousCustomState?.initialInputError : undefined,
     };
 
-    if (shouldResetClaudeLaunch) {
+    if (shouldResetClaudeLaunch && !wasInitialized) {
       nextCustomState.hasClaudeSessionId = undefined;
-    }
-
-    if (shouldResetLaunchState) {
-      nextCustomState.wasInterrupted = undefined;
-      nextCustomState.scrollbackBuffer = '';
-      nextCustomState.alternateScreenBuffer = '';
-      nextCustomState.serializedBuffer = undefined;
-      nextCustomState.lastActiveCommand = undefined;
-      nextCustomState.isInitialized = false;
     }
 
     const nextState = {
@@ -170,20 +173,24 @@ export class PaneChatManager {
   ): TerminalPanelState {
     const agentSessionId = this.resolveAgentSessionId(agent, previousState, forceNewAgentSession);
 
-    return {
+    const panelState: TerminalPanelState = {
       initialCommand: RUNPANE_CONTRACT.agentTemplates[agent].command,
-      initialInput: this.buildInitialInput(),
+      initialInput: this.buildInitialInput(agent, guidePath),
       initialInputMode: 'argument',
       initialInputSubmitStrategy: 'enter',
       initialInputDeliveryVersion: PANE_CHAT_BOOTSTRAP_VERSION,
       agentType: agent,
-      ...(agentSessionId ? { agentSessionId } : {}),
       isCliPanel: true,
       isCliReady: false,
     };
+    if (agentSessionId) panelState.agentSessionId = agentSessionId;
+    return panelState;
   }
 
-  private buildInitialInput(): string {
+  private buildInitialInput(agent: PaneChatAgent, guidePath: string): string {
+    if (agent === 'cursor') {
+      return `Read ${guidePath} and initialize yourself as Pane Chat.`;
+    }
     return 'Use the pane-orchestrator skill and initialize yourself as Pane Chat.';
   }
 
@@ -194,10 +201,12 @@ export class PaneChatManager {
         : randomUUID();
     }
 
-    return previousState?.agentType === 'codex' ? previousState.agentSessionId : undefined;
+    // Codex and Cursor own their ids; reuse only what was captured for this agent.
+    return previousState?.agentType === agent ? previousState.agentSessionId : undefined;
   }
 
   private needsLaunchStateRepair(panel: ToolPanel, agent: PaneChatAgent): boolean {
+    // SAFETY: Pane Chat owns this terminal panel and writes its custom state exclusively as TerminalPanelState.
     const customState = panel.state.customState as TerminalPanelState | undefined;
     return this.needsBootstrapRefresh(customState) || (agent === 'claude' && (
       !isValidUuid(customState?.agentSessionId) ||
@@ -216,10 +225,8 @@ export class PaneChatManager {
   }
 
   private resolvePanelAgent(panel: ToolPanel): PaneChatAgent | undefined {
+    // SAFETY: Pane Chat owns this terminal panel and writes its custom state exclusively as TerminalPanelState.
     const customState = panel.state.customState as TerminalPanelState | undefined;
-    if (customState?.agentType === 'claude' || customState?.agentType === 'codex') {
-      return customState.agentType;
-    }
-    return undefined;
+    return isCliAgentType(customState?.agentType) ? customState?.agentType : undefined;
   }
 }

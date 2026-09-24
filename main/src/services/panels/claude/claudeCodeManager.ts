@@ -10,17 +10,30 @@ import type { ConversationMessage } from '../../../database/models';
 import { testClaudeCodeAvailability, testClaudeCodeInDirectory } from '../../../utils/claudeCodeTest';
 import { findExecutableInPath } from '../../../utils/shellPath';
 import { PermissionManager } from '../../permissionManager';
-import { findNodeExecutable } from '../../../utils/nodeFinder';
-import { AbstractCliManager } from '../cli/AbstractCliManager';
+import {
+  AbstractCliManager,
+  type CliEnvironment,
+  type CliSpawnTuple,
+} from '../cli/AbstractCliManager';
 import { withLock } from '../../../utils/mutex';
 import { getAppDirectory } from '../../../utils/appDirectory';
 import { escapeForBash } from '../../../utils/wslUtils';
+import { boundary, decodeBoundary, type JsonObject } from '../../../../../shared/validation/boundaryDecoder';
+import { createRequire } from 'node:module';
+import { logValidationFailure, validatePanelSessionOwnership } from '../../../utils/sessionValidation';
+
+const loadClaudeDependency = createRequire(__filename);
+
+function getPanelManagerModule(): typeof import('../../panelManager') {
+  // SAFETY: CommonJS require returns the statically typed local panelManager module.
+  return loadClaudeDependency('../../panelManager') as typeof import('../../panelManager');
+}
 
 // Extend global object for MCP configuration storage  
 interface GlobalMcpStorage {
   [key: string]: string | undefined;
 }
-declare const globalThis: GlobalMcpStorage;
+const mcpStorage: GlobalMcpStorage = {};
 
 interface ClaudeSpawnOptions {
   panelId: string;
@@ -34,11 +47,9 @@ interface ClaudeSpawnOptions {
   isInteractive?: boolean;  // Interactive mode: don't add -p flag, send prompt via stdin
 }
 
-interface ClaudeCodeProcess {
-  process: import('@lydell/node-pty').IPty;
-  panelId: string;
-  sessionId: string;
-  worktreePath: string;
+interface BaseProjectMcpServers {
+  mcpServers: JsonObject;
+  mcpJsonPath?: string;
 }
 
 /**
@@ -203,7 +214,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
       let finalPrompt = prompt;
 
       // Add system prompts for new sessions
-      const systemPromptAppend = this.buildSystemPromptAppend(dbSession ? { ...dbSession, project_id: dbSession.project_id } : { id: sessionId });
+      const systemPromptAppend = this.buildSystemPromptAppend({ project_id: dbSession?.project_id });
       if (systemPromptAppend) {
         finalPrompt = `${finalPrompt}\n\n${systemPromptAppend}`;
       }
@@ -230,7 +241,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
 
   protected async getCliExecutablePath(): Promise<string> {
     // Use custom claude path if configured, otherwise find it in PATH
-    let claudeCommand = this.configManager?.getConfig()?.claudeExecutablePath;
+    const claudeCommand = this.configManager?.getConfig()?.claudeExecutablePath;
     if (claudeCommand) {
       this.logger?.info(`[ClaudeManager] Using custom Claude executable path: ${claudeCommand}`);
       return claudeCommand;
@@ -308,7 +319,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
         data: jsonMessage,
         timestamp: new Date()
       });
-    } catch (error) {
+    } catch {
       // If not valid JSON, treat as regular output
       this.logger?.verbose(`Raw output from panel ${panelId} (session ${sessionId}): ${data.substring(0, 200)}`);
 
@@ -332,19 +343,17 @@ export class ClaudeCodeManager extends AbstractCliManager {
     return events;
   }
 
-  protected async initializeCliEnvironment(options: ClaudeSpawnOptions): Promise<{ [key: string]: string }> {
+  protected async initializeCliEnvironment(options: ClaudeSpawnOptions): Promise<CliEnvironment> {
     const { sessionId, permissionMode } = options;
     
-    // Get basic system environment
-    const systemEnv = await this.getSystemEnvironment();
-    
     // Initialize environment with MCP-specific variables
-    const env: { [key: string]: string } = {
+    const env: CliEnvironment = {
       // Ensure MCP-related environment variables are preserved
       MCP_SOCKET_PATH: this.permissionIpcPath || '',
-      // Add debug mode for MCP if verbose logging is enabled
-      ...(this.configManager?.getConfig()?.verbose ? { MCP_DEBUG: '1' } : {})
     };
+    if (this.configManager?.getConfig()?.verbose) {
+      env.MCP_DEBUG = '1';
+    }
 
     // Set up MCP configuration if permission approval is requested
     const defaultMode = this.configManager?.getConfig()?.defaultPermissionMode || 'ignore';
@@ -362,7 +371,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
     PermissionManager.getInstance().clearPendingRequests(sessionId);
 
     // Clean up MCP config file if it exists
-    const mcpConfigPath = globalThis[`mcp_config_${sessionId}`];
+    const mcpConfigPath = mcpStorage[`mcp_config_${sessionId}`];
     if (mcpConfigPath && fs.existsSync(mcpConfigPath)) {
       setTimeout(() => {
         try {
@@ -370,7 +379,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
             fs.unlinkSync(mcpConfigPath);
             this.logger?.verbose(`[MCP] Cleaned up config file: ${mcpConfigPath}`);
           }
-          delete globalThis[`mcp_config_${sessionId}`];
+          delete mcpStorage[`mcp_config_${sessionId}`];
         } catch (error) {
           this.logger?.error(`Failed to delete MCP config file:`, error instanceof Error ? error : undefined);
         }
@@ -378,7 +387,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
     }
 
     // Clean up base project MCP config file if it exists (not .mcp.json from project)
-    const baseConfigPath = globalThis[`mcp_base_config_${sessionId}`];
+    const baseConfigPath = mcpStorage[`mcp_base_config_${sessionId}`];
     if (baseConfigPath && fs.existsSync(baseConfigPath)) {
       setTimeout(() => {
         try {
@@ -386,7 +395,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
             fs.unlinkSync(baseConfigPath);
             this.logger?.verbose(`[MCP] Cleaned up base project config file: ${baseConfigPath}`);
           }
-          delete globalThis[`mcp_base_config_${sessionId}`];
+          delete mcpStorage[`mcp_base_config_${sessionId}`];
         } catch (error) {
           this.logger?.error(`Failed to delete base project MCP config file:`, error instanceof Error ? error : undefined);
         }
@@ -394,7 +403,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
     }
 
     // Clean up temporary MCP script file if it exists
-    const mcpScriptPath = globalThis[`mcp_script_${sessionId}`];
+    const mcpScriptPath = mcpStorage[`mcp_script_${sessionId}`];
     if (mcpScriptPath && fs.existsSync(mcpScriptPath)) {
       setTimeout(() => {
         try {
@@ -402,7 +411,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
             fs.unlinkSync(mcpScriptPath);
             this.logger?.verbose(`[MCP] Cleaned up script file: ${mcpScriptPath}`);
           }
-          delete globalThis[`mcp_script_${sessionId}`];
+          delete mcpStorage[`mcp_script_${sessionId}`];
         } catch (error) {
           this.logger?.error(`Failed to delete temporary MCP script file:`, error instanceof Error ? error : undefined);
         }
@@ -410,7 +419,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
     }
   }
 
-  protected async getCliEnvironment(options: ClaudeSpawnOptions): Promise<{ [key: string]: string }> {
+  protected async getCliEnvironment(_options: ClaudeSpawnOptions): Promise<{ [key: string]: string }> {
     // This is handled in initializeCliEnvironment for Claude
     return {};
   }
@@ -545,8 +554,8 @@ export class ClaudeCodeManager extends AbstractCliManager {
   protected wrapSpawnArgs(
     cmd: string,
     args: string[],
-    env: { [key: string]: string }
-  ): { cmd: string; args: string[]; env: { [key: string]: string } } {
+    env: CliEnvironment
+  ): CliSpawnTuple {
     if (process.platform === 'win32') return { cmd, args, env };
     const line = [cmd, ...args].map(escapeForBash).join(' ');
     return { cmd: '/bin/sh', args: ['-c', `exec ${line}`], env };
@@ -574,11 +583,13 @@ export class ClaudeCodeManager extends AbstractCliManager {
    */
   protected override isSpawnInProgress(panelId: string): boolean {
     // Use synchronous cache-hit path; panelManager.getPanel is sync.
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { panelManager } = require('../../panelManager') as typeof import('../../panelManager');
+    const { panelManager } = getPanelManagerModule();
     const panel = panelManager.getPanel(panelId);
     if (!panel) return false;
-    const cs = (panel.state.customState || {}) as { isCliReady?: boolean; isCliPanel?: boolean };
+    const cs = decodeBoundary(panel.state.customState ?? {}, boundary.object({
+      isCliReady: boundary.optional(boundary.boolean),
+      isCliPanel: boundary.optional(boundary.boolean),
+    }));
     // Only consider "in progress" if this is a CLI panel but the CLI has not
     // reported ready yet. Non-CLI callers shouldn't hit this (Claude entries
     // are always CLI) but guard anyway.
@@ -593,8 +604,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * original prompt meaningfully after a mid-spawn crash.
    */
   protected override isNonInteractiveSpawn(options: import('../cli/AbstractCliManager').CliSpawnOptions): boolean {
-    const opts = options as ClaudeSpawnOptions;
-    return opts.isInteractive !== true;
+    return options.isInteractive !== true;
   }
 
   // Implementation of abstract methods from AbstractCliManager
@@ -602,7 +612,6 @@ export class ClaudeCodeManager extends AbstractCliManager {
   async startPanel(panelId: string, sessionId: string, worktreePath: string, prompt: string, permissionMode?: 'approve' | 'ignore', model?: string): Promise<void> {
     // Validate panel ownership before starting (skip for virtual session-based panel IDs)
     if (!panelId.startsWith('session-')) {
-      const { validatePanelSessionOwnership, logValidationFailure } = require('../../../utils/sessionValidation');
       const validation = validatePanelSessionOwnership(panelId, sessionId);
       if (!validation.valid) {
         logValidationFailure('ClaudeCodeManager.startPanel', validation);
@@ -629,7 +638,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
         let finalPrompt = prompt;
 
         // Add system prompts for new sessions
-        const systemPromptAppend = this.buildSystemPromptAppend(dbSession ? { ...dbSession, project_id: dbSession.project_id } : { id: sessionId });
+        const systemPromptAppend = this.buildSystemPromptAppend({ project_id: dbSession?.project_id });
         if (systemPromptAppend) {
           finalPrompt = `${finalPrompt}\n\n${systemPromptAppend}`;
         }
@@ -661,7 +670,6 @@ export class ClaudeCodeManager extends AbstractCliManager {
     return await withLock(`claude-continue-${panelId}`, async () => {
       // Validate panel ownership before continuing (skip for virtual session-based panel IDs)
       if (!panelId.startsWith('session-')) {
-        const { validatePanelSessionOwnership, logValidationFailure } = require('../../../utils/sessionValidation');
         const validation = validatePanelSessionOwnership(panelId, sessionId);
         if (!validation.valid) {
           logValidationFailure('ClaudeCodeManager.continuePanel', validation);
@@ -677,7 +685,11 @@ export class ClaudeCodeManager extends AbstractCliManager {
 
       // Check if we should skip --resume flag this time (after prompt compaction)
       const skipContinueRaw = dbSession?.skip_continue_next;
-      const shouldSkipContinue = skipContinueRaw === true || (typeof skipContinueRaw === 'number' && skipContinueRaw === 1);
+      const skipContinue = decodeBoundary(
+        skipContinueRaw ?? false,
+        boundary.union(boundary.boolean, boundary.literal(0), boundary.literal(1)),
+      );
+      const shouldSkipContinue = skipContinue === true || skipContinue === 1;
 
       // Check if interactive mode is enabled
       const config = this.configManager?.getConfig();
@@ -794,8 +806,8 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * When running in a worktree, Claude doesn't see MCP servers from the base project
    * because it uses the worktree path as the project key.
    */
-  private getBaseProjectMcpServers(sessionId: string): { mcpServers: Record<string, unknown>; mcpJsonPath?: string } {
-    const result: { mcpServers: Record<string, unknown>; mcpJsonPath?: string } = { mcpServers: {} };
+  private getBaseProjectMcpServers(sessionId: string): BaseProjectMcpServers {
+    const result: BaseProjectMcpServers = { mcpServers: {} };
 
     try {
       // Get the session to find the project
@@ -823,7 +835,9 @@ export class ClaudeCodeManager extends AbstractCliManager {
         // Also parse it to merge with other servers
         try {
           const mcpJsonContent = fs.readFileSync(mcpJsonFsPath, 'utf8');
-          const mcpJson = JSON.parse(mcpJsonContent) as { mcpServers?: Record<string, unknown> };
+          const mcpJson = decodeBoundary(JSON.parse(mcpJsonContent), boundary.object({
+            mcpServers: boundary.optional(boundary.jsonObject),
+          }));
           if (mcpJson.mcpServers) {
             Object.assign(result.mcpServers, mcpJson.mcpServers);
           }
@@ -837,13 +851,17 @@ export class ClaudeCodeManager extends AbstractCliManager {
       if (fs.existsSync(claudeConfigPath)) {
         try {
           const claudeConfig = fs.readFileSync(claudeConfigPath, 'utf8');
-          const config = JSON.parse(claudeConfig) as {
-            projects?: Record<string, { mcpServers?: Record<string, unknown> }>;
-            mcpServers?: Record<string, unknown>;
-          };
+          const config = decodeBoundary(JSON.parse(claudeConfig), boundary.object({
+            projects: boundary.optional(boundary.jsonObject),
+            mcpServers: boundary.optional(boundary.jsonObject),
+          }));
 
           // Get project-specific MCP servers
-          const projectConfig = config.projects?.[baseProjectPath];
+          const projectConfig = config.projects?.[baseProjectPath]
+            ? decodeBoundary(config.projects[baseProjectPath], boundary.object({
+              mcpServers: boundary.optional(boundary.jsonObject),
+            }))
+            : undefined;
           if (projectConfig?.mcpServers && Object.keys(projectConfig.mcpServers).length > 0) {
             this.logger?.verbose(`[MCP] Found ${Object.keys(projectConfig.mcpServers).length} project-specific MCP servers in ~/.claude.json`);
             Object.assign(result.mcpServers, projectConfig.mcpServers);
@@ -876,7 +894,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
     return result;
   }
 
-  private buildSystemPromptAppend(dbSession: { project_id?: number | null; [key: string]: unknown }): string | undefined {
+  private buildSystemPromptAppend(dbSession: { project_id?: number | null }): string | undefined {
     const systemPromptParts: string[] = [];
 
     // Add global system prompt first
@@ -941,7 +959,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
         fs.writeFileSync(tempScriptPath, scriptContent);
         fs.chmodSync(tempScriptPath, 0o755);
 
-        const stats = fs.statSync(tempScriptPath);
+        fs.statSync(tempScriptPath);
         this.logger?.verbose(`[MCP] Script extracted to: ${tempScriptPath}`);
 
         mcpBridgePath = tempScriptPath;
@@ -1026,7 +1044,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
 
     // Start with base project MCP servers
     const baseProjectMcp = this.getBaseProjectMcpServers(sessionId);
-    const mcpConfig: { mcpServers: Record<string, unknown> } = {
+    const mcpConfig = {
       "mcpServers": {
         // Include base project MCP servers first
         ...baseProjectMcp.mcpServers,
@@ -1036,7 +1054,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
           "args": mcpArgs
         }
       }
-    };
+    } satisfies { mcpServers: JsonObject };
 
     if (Object.keys(baseProjectMcp.mcpServers).length > 0) {
       this.logger?.info(`[MCP] Merged ${Object.keys(baseProjectMcp.mcpServers).length} base project MCP servers into config`);
@@ -1061,18 +1079,17 @@ export class ClaudeCodeManager extends AbstractCliManager {
     try {
       const testCmd = `"${nodePath}" "${mcpBridgePath}" --version`;
       execSync(testCmd, { encoding: 'utf8', timeout: 2000 });
-    } catch (testError: unknown) {
-      const error = testError as { code?: string; message?: string };
-      if (error.code === 'EACCES' || (error.message && error.message.includes('EACCES'))) {
+    } catch (testError) {
+      if (String(testError).includes('EACCES')) {
         this.logger?.error(`[MCP] Permission denied executing MCP bridge script`);
         throw new Error('MCP bridge script is not executable');
       }
     }
 
     // Store config path and temp script path for cleanup
-    globalThis[`mcp_config_${sessionId}`] = mcpConfigPath;
+    mcpStorage[`mcp_config_${sessionId}`] = mcpConfigPath;
     if (mcpBridgePath.includes(tempDir)) {
-      globalThis[`mcp_script_${sessionId}`] = mcpBridgePath;
+      mcpStorage[`mcp_script_${sessionId}`] = mcpBridgePath;
     }
 
     // Add a small delay to ensure file is fully written and accessible
@@ -1087,7 +1104,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
     return mcpConfigPath;
   }
 
-  private async setupMcpConfiguration(sessionId: string, env: { [key: string]: string }): Promise<void> {
+  private async setupMcpConfiguration(_sessionId: string, _env: CliEnvironment): Promise<void> {
     // This method is called from initializeCliEnvironment but for Claude we handle MCP in spawnCliProcess
     // Just set up the basic environment variables here
     return;
@@ -1123,7 +1140,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
         this.logger?.info(`[MCP] Created base project MCP config with ${Object.keys(baseProjectMcp.mcpServers).length} servers: ${mcpConfigPath}`);
 
         // Store for cleanup
-        globalThis[`mcp_base_config_${sessionId}`] = mcpConfigPath;
+        mcpStorage[`mcp_base_config_${sessionId}`] = mcpConfigPath;
 
         return mcpConfigPath;
       } catch (error) {

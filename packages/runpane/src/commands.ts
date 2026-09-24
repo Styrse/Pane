@@ -6,6 +6,7 @@ import {
   type RunpaneChannel,
   type RunpaneCommand
 } from './generated/contract';
+import { boundary, decodeBoundary } from './boundaryDecoder';
 
 export type { ArtifactFormat, InstallTarget, RunpaneAgent, RunpaneCommand };
 
@@ -26,8 +27,11 @@ export interface ParsedArgs {
   paneDir?: string;
   repo?: string;
   paneId?: string;
+  sessionId?: string;
   panelId?: string;
   repoPath?: string;
+  folder?: string;
+  resume?: string;
   name?: string;
   worktreeName?: string;
   baseBranch?: string;
@@ -51,8 +55,34 @@ export interface ParsedArgs {
   noFocus?: boolean;
   focus?: boolean;
   pinned?: boolean;
+  noPinned?: boolean;
   composerStrategy?: string;
   force?: boolean;
+  launch?: boolean;
+  watchAs?: string;
+  watchSince?: number;
+  watchFrom?: 'now' | 'earliest';
+  watchKinds?: string[];
+  watchPaneIds?: string[];
+  watchExcludePaneIds?: string[];
+  nameContains?: string;
+  follow?: boolean;
+  agentsOnly?: boolean;
+  ackNow?: boolean;
+  includeHeldInput?: boolean;
+  watchFormat?: 'lines' | 'json';
+  heartbeatSeconds?: number;
+  idleAfterMs?: number;
+  settleMs?: number;
+  blockedSettleMs?: number;
+  minIntervalMs?: number;
+  idleBackoff?: boolean;
+  allManaged?: boolean;
+  includeShells?: boolean;
+  noHeldInput?: boolean;
+  selfTest?: boolean;
+  report?: boolean;
+  bodyFile?: string;
   remoteSetupArgs: string[];
 }
 
@@ -63,7 +93,12 @@ const TARGETS = new Set<string>(RUNPANE_CONTRACT.enums.installTargets);
 const FORMATS = new Set<string>(RUNPANE_CONTRACT.enums.artifactFormats);
 const CHANNELS = new Set<string>(RUNPANE_CONTRACT.enums.channels);
 const AGENTS = new Set<string>(RUNPANE_CONTRACT.enums.agents);
-const COMMAND_GROUP_HELP_TOPICS = new Set(['panes', 'panels']);
+const commandSchema = boundary.enumeration(...RUNPANE_CONTRACT.commands.map((command) => command.name));
+const targetSchema = boundary.enumeration(...RUNPANE_CONTRACT.enums.installTargets);
+const formatSchema = boundary.enumeration(...RUNPANE_CONTRACT.enums.artifactFormats);
+const channelSchema = boundary.enumeration(...RUNPANE_CONTRACT.enums.channels);
+const agentSchema = boundary.enumeration(...RUNPANE_CONTRACT.enums.agents);
+const COMMAND_GROUP_HELP_TOPICS = new Set(['panes', 'panels', 'sessions', 'workspace']);
 
 const REMOTE_VALUE_FLAGS = new Set<string>(RUNPANE_CONTRACT.flags.remoteValue.map((flag) => flag.name));
 const REMOTE_BOOLEAN_FLAGS = new Set<string>(RUNPANE_CONTRACT.flags.remoteBoolean.map((flag) => flag.name));
@@ -120,7 +155,7 @@ export function parseRunpaneArgs(argv: string[]): ParsedArgs {
   args.splice(0, matched.tokens.length);
 
   const parsed: ParsedArgs = {
-    command: matched.name as RunpaneCommand,
+    command: decodeBoundary(matched.name, commandSchema),
     ...DEFAULTS,
     remoteSetupArgs: []
   };
@@ -130,7 +165,7 @@ export function parseRunpaneArgs(argv: string[]): ParsedArgs {
     if (!target || !TARGETS.has(target)) {
       throw new Error(`Unknown install target: ${target ?? ''}. Expected "client" or "daemon".`);
     }
-    parsed.target = target as InstallTarget;
+    parsed.target = decodeBoundary(target, targetSchema);
   }
 
   if (parsed.command === 'update') {
@@ -138,6 +173,19 @@ export function parseRunpaneArgs(argv: string[]): ParsedArgs {
   }
 
   parseFlags(args, parsed);
+  if (parsed.command === 'watch' && parsed.allManaged && parsed.watchPaneIds?.length) {
+    throw new Error('runpane watch accepts either --all-managed or --pane, not both.');
+  }
+  if (parsed.command === 'watch' && parsed.json && parsed.watchFormat === 'lines') {
+    throw new Error('runpane watch accepts either --json or --format lines, not both.');
+  }
+  const cadenceValueFlagPresent = hasCadenceValueFlag(parsed);
+  if (parsed.command === 'watch' && !parsed.follow && (cadenceValueFlagPresent || parsed.idleBackoff)) {
+    throw new Error('--settle, --blocked-settle, --min-interval, and --idle-backoff require --follow.');
+  }
+  if (parsed.command === 'watch' && parsed.watchSince !== undefined && cadenceValueFlagPresent) {
+    throw new Error('runpane watch accepts either --since or --settle/--blocked-settle/--min-interval, not both (cadence needs a named cursor).');
+  }
   return parsed;
 }
 
@@ -199,7 +247,7 @@ function parseFlags(args: string[], parsed: ParsedArgs): void {
       if (!FORMATS.has(value)) {
         throw new Error(`Invalid --format "${value}". Expected one of: ${[...FORMATS].join(', ')}`);
       }
-      parsed.format = value as ArtifactFormat;
+      parsed.format = decodeBoundary(value, formatSchema);
       continue;
     }
 
@@ -209,7 +257,7 @@ function parseFlags(args: string[], parsed: ParsedArgs): void {
         if (!CHANNELS.has(value)) {
           throw new Error(`Invalid --channel "${value}". Expected stable or nightly.`);
         }
-        parsed.channel = value as RunpaneChannel;
+        parsed.channel = decodeBoundary(value, channelSchema);
       }
       appendRemoteArg(parsed, arg, value);
       continue;
@@ -267,8 +315,56 @@ function parseLocalBooleanFlag(flag: string, parsed: ParsedArgs): void {
     parsed.pinned = true;
     return;
   }
+  if (flag === '--no-pinned') {
+    parsed.noPinned = true;
+    return;
+  }
   if (flag === '--force') {
     parsed.force = true;
+    return;
+  }
+  if (flag === '--launch') {
+    parsed.launch = true;
+    return;
+  }
+  if (flag === '--follow') {
+    parsed.follow = true;
+    return;
+  }
+  if (flag === '--idle-backoff') {
+    parsed.idleBackoff = true;
+    return;
+  }
+  if (flag === '--ack-now') {
+    parsed.ackNow = true;
+    return;
+  }
+  if (flag === '--include-held-input') {
+    parsed.includeHeldInput = true;
+    return;
+  }
+  if (flag === '--agents-only') {
+    parsed.agentsOnly = true;
+    return;
+  }
+  if (flag === '--all-managed') {
+    parsed.allManaged = true;
+    return;
+  }
+  if (flag === '--include-shells') {
+    parsed.includeShells = true;
+    return;
+  }
+  if (flag === '--no-held-input') {
+    parsed.noHeldInput = true;
+    return;
+  }
+  if (flag === '--self-test') {
+    parsed.selfTest = true;
+    return;
+  }
+  if (flag === '--report') {
+    parsed.report = true;
     return;
   }
 
@@ -285,7 +381,19 @@ function parseLocalValueFlag(flag: string, value: string, parsed: ParsedArgs): v
     return;
   }
   if (flag === '--pane') {
-    parsed.paneId = value;
+    if (parsed.command === 'watch') {
+      (parsed.watchPaneIds ??= []).push(value);
+    } else {
+      parsed.paneId = value;
+    }
+    return;
+  }
+  if (flag === '--session') {
+    parsed.sessionId = value;
+    return;
+  }
+  if (flag === '--exclude-pane') {
+    (parsed.watchExcludePaneIds ??= []).push(value);
     return;
   }
   if (flag === '--panel') {
@@ -308,11 +416,19 @@ function parseLocalValueFlag(flag: string, value: string, parsed: ParsedArgs): v
     parsed.baseBranch = value;
     return;
   }
+  if (flag === '--folder') {
+    parsed.folder = value;
+    return;
+  }
+  if (flag === '--resume') {
+    parsed.resume = value;
+    return;
+  }
   if (flag === '--agent') {
     if (!AGENTS.has(value)) {
       throw new Error(`Invalid --agent "${value}". Expected one of: ${[...AGENTS].join(', ')}`);
     }
-    parsed.agent = value as RunpaneAgent;
+    parsed.agent = decodeBoundary(value, agentSchema);
     return;
   }
   if (flag === '--tool-command') {
@@ -345,8 +461,8 @@ function parseLocalValueFlag(flag: string, value: string, parsed: ParsedArgs): v
   }
   if (flag === '--timeout-ms') {
     const timeoutMs = Number(value);
-    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-      throw new Error('--timeout-ms must be a positive number.');
+    if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || (timeoutMs === 0 && parsed.command !== 'watch')) {
+      throw new Error('--timeout-ms must be a positive number (watch also accepts 0).');
     }
     parsed.timeoutMs = timeoutMs;
     return;
@@ -408,19 +524,106 @@ function parseLocalValueFlag(flag: string, value: string, parsed: ParsedArgs): v
     parsed.composerStrategy = value;
     return;
   }
+  if (flag === '--as') {
+    parsed.watchAs = value;
+    return;
+  }
+  if (flag === '--since') {
+    const since = Number(value);
+    if (!Number.isInteger(since) || since < 0) throw new Error('--since must be a non-negative integer.');
+    parsed.watchSince = since;
+    return;
+  }
+  if (flag === '--from') {
+    if (value !== 'now' && value !== 'earliest') throw new Error('--from must be now or earliest.');
+    parsed.watchFrom = value;
+    return;
+  }
+  if (flag === '--kinds') {
+    parsed.watchKinds = value.split(',').map(kind => kind.trim()).filter(Boolean);
+    return;
+  }
+  if (flag === '--name-contains') {
+    parsed.nameContains = value;
+    return;
+  }
+  if (flag === '--format') {
+    if (parsed.command === 'watch') {
+      if (value !== 'lines' && value !== 'json') {
+        throw new Error('--format for watch must be lines or json.');
+      }
+      parsed.watchFormat = value;
+      return;
+    }
+    if (!FORMATS.has(value)) {
+      throw new Error(`Invalid --format "${value}". Expected one of: ${[...FORMATS].join(', ')}`);
+    }
+    parsed.format = decodeBoundary(value, formatSchema);
+    return;
+  }
+  if (flag === '--heartbeat') {
+    parsed.heartbeatSeconds = parseNonNegativeIntegerFlag(flag, value);
+    return;
+  }
+  if (flag === '--idle-after') {
+    parsed.idleAfterMs = parseNonNegativeIntegerFlag(flag, value);
+    return;
+  }
+  if (flag === '--settle') {
+    parsed.settleMs = parseNonNegativeIntegerFlag(flag, value);
+    return;
+  }
+  if (flag === '--blocked-settle') {
+    parsed.blockedSettleMs = parseNonNegativeIntegerFlag(flag, value);
+    return;
+  }
+  if (flag === '--min-interval') {
+    parsed.minIntervalMs = parseNonNegativeIntegerFlag(flag, value);
+    return;
+  }
+  if (flag === '--body-file') {
+    parsed.bodyFile = value;
+    return;
+  }
 
   throw new Error(`Unknown option for ${parsed.command}: ${flag}`);
 }
 
+function parseNonNegativeIntegerFlag(flag: string, value: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`${flag} must be a non-negative integer.`);
+  }
+  return parsed;
+}
+
+/** True when any cadence flag that needs a named daemon cursor was given. */
+export function hasCadenceValueFlag(parsed: ParsedArgs): boolean {
+  return [parsed.settleMs, parsed.blockedSettleMs, parsed.minIntervalMs].some(value => value !== undefined);
+}
+
 function isRunpaneLocalCommand(command: RunpaneCommand): boolean {
   return command === 'doctor'
+    || command === 'daemon repair'
     || command === 'repos list'
     || command === 'repos add'
     || command === 'panes list'
+    || command === 'panes cost'
     || command === 'panes create'
+    || command === 'panes adopt'
     || command === 'panes archive'
     || command === 'panes pin'
     || command === 'panes unpin'
+    || command === 'panes rename'
+    || command === 'panes focus'
+    || command === 'sessions list'
+    || command === 'sessions create'
+    || command === 'sessions get'
+    || command === 'sessions update'
+    || command === 'sessions set-agent'
+    || command === 'sessions associate'
+    || command === 'sessions detach'
+    || command === 'sessions overview'
     || command === 'panels create'
     || command === 'panels list'
     || command === 'panels output'
@@ -429,6 +632,8 @@ function isRunpaneLocalCommand(command: RunpaneCommand): boolean {
     || command === 'panels submit'
     || command === 'panels submit-composer'
     || command === 'panels wait'
+    || command === 'workspace state'
+    || command === 'watch'
     || command === 'agents doctor';
 }
 
@@ -466,8 +671,8 @@ function readValue(args: string[], index: number, flag: string): string {
 
 export function helpText(topic?: string): string {
   const helpTopics = RUNPANE_CONTRACT.help.npm;
-  const key = topic && Object.prototype.hasOwnProperty.call(helpTopics, topic)
-    ? topic as keyof typeof helpTopics
-    : 'default';
-  return helpTopics[key].join('\n');
+  const topicLines = topic
+    ? Object.entries(helpTopics).find(([key]) => key === topic)?.[1]
+    : undefined;
+  return (topicLines ?? helpTopics.default).join('\n');
 }

@@ -6,9 +6,9 @@ const devServerPort = getPlaywrightPort();
 export default defineConfig({
   testDir: './tests',
   // Keep the fast startup checks and the maintained accessibility journeys in CI.
-  testMatch: ['smoke.spec.ts', 'health-check.spec.ts', 'accessibility.spec.ts'],
-  // Reduce timeout for CI
-  timeout: 20 * 1000,
+  testMatch: ['smoke.spec.ts', 'health-check.spec.ts', 'accessibility.spec.ts', 'settings.spec.ts'],
+  // Allow enough time for cold CI startup while keeping failures bounded.
+  timeout: 30 * 1000,
   expect: {
     // Reduce expect timeout for faster failures
     timeout: 5000

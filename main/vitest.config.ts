@@ -2,6 +2,16 @@ import { defineConfig } from 'vitest/config';
 import path from 'path';
 
 export default defineConfig({
+  plugins: [{
+    name: 'terminal-panel-manager-test-dependency',
+    enforce: 'pre',
+    resolveId(source, importer) {
+      if (source === './panelManager' && importer?.endsWith('/src/services/terminalPanelManager.ts')) {
+        return path.resolve(__dirname, './src/test/setup.ts');
+      }
+      return null;
+    },
+  }],
   test: {
     globals: true,
     environment: 'node',
@@ -24,6 +34,7 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
+      electron: path.resolve(__dirname, './src/test/setup.ts'),
     },
   },
 });

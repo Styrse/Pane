@@ -117,9 +117,8 @@ export function getRemoteImportProperties(
   };
 }
 
-export function getRemoteFailureCategory(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  const normalized = message.toLowerCase();
+export function getRemoteFailureCategory(message: string | null | undefined): string {
+  const normalized = (message ?? '').toLowerCase();
   if (normalized.includes('auth') || normalized.includes('token') || normalized.includes('unauthorized')) {
     return 'auth';
   }
@@ -154,9 +153,13 @@ export function getConnectedClientCountBucket(count: number): RemotePaneAnalytic
   return '4+';
 }
 
+interface SanitizedRemotePaneProperties {
+  [key: string]: string | number | boolean | string[] | undefined;
+}
+
 function sanitizeRemotePaneProperties(
   properties: RemotePaneAnalyticsProperties,
-): Record<string, string | number | boolean | string[] | undefined> {
+): SanitizedRemotePaneProperties {
   return {
     surface: properties.surface,
     role: properties.role,

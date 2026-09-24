@@ -4,21 +4,18 @@
  * Owns:
  * - the `UtilityProcess` handle and its lifecycle (start, exit, backoff restart)
  * - the main-side end of the RPC `MessageChannelMain` to `ptyHostMain.ts`
- * - a per-BrowserWindow `MessageChannelMain` pair for direct renderer data flow
- *   (delivered to the renderer via `webContents.postMessage('ptyHost-port', ...)`)
+ * - a per-BrowserWindow `MessageChannelMain` pair for renderer ack/write and
+ *   exit frames (delivered via `webContents.postMessage('ptyHost-port', ...)`)
  * - live `PtyHandle` shims keyed by `ptyId`, used by the managers as an
  *   `IPty`-compatible surface
  *
- * Chunk C scope:
+ * Responsibilities:
  * - wire the RPC channel and fan data events to `PtyHandle`s (for SQLite /
- *   sync-block strip / alt-screen detection in main)
- * - stand up the per-window renderer port as a passthrough: the supervisor
- *   creates the channel, retains both ends, and posts one to the renderer
+ *   sync-block strip / alt-screen detection in main). Main then sends the
+ *   filtered bytes to the renderer over `terminal:output`, never this port.
+ * - stand up the per-window renderer port: the supervisor creates the
+ *   channel, retains both ends, and posts one to the renderer
  * - heartbeat + restart with manager-state-preserving respawn + exponential backoff
- *
- * Out of scope for Chunk C: true two-port tee from ptyHost to (main + renderer).
- * Chunk D/E/F will extend `ptyHostMain.ts` with an `attach-renderer` port so
- * bytes can flow directly to the renderer without traversing main.
  *
  * Wire constraints enforced here (see plan gotchas lines 320-340, 734-743):
  * - Every `MessagePortMain` is stored as a class field; closure locals would
@@ -54,6 +51,7 @@ import type {
   PtyHostRequest,
   PtyHostSpawnOpts,
 } from './types';
+import { boundary, decodeBoundary, type BoundarySchema, type JsonValue } from '../../../shared/validation/boundaryDecoder';
 
 /** Max restart attempts before we give up and leave the host down. */
 const MAX_RESTART_ATTEMPTS = 5;
@@ -71,34 +69,37 @@ const STARTUP_READY_TIMEOUT_MS = 5_000;
  * four kinds: the two heartbeat events, data/exit events, and RPC responses.
  * The rest is handled in `onRpcMessage` via the shared `isPtyHostResponse`.
  */
-function isHeartbeatPong(frame: unknown): frame is { type: 'heartbeat-pong' } {
-  return typeof frame === 'object' && frame !== null && (frame as { type?: unknown }).type === 'heartbeat-pong';
-}
+const heartbeatPongSchema = boundary.object({ type: boundary.literal('heartbeat-pong') });
+const hostReadySchema = boundary.object({ type: boundary.literal('host-ready') });
+const dataEventSchema = boundary.object({
+  type: boundary.literal('data'), ptyId: boundary.string, data: boundary.string,
+});
+const exitEventSchema = boundary.object({
+  type: boundary.literal('exit'),
+  ptyId: boundary.string,
+  exitCode: boundary.nullable(boundary.number),
+  signal: boundary.nullable(boundary.number),
+});
+const rendererFrameSchema = boundary.union(
+  boundary.object({ type: boundary.literal('ack'), ptyId: boundary.string, bytes: boundary.number }),
+  boundary.object({ type: boundary.literal('write'), ptyId: boundary.string, data: boundary.string }),
+);
 
-function isHostReady(frame: unknown): frame is { type: 'host-ready' } {
-  return typeof frame === 'object' && frame !== null && (frame as { type?: unknown }).type === 'host-ready';
-}
-
-function isDataEvent(frame: unknown): frame is Extract<PtyHostEvent, { type: 'data' }> {
-  if (typeof frame !== 'object' || frame === null) return false;
-  const f = frame as { type?: unknown; ptyId?: unknown; data?: unknown };
-  return f.type === 'data' && typeof f.ptyId === 'string' && typeof f.data === 'string';
-}
-
-function isExitEvent(frame: unknown): frame is Extract<PtyHostEvent, { type: 'exit' }> {
-  if (typeof frame !== 'object' || frame === null) return false;
-  const f = frame as { type?: unknown; ptyId?: unknown; exitCode?: unknown; signal?: unknown };
-  return (
-    f.type === 'exit' &&
-    typeof f.ptyId === 'string' &&
-    (typeof f.exitCode === 'number' || f.exitCode === null) &&
-    (typeof f.signal === 'number' || f.signal === null)
-  );
+function decodeFrame<Value>(frame: JsonValue, schema: BoundarySchema<Value>): Value | undefined {
+  try {
+    return decodeBoundary(frame, schema);
+  } catch {
+    return undefined;
+  }
 }
 
 /** Listener signatures kept explicit so `PtyHandle` type stays analyzable. */
 type DataListener = (data: string) => void;
 type ExitListener = (exitCode: number | null, signal: number | null) => void;
+
+interface DisposableListener {
+  dispose(): void;
+}
 
 /**
  * Thin `IPty`-compatible shim.
@@ -131,7 +132,7 @@ export class PtyHandle {
    * Subscribe to PTY byte output. Returns an `IDisposable`-shaped object so
    * callers that previously used `pty.onData(...).dispose()` keep working.
    */
-  onData(listener: DataListener): { dispose(): void } {
+  onData(listener: DataListener): DisposableListener {
     this.dataListeners.add(listener);
     return {
       dispose: () => {
@@ -145,7 +146,7 @@ export class PtyHandle {
    * from the host; `signal` is the raw number so SIGSEGV/SIGABRT/SIGBUS
    * detection at `AbstractCliManager.ts:781-795` keeps working.
    */
-  onExit(listener: ExitListener): { dispose(): void } {
+  onExit(listener: ExitListener): DisposableListener {
     this.exitListeners.add(listener);
     return {
       dispose: () => {
@@ -210,21 +211,6 @@ export class PtyHandle {
 interface WindowPortPair {
   mainPort: MessagePortMain;
   rendererPort: MessagePortMain;
-}
-
-/**
- * Supervisor events. Consumed by Chunk E (`respawnAll`) and future telemetry.
- *
- * - `restart`: emitted when the UtilityProcess exits and a restart is scheduled.
- * - `ready`: emitted on every successful `start()` (initial AND restart).
- * - `ready-after-restart`: emitted ONLY after a restart completes; callers use
- *   this to drive per-manager `respawnAll()` without firing on the initial boot.
- */
-export interface PtyHostSupervisorEvents {
-  restart: () => void;
-  ready: () => void;
-  'ready-after-restart': () => void;
-  'renderer-ack': (ptyId: string, bytes: number) => void;
 }
 
 export class PtyHostSupervisor extends EventEmitter {
@@ -314,15 +300,22 @@ export class PtyHostSupervisor extends EventEmitter {
     // can interleave with the listener install (plan gotchas line 322, 738).
     this.rpcPort.start();
     this.rpcPort.on('message', (event: Electron.MessageEvent) => {
-      this.onRpcMessage(event.data);
+      try {
+        this.onRpcMessage(decodeBoundary(event.data, boundary.json));
+      } catch {
+        console.log('[ptyHost] malformed RPC frame, dropping');
+      }
     });
 
-    this.proc.on('message', (message: unknown) => {
-      if (isHostReady(message)) {
-        this.hostReadyResolve?.();
-        this.hostReadyResolve = null;
-        this.hostReadyReject = null;
-      }
+    this.proc.on('message', (message) => {
+      try {
+        const ready = decodeFrame(decodeBoundary(message, boundary.json), hostReadySchema);
+        if (ready) {
+          this.hostReadyResolve?.();
+          this.hostReadyResolve = null;
+          this.hostReadyReject = null;
+        }
+      } catch { /* Ignore non-JSON utility-process control messages. */ }
     });
 
     this.proc.on('exit', (code: number | null) => {
@@ -383,8 +376,8 @@ export class PtyHostSupervisor extends EventEmitter {
    * - `exit` event → fan to `PtyHandle.emitExit`, drop from `liveHandles`
    * - `PtyHostResponse` → dispatch via `RpcDispatcher`
    */
-  private onRpcMessage(data: unknown): void {
-    if (isHeartbeatPong(data)) {
+  private onRpcMessage(data: JsonValue): void {
+    if (decodeFrame(data, heartbeatPongSchema)) {
       if (this.pongTimer) {
         clearTimeout(this.pongTimer);
         this.pongTimer = null;
@@ -392,10 +385,11 @@ export class PtyHostSupervisor extends EventEmitter {
       return;
     }
 
-    if (isDataEvent(data)) {
-      const handle = this.liveHandles.get(data.ptyId);
+    const dataEvent = decodeFrame(data, dataEventSchema);
+    if (dataEvent) {
+      const handle = this.liveHandles.get(dataEvent.ptyId);
       if (handle) {
-        handle.emitData(data.data);
+        handle.emitData(dataEvent.data);
       }
       // Data frames are NOT auto-teed to renderers here. Main-side managers
       // (`terminalPanelManager.setupTerminalHandlers`) subscribe via the
@@ -405,17 +399,18 @@ export class PtyHostSupervisor extends EventEmitter {
       return;
     }
 
-    if (isExitEvent(data)) {
-      const handle = this.liveHandles.get(data.ptyId);
+    const exitEvent = decodeFrame(data, exitEventSchema);
+    if (exitEvent) {
+      const handle = this.liveHandles.get(exitEvent.ptyId);
       if (handle) {
-        handle.emitExit(data.exitCode, data.signal);
-        this.liveHandles.delete(data.ptyId);
+        handle.emitExit(exitEvent.exitCode, exitEvent.signal);
+        this.liveHandles.delete(exitEvent.ptyId);
       }
       // Exit frames ARE mirrored to renderers so `electronAPI.ptyHost.onExit`
       // subscribers fire. No main-side filtering is required for exit frames;
       // the preload dispatches by ptyId. Stale listeners (e.g. for a ptyId
       // whose panel already unmounted) drop the frame on the floor.
-      this.broadcastToRenderers(data);
+      this.broadcastToRenderers(exitEvent);
       return;
     }
 
@@ -533,7 +528,7 @@ export class PtyHostSupervisor extends EventEmitter {
     }
     const req: Omit<PtyHostRequest, 'id'> = { method: 'spawn', args: opts };
     const result = await this.dispatcher.send(this.rpcPort, req);
-    const spawned = result as { ptyId: string; pid: number };
+    const spawned = decodeBoundary(result, boundary.object({ ptyId: boundary.string, pid: boundary.number }));
     const handle = new PtyHandle(spawned.ptyId, spawned.pid, this);
     this.liveHandles.set(spawned.ptyId, handle);
     return spawned;
@@ -590,44 +585,45 @@ export class PtyHostSupervisor extends EventEmitter {
   }
 
   /**
-   * Stand up the per-BrowserWindow data port pair and deliver the renderer
-   * end to the window. Called from `index.ts` on `did-finish-load`.
-   *
-   * Chunk C scope: the renderer port is a passthrough. Bytes still flow from
-   * ptyHost → supervisor → `PtyHandle.emitData` and from there to main-side
-   * code (SQLite, sync-block strip). `TerminalPanel.tsx` continues to receive
-   * bytes via the existing `terminal:output` IPC path. Chunk D switches the
-   * renderer to subscribe on this port, and future work may extend ptyHost to
-   * tee bytes directly to the renderer end.
+   * Stand up the per-BrowserWindow port pair and deliver the renderer end to
+   * the window. Called from `index.ts` on `did-finish-load`. The port carries
+   * ack/write frames from the renderer and exit frames to it; terminal bytes
+   * reach `TerminalPanel.tsx` over `terminal:output`.
    *
    * Both ports are retained on `windowPorts` — port GC would otherwise close
    * the channel (plan gotcha line 323).
    */
   attachWindow(webContents: WebContents): void {
-    // Guard: ignore if we've already attached this window.
-    if (this.windowPorts.has(webContents.id)) {
-      return;
+    // A reload tears down the preload that held the previous renderer port, so
+    // every load needs a fresh channel. Close the stale pair before replacing it.
+    const existing = this.windowPorts.get(webContents.id);
+    if (existing) {
+      existing.mainPort.close();
+    } else {
+      // Clean up on window destroy so the map doesn't retain dead entries.
+      webContents.once('destroyed', () => {
+        this.windowPorts.get(webContents.id)?.mainPort.close();
+        this.windowPorts.delete(webContents.id);
+      });
     }
 
     const { port1: mainPort, port2: rendererPort } = new MessageChannelMain();
     this.windowPorts.set(webContents.id, { mainPort, rendererPort });
 
-    // Start the main-side end before listening. This end will carry ack/write
-    // frames from the renderer in Chunk D.
+    // Start the main-side end before listening. This end carries ack/write
+    // frames from the renderer.
     mainPort.start();
     mainPort.on('message', (event: Electron.MessageEvent) => {
-      this.onRendererMessage(webContents.id, event.data);
+      try {
+        this.onRendererMessage(webContents.id, decodeBoundary(event.data, boundary.json));
+      } catch {
+        /* Ignore malformed renderer frames at the port boundary. */
+      }
     });
 
     // Hand the renderer end to the window. The preload listener for
     // 'ptyHost-port' takes `event.ports[0]` and stores it.
     webContents.postMessage('ptyHost-port', null, [rendererPort]);
-
-    // Clean up on window destroy so the map doesn't retain dead entries.
-    // Both ports become unreferenced and GC closes the channel.
-    webContents.once('destroyed', () => {
-      this.windowPorts.delete(webContents.id);
-    });
 
     console.log(`[ptyHost] attached window webContentsId=${webContents.id}`);
   }
@@ -641,12 +637,12 @@ export class PtyHostSupervisor extends EventEmitter {
    * managers track flow-control state on the main side via
    * `acknowledgeBytes()` elsewhere.
    */
-  private onRendererMessage(webContentsId: number, data: unknown): void {
+  private onRendererMessage(webContentsId: number, data: JsonValue): void {
     void webContentsId;
-    if (typeof data !== 'object' || data === null) return;
-    const frame = data as { type?: unknown; ptyId?: unknown; bytes?: unknown; data?: unknown };
+    const frame = decodeFrame(data, rendererFrameSchema);
+    if (!frame) return;
 
-    if (frame.type === 'ack' && typeof frame.ptyId === 'string' && typeof frame.bytes === 'number') {
+    if (frame.type === 'ack') {
       // Managers still track flow control on the main side. Emit first so
       // TerminalPanelManager can decrement pending bytes and resume the PTY.
       this.emit('renderer-ack', frame.ptyId, frame.bytes);
@@ -659,7 +655,7 @@ export class PtyHostSupervisor extends EventEmitter {
       return;
     }
 
-    if (frame.type === 'write' && typeof frame.ptyId === 'string' && typeof frame.data === 'string') {
+    if (frame.type === 'write') {
       this.write(frame.ptyId, frame.data).catch(() => {
         /* ignore; stale write after host restart */
       });
@@ -668,15 +664,16 @@ export class PtyHostSupervisor extends EventEmitter {
   }
 
   /**
-   * Post `frame` to every attached renderer's data port. Preload routes the
-   * frame to subscribers registered via `electronAPI.ptyHost.onData` /
-   * `onExit` by `ptyId`; windows that never registered a subscriber for
-   * `frame.ptyId` drop the frame on the floor.
+   * Post `frame` to every attached renderer's port. Preload routes the
+   * frame to subscribers registered via `electronAPI.ptyHost.onExit` by
+   * `ptyId`; windows that never registered a subscriber for `frame.ptyId`
+   * drop the frame on the floor.
    *
-   * Kept narrow: only `data` and `exit` frames flow this way. Heartbeat and
-   * RPC-response frames stay on the main-side RPC port.
+   * Kept narrow: only `exit` frames flow this way. Terminal bytes reach the
+   * renderer over `terminal:output`; heartbeat and RPC-response frames stay
+   * on the main-side RPC port.
    */
-  private broadcastToRenderers(frame: PtyHostEvent): void {
+  private broadcastToRenderers(frame: Extract<PtyHostEvent, { type: 'exit' }>): void {
     for (const { mainPort } of this.windowPorts.values()) {
       try {
         mainPort.postMessage(frame);
@@ -685,20 +682,6 @@ export class PtyHostSupervisor extends EventEmitter {
         console.warn('[ptyHost] failed to post renderer frame', err);
       }
     }
-  }
-
-  /**
-   * Post a FILTERED `data` frame to every attached renderer's data port.
-   * Called by main-side managers (e.g. `terminalPanelManager.flushOutputBuffer`)
-   * AFTER running `filterSyncBlockClears` and alt-screen detection on the raw
-   * bytes. This is the hand-off for flag-on renderer subscriptions via
-   * `electronAPI.ptyHost.onData(ptyId, cb)`.
-   *
-   * Kept separate from `broadcastToRenderers` so the intent is explicit:
-   * supervisor never auto-broadcasts raw data bytes.
-   */
-  postDataToRenderers(ptyId: string, data: string): void {
-    this.broadcastToRenderers({ type: 'data', ptyId, data });
   }
 
   /**

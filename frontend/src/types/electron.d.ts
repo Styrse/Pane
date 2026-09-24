@@ -1,5 +1,5 @@
 // Type definitions for Electron preload API
-import type { Session, SessionOutput, GitStatus, VersionUpdateInfo } from './session';
+import type { Session, SessionOutput, GitStatus, VersionInfo, VersionUpdateInfo } from './session';
 import type { Project } from './project';
 import type { Folder } from './folder';
 import type { AppConfig, UpdateConfigRequest } from './config';
@@ -24,12 +24,39 @@ import type {
   PanePermissionResolvedEvent,
   PanePermissionResponse,
 } from '../../../shared/types/daemon';
-import type { ToolPanel } from '../../../shared/types/panels';
+import type {
+  CreatePanelRequest,
+  PanelEventType,
+  ResumableSession,
+  SessionPanelLayout,
+  ToolPanel,
+} from '../../../shared/types/panels';
+import type { JsonValue } from '../../../shared/validation/boundaryDecoder';
 import type { PanelAgentStatusEvent } from '../../../shared/types/agentStatus';
+import type { DiffManifest, DiffScope, FileDiffRequest, FileDiffResult } from '../../../shared/types/gitDiff';
+import type { AgentUsageSnapshot } from '../../../shared/types/agentUsage';
 import type { PaneChatAgent, PaneChatState } from '../../../shared/types/paneChat';
+import type {
+  OrchestrationAssociationInput,
+  OrchestrationSessionCreateInput,
+  OrchestrationSessionListResult,
+  OrchestrationSessionOverview,
+  OrchestrationSessionRecord,
+  OrchestrationSessionSelector,
+  OrchestrationSessionUpdateInput,
+  OrchestrationSessionView,
+} from '../../../shared/types/orchestrationSession';
+import type { UsageIndexStatus, UsageReport, UsageReportRequest } from '../../../shared/types/usage';
+import type { LeaderboardResponse, LeaderboardStatus, LeaderboardSubmitResult } from '../../../shared/types/leaderboard';
 import type { CreateSessionRequest } from './session';
 import type { DetectedProjectConfig } from '../../../shared/types/projectConfig';
-import type { CloudVmState } from '../../../shared/types/cloud';
+import type { RunpanePaneFocusRequestedEvent } from '../../../shared/types/runpaneOrchestration';
+import type { UpdateCapabilities } from '../../../shared/types/updater';
+import type {
+  ProjectDashboardData,
+  ProjectDashboardSessionUpdateEvent,
+  ProjectDashboardUpdateEvent,
+} from './projectDashboard';
 
 interface LogEntry {
   timestamp: string;
@@ -48,32 +75,48 @@ interface RendererDiagnosticPayload {
   column?: number;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- Generic type parameter default for flexible API responses
+// oxlint-disable-next-line typescript/no-explicit-any -- Generic type parameter default for flexible API responses
 interface IPCResponse<T = any> {
   success: boolean;
   data?: T;
   error?: string;
   details?: string;
   command?: string;
+  code?: string;
 }
 
 interface ElectronAPI {
   // Generic invoke method. Daemon-owned channels route through the main-process
   // daemon bridge while adapter-only channels stay on direct Electron IPC.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Generic IPC bridge that returns different types based on channel
-  invoke: (channel: string, ...args: unknown[]) => Promise<any>;
+  invoke: {
+    (channel: 'panels:get-layout', sessionId: string): Promise<IPCResponse<SessionPanelLayout | null>>;
+    (channel: 'panels:set-layout', sessionId: string, layout: SessionPanelLayout | null): Promise<IPCResponse<void>>;
+    (channel: 'panels:emitEvent', panelId: string, eventType: PanelEventType, data: JsonValue): Promise<void>;
+    (channel: 'panels:clearUnviewedContent', panelId: string): Promise<IPCResponse<void>>;
+    // oxlint-disable-next-line typescript/no-explicit-any -- Generic IPC bridge fallback for channels without dedicated overloads
+    (channel: string, ...args: unknown[]): Promise<any>;
+  };
   
   // Basic app info
   getAppVersion: () => Promise<string>;
   getPlatform: () => Promise<string>;
   isPackaged: () => Promise<boolean>;
 
+  // Window Controls Overlay (Windows/Linux). `windowControlsOverlayEnabled` is a
+  // plain boolean, not a promise: it is resolved in the preload from argv so the
+  // first render already knows whether the page owns the title bar.
+  windowControlsOverlayEnabled: boolean;
+  appearanceSnapshot?: import('../../../shared/types/appearance').AppearanceSnapshot;
+  setTitleBarOverlay: (colors: { color: string; symbolColor: string }) => Promise<IPCResponse>;
+  setBackgroundColor: (payload: { theme: import('../../../shared/types/appearance').Theme; color: string }) => Promise<IPCResponse>;
+
   // Version checking
-  checkForUpdates: () => Promise<IPCResponse>;
+  checkForUpdates: () => Promise<IPCResponse<VersionInfo>>;
   getVersionInfo: () => Promise<IPCResponse>;
   
   // Auto-updater
   updater: {
+    getCapabilities: () => Promise<IPCResponse<UpdateCapabilities>>;
     checkAndDownload: () => Promise<IPCResponse>;
     downloadUpdate: () => Promise<IPCResponse>;
     installUpdate: () => Promise<IPCResponse>;
@@ -82,7 +125,13 @@ interface ElectronAPI {
   };
 
   // System utilities
-  openExternal: (url: string) => Promise<void>;
+  openExternal: (url: string) => Promise<IPCResponse>;
+
+  feedback: {
+    submit: (request: import('../../../shared/types/feedback').SubmitFeedbackRequest) => Promise<IPCResponse<
+      import('../../../shared/types/feedback').SubmitFeedbackSuccess | import('../../../shared/types/feedback').SubmitFeedbackFailure
+    >>;
+  };
 
   diagnostics: {
     rendererFatal: (payload: RendererDiagnosticPayload) => Promise<IPCResponse>;
@@ -91,6 +140,40 @@ interface ElectronAPI {
   paneChat: {
     getOrCreate: () => Promise<IPCResponse<PaneChatState<Session>>>;
     setAgent: (agent: PaneChatAgent) => Promise<IPCResponse<PaneChatState<Session>>>;
+  };
+
+  orchestrationSessions: {
+    list: () => Promise<IPCResponse<OrchestrationSessionListResult>>;
+    select: (selector: OrchestrationSessionSelector) => Promise<IPCResponse<OrchestrationSessionListResult>>;
+    create: (input: OrchestrationSessionCreateInput) => Promise<IPCResponse<OrchestrationSessionView<Session>>>;
+    get: (selector: OrchestrationSessionSelector) => Promise<IPCResponse<OrchestrationSessionView<Session>>>;
+    update: (selector: OrchestrationSessionSelector, input: OrchestrationSessionUpdateInput) => Promise<IPCResponse<OrchestrationSessionRecord>>;
+    setAgent: (selector: OrchestrationSessionSelector, agent: PaneChatAgent) => Promise<IPCResponse<OrchestrationSessionView<Session>>>;
+    associate: (selector: OrchestrationSessionSelector, association: OrchestrationAssociationInput) => Promise<IPCResponse<OrchestrationSessionRecord>>;
+    detach: (selector: OrchestrationSessionSelector, paneId?: string) => Promise<IPCResponse<OrchestrationSessionRecord>>;
+    overview: (selector: OrchestrationSessionSelector) => Promise<IPCResponse<OrchestrationSessionOverview>>;
+  };
+
+  // Token usage, cost and rate-limit reporting
+  usage: {
+    getReport: (request?: UsageReportRequest) => Promise<IPCResponse<UsageReport>>;
+    getStatus: () => Promise<IPCResponse<UsageIndexStatus>>;
+    rescan: () => Promise<IPCResponse<UsageIndexStatus>>;
+  };
+
+  // Leaderboard opt-in and submission
+  leaderboard: {
+    getStatus: () => Promise<IPCResponse<LeaderboardStatus>>;
+    join: () => Promise<IPCResponse<LeaderboardSubmitResult>>;
+    leave: () => Promise<IPCResponse>;
+    sendNow: () => Promise<IPCResponse<LeaderboardSubmitResult>>;
+    fetch: () => Promise<IPCResponse<LeaderboardResponse>>;
+  };
+
+  // Image export (save-to-file / OS share sheet)
+  export: {
+    saveImage: (data: string, defaultFilename: string) => Promise<IPCResponse<{ filePath: string } | null>>;
+    shareImage: (data: string, filename: string) => Promise<IPCResponse<{ method: 'share' | 'clipboard' }>>;
   };
 
   // Session management
@@ -121,8 +204,8 @@ interface ElectronAPI {
     getExecutionDiff: (sessionId: string, executionId: string) => Promise<IPCResponse>;
     gitCommit: (sessionId: string, message: string) => Promise<IPCResponse>;
     gitDiff: (sessionId: string) => Promise<IPCResponse>;
-    getCombinedDiff: (sessionId: string, executionIds?: number[]) => Promise<IPCResponse>;
-    getCommitDiffByHash: (sessionId: string, commitHash: string) => Promise<IPCResponse>;
+    getDiffManifest: (sessionId: string, scope: DiffScope) => Promise<IPCResponse<DiffManifest>>;
+    getFileDiff: (sessionId: string, scope: DiffScope, request: FileDiffRequest) => Promise<IPCResponse<FileDiffResult>>;
 
     // Script operations
     hasRunScript: (sessionId: string) => Promise<IPCResponse>;
@@ -189,7 +272,7 @@ interface ElectronAPI {
     saveLargeText: (sessionId: string, text: string) => Promise<string>;
 
     // Resume session operations
-    getResumable: () => Promise<IPCResponse>;
+    getResumable: () => Promise<IPCResponse<ResumableSession[]>>;
     resumeInterrupted: (sessionIds: string[]) => Promise<IPCResponse>;
     dismissInterrupted: (sessionIds: string[]) => Promise<IPCResponse>;
   };
@@ -202,7 +285,7 @@ interface ElectronAPI {
     activate: (projectId: string) => Promise<IPCResponse>;
     update: (projectId: string, updates: Partial<Project>) => Promise<IPCResponse>;
     delete: (projectId: string) => Promise<IPCResponse>;
-    detectBranch: (path: string) => Promise<IPCResponse>;
+    detectBranch: (path: string) => Promise<IPCResponse<string>>;
     reorder: (projectOrders: Array<{ id: number; displayOrder: number }>) => Promise<IPCResponse>;
     listBranches: (projectId: string) => Promise<IPCResponse>;
     refreshGitStatus: (projectId: number) => Promise<IPCResponse>;
@@ -293,10 +376,10 @@ interface ElectronAPI {
 
   // Dashboard
   dashboard: {
-    getProjectStatus: (projectId: number) => Promise<IPCResponse>;
-    getProjectStatusProgressive: (projectId: number) => Promise<IPCResponse>;
-    onUpdate: (callback: (data: Record<string, unknown>) => void) => () => void;
-    onSessionUpdate: (callback: (data: { type: string; projectId?: number; sessionId?: string; data: unknown }) => void) => () => void;
+    getProjectStatus: (projectId: number) => Promise<IPCResponse<ProjectDashboardData>>;
+    getProjectStatusProgressive: (projectId: number) => Promise<IPCResponse<ProjectDashboardData>>;
+    onUpdate: (callback: (data: ProjectDashboardUpdateEvent) => void) => () => void;
+    onSessionUpdate: (callback: (data: ProjectDashboardSessionUpdateEvent) => void) => () => void;
   };
 
   // UI State management
@@ -319,14 +402,18 @@ interface ElectronAPI {
   events: {
     onPermissionRequest: (callback: (request: PanePermissionRequest) => void) => () => void;
     onPermissionResolved: (callback: (event: PanePermissionResolvedEvent) => void) => () => void;
+    onSessionCreationFailed: (callback: (failure: { name: string; error: string }) => void) => () => void;
     onSessionCreated: (callback: (session: Session) => void) => () => void;
     onSessionUpdated: (callback: (session: Session) => void) => () => void;
-    onSessionDeleted: (callback: (session: Session) => void) => () => void;
+    onPaneFocusRequested: (callback: (data: RunpanePaneFocusRequestedEvent) => void) => () => void;
+    onSessionDeleted: (callback: (session: Pick<Session, 'id'>) => void) => () => void;
     onSessionsLoaded: (callback: (sessions: Session[]) => void) => () => void;
     onSessionOutput: (callback: (output: SessionOutput) => void) => () => void;
     onSessionLog: (callback: (data: { sessionId: string; entry: LogEntry }) => void) => () => void;
     onSessionLogsCleared: (callback: (data: { sessionId: string }) => void) => () => void;
     onSessionOutputAvailable: (callback: (info: { sessionId: string; hasNewOutput: boolean }) => void) => () => void;
+    onOrchestrationSessionsChanged?: (callback: (change: { sessionId: string; kind: string; selectionChanged?: boolean }) => void) => () => void;
+    onOrchestrationSessionsOverviewUpdated?: (callback: (change: { panelId: string; sessionId?: string; state: string }) => void) => () => void;
     onGitStatusUpdated: (callback: (data: { sessionId: string; gitStatus: GitStatus }) => void) => () => void;
     onGitStatusLoading: (callback: (data: { sessionId: string }) => void) => () => void;
     onGitStatusLoadingBatch?: (callback: (sessionIds: string[]) => void) => () => void;
@@ -349,14 +436,14 @@ interface ElectronAPI {
     onPanelPromptAdded: (callback: (data: { panelId: string; content: string }) => void) => () => void;
     onPanelResponseAdded: (callback: (data: { panelId: string; content: string }) => void) => () => void;
     
-    onTerminalOutput: (callback: (output: { sessionId: string; data: string; type: 'stdout' | 'stderr' }) => void) => () => void;
+    onTerminalOutput: (callback: (output: import('../../../shared/types/panels').TerminalOutputEvent) => void) => () => void;
     onTerminalCliReady: (callback: (data: { panelId: string }) => void) => () => void;
     onTerminalExited: (callback: (data: { sessionId: string; panelId: string; exitCode: number; signal: number | null }) => void) => () => void;
     onTerminalAlternateScreen: (callback: (data: { panelId: string; active: boolean }) => void) => () => void;
     /**
      * Fired when a terminal panel is spawned via the ptyHost UtilityProcess.
-     * Carries the host-allocated `ptyId` so TerminalPanel.tsx can subscribe to
-     * `electronAPI.ptyHost.onData(ptyId, cb)` when the `usePtyHost` setting is on.
+     * Carries the host-allocated `ptyId` so TerminalPanel.tsx can ack
+     * flow-control bytes over `electronAPI.ptyHost.ack` when `usePtyHost` is on.
      * Re-fires on auto-reattach after a supervisor restart with a new ptyId.
      */
     onTerminalPtyReady: (callback: (data: { sessionId: string; panelId: string; ptyId: string }) => void) => () => void;
@@ -386,14 +473,15 @@ interface ElectronAPI {
 
     // Terminal font config events
     onTerminalFontUpdated: (callback: (data: { terminalFontFamily: string; terminalFontSize: number }) => void) => () => void;
+    onNativeAppearanceUpdated: (callback: (data: { prefersDark: boolean }) => void) => () => void;
 
     removeAllListeners: (channel: string) => void;
   };
 
   // Panel operations
   panels: {
-    getSessionPanels: (sessionId: string) => Promise<IPCResponse>;
-    createPanel: (sessionId: string, type: string, name: string, config?: Record<string, unknown>) => Promise<IPCResponse>;
+    getSessionPanels: (sessionId: string) => Promise<IPCResponse<ToolPanel[]>>;
+    createPanel: (sessionId: string, type: string, name: string, config?: CreatePanelRequest['initialState']) => Promise<IPCResponse<ToolPanel>>;
     deletePanel: (panelId: string) => Promise<IPCResponse>;
     renamePanel: (panelId: string, name: string) => Promise<IPCResponse>;
     setActivePanel: (sessionId: string, panelId: string) => Promise<IPCResponse>;
@@ -447,14 +535,14 @@ interface ElectronAPI {
   // Analytics tracking
   analytics: {
     getIdentity: () => Promise<IPCResponse<import('./config').AnalyticsIdentity>>;
-    onMainEvent: (callback: (event: { eventName: string; properties: Record<string, unknown> }) => void) => () => void;
+    onMainEvent: (callback: (event: { eventName: string; properties: import('../../../shared/validation/boundaryDecoder').JsonObject }) => void) => () => void;
     syncDistinctId: (distinctId: string) => void;
     redeemAttribution: () => Promise<IPCResponse<void>>;
   };
 
   // Onboarding
   onboarding: {
-    detectEnvironment: () => Promise<IPCResponse>;
+    detectEnvironment: () => Promise<IPCResponse<{ ghReady?: boolean }>>;
     getGitHubAuthCommand: () => Promise<IPCResponse<{ command: string; reason: 'login' | 'refresh' | 'install-gh' | 'ready' }>>;
     openGitHubAuthTerminal: () => Promise<IPCResponse<{
       command: string;
@@ -486,25 +574,16 @@ interface ElectronAPI {
     getStatus: (projectId: number) => Promise<IPCResponse>;
   };
 
-  // Cloud VM management
-  cloud: {
-    getState: () => Promise<IPCResponse>;
-    startVm: () => Promise<IPCResponse>;
-    stopVm: () => Promise<IPCResponse>;
-    startTunnel: () => Promise<IPCResponse>;
-    stopTunnel: () => Promise<IPCResponse>;
-    connectWorkspace: () => Promise<IPCResponse>;
-    disconnectWorkspace: () => Promise<IPCResponse>;
-    startPolling: () => Promise<IPCResponse>;
-    stopPolling: () => Promise<IPCResponse>;
-    onStateChanged: (callback: (state: CloudVmState) => void) => () => void;
-  };
-
   // Resource monitor
   resourceMonitor: {
     getSnapshot: () => Promise<IPCResponse>;
     startActive: () => Promise<IPCResponse>;
     stopActive: () => Promise<IPCResponse>;
+  };
+
+  // Agent subscription usage
+  agentUsage: {
+    get: (force?: boolean) => Promise<IPCResponse<AgentUsageSnapshot>>;
   };
 
   // Window state queries (invoke, not event subscriptions)
@@ -514,12 +593,9 @@ interface ElectronAPI {
 
   // ptyHost: typed wrapper over the per-window MessagePort installed by the
   // preload script. The raw port never crosses contextBridge — these
-  // functions are the only surface. Chunk D will switch TerminalPanel.tsx
-  // over to these; Chunk C ships the plumbing so renderer code can start
-  // subscribing when the `usePtyHost` setting is on.
+  // functions are the only surface. Terminal bytes arrive on
+  // `events.onTerminalOutput`, not here.
   ptyHost: {
-    /** Subscribe to PTY byte output for a given ptyId. Returns unsubscribe. */
-    onData: (ptyId: string, cb: (data: string) => void) => () => void;
     /** Subscribe to PTY exit for a given ptyId. Returns unsubscribe. */
     onExit: (
       ptyId: string,
@@ -534,14 +610,14 @@ interface ElectronAPI {
 
 // Additional electron interface for IPC event listeners
 interface ElectronInterface {
-  openExternal: (url: string) => Promise<void>;
+  openExternal: (url: string) => Promise<IPCResponse>;
   // Generic invoke method. Daemon-owned channels route through the main-process
   // daemon bridge while adapter-only channels stay on direct Electron IPC.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Generic IPC bridge that returns different types based on channel
+  // oxlint-disable-next-line typescript/no-explicit-any -- Generic IPC bridge that returns different types based on channel
   invoke: (channel: string, ...args: unknown[]) => Promise<any>;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Generic IPC event callback that receives different argument types
+  // oxlint-disable-next-line typescript/no-explicit-any -- Generic IPC event callback that receives different argument types
   on: (channel: string, callback: (...args: any[]) => void) => void;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Generic IPC event callback that receives different argument types
+  // oxlint-disable-next-line typescript/no-explicit-any -- Generic IPC event callback that receives different argument types
   off: (channel: string, callback: (...args: any[]) => void) => void;
 }
 

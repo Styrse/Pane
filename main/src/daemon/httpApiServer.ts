@@ -1,5 +1,7 @@
 import http, { type IncomingMessage, type ServerResponse } from 'http';
-import type { Duplex } from 'stream';
+import { pipeline, type Duplex, type Writable } from 'stream';
+import { constants as zlibConstants, createGzip, gzip } from 'zlib';
+import type { AddressInfo } from 'net';
 import WebSocket, { type RawData, WebSocketServer } from 'ws';
 import { createFanoutEventSink, noopPaneEventSink, type PaneEventSink } from '../core/eventSink';
 import type { ConfigManager } from '../services/configManager';
@@ -22,15 +24,27 @@ import {
 } from '../../../shared/types/remoteDaemon';
 import { remoteHostRuntimeStateStore } from './remoteHostRuntimeState';
 import { getRemotePwaAssetResponse } from './pwaStaticAssets';
+import { boundary, decodeBoundary } from '../../../shared/validation/boundaryDecoder';
+import type { BoundarySchema, JsonValue } from '../../../shared/validation/boundaryDecoder';
+import { serializeJsonTransport } from './jsonTransport';
 
 interface RemoteHttpAddress {
   host: string;
   port: number;
 }
 
+const remoteInvokeRequestSchema: BoundarySchema<RemoteInvokeRequest> = boundary.object({
+  channel: boundary.nonEmptyString,
+  args: boundary.array(boundary.json),
+  token: boundary.optional(boundary.string),
+  runtimeId: boundary.optional(boundary.string),
+  clientLabel: boundary.optional(boundary.string),
+});
+
 interface ConnectedRemoteEventClient {
   id: string;
-  response: ServerResponse;
+  // The response itself, or a gzip stream piped into it when the client accepts gzip.
+  stream: Writable;
   remoteClientId: string | null;
   remoteClientTokenHash: string | null;
   label: string | null;
@@ -89,6 +103,8 @@ const MAX_UNAUTHENTICATED_REQUEST_BODY_BYTES = 1024 * 1024;
 const MAX_AUTHENTICATED_REQUEST_BODY_BYTES = 16 * 1024 * 1024;
 const DEFAULT_REMOTE_DAEMON_HEARTBEAT_INTERVAL_MS = 5_000;
 const REMOTE_VISIBILITY_VIEWER_STALE_MS = 15 * 60 * 1000;
+const MIN_GZIP_BODY_BYTES = 1024;
+const GZIP_HEADERS = { 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding' } as const;
 const DEEPGRAM_LISTEN_ENDPOINT = 'wss://api.deepgram.com/v1/listen';
 const VOICE_DEEPGRAM_STREAM_PATH = '/voice/deepgram-stream';
 const DEEPGRAM_STREAMING_KEYTERMS = [
@@ -152,6 +168,12 @@ interface PaneRemoteHttpApiServerOptions {
   analyticsSink?: RemotePaneAnalyticsSink;
 }
 
+type RemoteHttpConfig = Pick<ReturnType<ConfigManager['getConfig']>, 'deepgramApiKey' | 'remoteDaemon'>;
+
+interface RemoteHttpConfigProvider {
+  getConfig(): RemoteHttpConfig;
+}
+
 class RemoteDaemonBadRequestError extends Error {
   constructor(
     readonly code: string,
@@ -175,7 +197,7 @@ export class PaneRemoteHttpApiServer {
 
   constructor(
     private readonly commandRegistry: PaneCommandRegistry,
-    private readonly configManager: ConfigManager,
+    private readonly configManager: RemoteHttpConfigProvider,
     options: PaneRemoteHttpApiServerOptions = {},
   ) {
     this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? DEFAULT_REMOTE_DAEMON_HEARTBEAT_INTERVAL_MS;
@@ -189,7 +211,7 @@ export class PaneRemoteHttpApiServer {
 
           const payload: RemoteDaemonEventEnvelope = {
             channel,
-            args,
+            args: serializeJsonTransport(args, boundary.array(boundary.json)),
             timestamp: new Date().toISOString(),
           };
 
@@ -200,7 +222,7 @@ export class PaneRemoteHttpApiServer {
             }
 
             try {
-              writeSseEvent(client.response, 'daemon-event', payload);
+              writeSseEvent(client.stream, 'daemon-event', payload);
             } catch {
               this.dropEventClient(clientConnectionId);
             }
@@ -297,7 +319,7 @@ export class PaneRemoteHttpApiServer {
     });
 
     const address = server.address();
-    if (!address || typeof address === 'string') {
+    if (!isTcpAddress(address)) {
       throw new Error('Remote daemon HTTP API server did not expose a TCP address');
     }
 
@@ -513,8 +535,15 @@ export class PaneRemoteHttpApiServer {
       this.writeJson(response, 200, {
         ok: true,
         result,
-      } satisfies RemoteInvokeSuccessPayload);
+      } satisfies RemoteInvokeSuccessPayload, request);
     } catch (error) {
+      if (error instanceof RemoteDaemonBadRequestError) {
+        this.writeJson(response, error.statusCode, {
+          ok: false,
+          error: { message: error.message, code: error.code },
+        } satisfies RemoteInvokeErrorPayload);
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       const code = message.includes('No Pane daemon command registered')
         ? 'ERR_UNKNOWN_CHANNEL'
@@ -564,16 +593,22 @@ export class PaneRemoteHttpApiServer {
       return;
     }
 
-    response.writeHead(200, {
+    const compress = acceptsGzip(request);
+    const headers: http.OutgoingHttpHeaders = {
       ...REMOTE_DAEMON_CORS_HEADERS,
       'Cache-Control': 'no-cache, no-transform',
       Connection: 'keep-alive',
       'Content-Type': 'text/event-stream; charset=utf-8',
       'X-Accel-Buffering': 'no',
-    });
+    };
+    if (compress) {
+      Object.assign(headers, GZIP_HEADERS);
+    }
+    response.writeHead(200, headers);
     response.flushHeaders();
-    response.write('retry: 1000\n\n');
-    writeSseEvent(response, 'ready', {
+    const stream = compress ? createSseGzipStream(response) : response;
+    stream.write('retry: 1000\n\n');
+    writeSseEvent(stream, 'ready', {
       replay: 'none',
       resync: 'refetch-state-after-reconnect',
       timestamp: new Date().toISOString(),
@@ -586,7 +621,7 @@ export class PaneRemoteHttpApiServer {
     }, this.heartbeatIntervalMs);
     const connectedClient: ConnectedRemoteEventClient = {
       id: clientConnectionId,
-      response,
+      stream,
       remoteClientId: auth.client?.id ?? null,
       remoteClientTokenHash: auth.client?.tokenHash ?? null,
       label: auth.client?.label ?? getClientLabelFromRequest(request, url.searchParams.get('client_label')),
@@ -648,9 +683,8 @@ export class PaneRemoteHttpApiServer {
       );
     }
 
-    let parsed: unknown;
     try {
-      parsed = JSON.parse(body) as unknown;
+      return decodeBoundary(JSON.parse(body), remoteInvokeRequestSchema);
     } catch (error) {
       throw new RemoteDaemonBadRequestError(
         'ERR_REMOTE_DAEMON_BAD_REQUEST',
@@ -660,21 +694,33 @@ export class PaneRemoteHttpApiServer {
       );
     }
 
-    if (!isRemoteInvokeRequest(parsed)) {
-      throw new RemoteDaemonBadRequestError(
-        'ERR_REMOTE_DAEMON_BAD_REQUEST',
-        'Remote daemon invoke request must contain a channel string and args array',
-      );
-    }
-
-    return parsed;
   }
 
-  private writeJson(response: ServerResponse, statusCode: number, payload: unknown): void {
-    response.writeHead(statusCode, withCorsHeaders({
+  private writeJson<Payload>(
+    response: ServerResponse,
+    statusCode: number,
+    payload: Payload,
+    request?: IncomingMessage,
+  ): void {
+    const body = JSON.stringify(payload);
+    const headers = withCorsHeaders({
       'Content-Type': 'application/json; charset=utf-8',
-    }));
-    response.end(JSON.stringify(payload));
+    });
+    if (!request || body.length < MIN_GZIP_BODY_BYTES || !acceptsGzip(request)) {
+      response.writeHead(statusCode, headers);
+      response.end(body);
+      return;
+    }
+
+    gzip(body, (error, compressed) => {
+      if (error) {
+        response.writeHead(statusCode, headers);
+        response.end(body);
+        return;
+      }
+      response.writeHead(statusCode, { ...headers, ...GZIP_HEADERS });
+      response.end(compressed);
+    });
   }
 
   private writeMethodNotAllowed(response: ServerResponse, method: 'GET' | 'POST'): void {
@@ -722,8 +768,8 @@ export class PaneRemoteHttpApiServer {
       this.getRemoteVisibilityViewerPrefix(client.remoteClientId, client.remoteClientTokenHash, client.remoteRuntimeId),
     );
     this.eventClients.delete(clientConnectionId);
-    if (!client.response.writableEnded) {
-      client.response.end();
+    if (!client.stream.writableEnded) {
+      client.stream.end();
     }
     this.publishConnectedClients();
     this.trackRemoteClientConnection(client, 'disconnected');
@@ -737,7 +783,7 @@ export class PaneRemoteHttpApiServer {
 
     const timestamp = new Date().toISOString();
     try {
-      writeSseEvent(client.response, 'heartbeat', {
+      writeSseEvent(client.stream, 'heartbeat', {
         timestamp,
       } satisfies RemoteDaemonHeartbeatPayload);
       client.lastSeenAt = timestamp;
@@ -771,15 +817,29 @@ export class PaneRemoteHttpApiServer {
     invokeRequest: RemoteInvokeRequest,
     auth: Extract<RemoteRequestAuthResult, { ok: true }>,
     request: IncomingMessage,
-  ): unknown[] {
+  ): JsonValue[] {
     const args = [...invokeRequest.args];
+    if (invokeRequest.channel.startsWith('mobile:push-')) {
+      if (!auth.client) {
+        throw new RemoteDaemonBadRequestError(
+          'ERR_MOBILE_PUSH_PAIRING_REQUIRED',
+          'Mobile notifications require an authenticated paired host.',
+          403,
+        );
+      }
+      // The second argument is server-owned, even if the client supplied extra args.
+      return [args[0] ?? null, { clientId: auth.client.id }];
+    }
     if (invokeRequest.channel !== 'terminal:setVisibility') {
       return args;
     }
 
-    const rawViewerId = typeof args[2] === 'string' && args[2].trim().length > 0
-      ? args[2]
-      : 'default';
+    let rawViewerId = 'default';
+    try {
+      rawViewerId = decodeBoundary(args[2], boundary.nonEmptyString);
+    } catch {
+      // Missing viewer IDs share the existing default remote visibility scope.
+    }
     args[2] = `${this.getRemoteVisibilityViewerPrefix(
       auth.client?.id ?? null,
       auth.client?.tokenHash ?? null,
@@ -847,7 +907,7 @@ async function readRequestBody(request: IncomingMessage, maxBodyBytes: number): 
   let totalBytes = 0;
 
   for await (const chunk of request) {
-    const buffer = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
     totalBytes += buffer.length;
 
     if (totalBytes > maxBodyBytes) {
@@ -872,12 +932,24 @@ function withCorsHeaders(headers: http.OutgoingHttpHeaders = {}): http.OutgoingH
 }
 
 function writeSseEvent(
-  response: ServerResponse,
+  stream: Writable,
   eventName: string,
   payload: RemoteReadyEventPayload | RemoteDaemonEventEnvelope | RemoteDaemonHeartbeatPayload,
 ): void {
-  response.write(`event: ${eventName}\n`);
-  response.write(`data: ${JSON.stringify(payload)}\n\n`);
+  stream.write(`event: ${eventName}\ndata: ${JSON.stringify(payload)}\n\n`);
+}
+
+function acceptsGzip(request: IncomingMessage): boolean {
+  const acceptEncoding = getSingleHeaderValue(request.headers['accept-encoding']) ?? '';
+  return acceptEncoding.split(',').some((encoding) => encoding.trim().toLowerCase() === 'gzip');
+}
+
+// One shared gzip context per stream keeps the ratio high; a sync flush on
+// every write still delivers each SSE event immediately.
+function createSseGzipStream(response: ServerResponse): Writable {
+  const gzipStream = createGzip({ flush: zlibConstants.Z_SYNC_FLUSH });
+  pipeline(gzipStream, response, () => {});
+  return gzipStream;
 }
 
 function writeRawHttpError(socket: Duplex, statusCode: number, message: string): void {
@@ -995,22 +1067,6 @@ function firstNonEmpty(...values: Array<string | undefined>): string | undefined
   return values.map(value => value?.trim()).find(Boolean);
 }
 
-function isRemoteInvokeRequest(value: unknown): value is RemoteInvokeRequest {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return false;
-  }
-
-  const candidate = value as Partial<RemoteInvokeRequest>;
-  return (
-    typeof candidate.channel === 'string' &&
-    candidate.channel.length > 0 &&
-    Array.isArray(candidate.args) &&
-    isOptionalString(candidate.token) &&
-    isOptionalString(candidate.runtimeId) &&
-    isOptionalString(candidate.clientLabel)
-  );
-}
-
-function isOptionalString(value: unknown): boolean {
-  return value === undefined || typeof value === 'string';
+function isTcpAddress(address: string | AddressInfo | null): address is AddressInfo {
+  return address !== null && 'port' in Object(address);
 }

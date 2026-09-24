@@ -1,35 +1,59 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { API } from '../utils/api';
 import { useSessionStore } from '../stores/sessionStore';
-import { Session } from '../types/session';
+import type { Session } from '../types/session';
 import { PanelTabBar } from './panels/PanelTabBar';
 import { PanelContainer } from './panels/PanelContainer';
 import { usePanelStore } from '../stores/panelStore';
 import { panelApi } from '../services/panelApi';
-import { ToolPanel, ToolPanelType } from '../../../shared/types/panels';
-import { PanelCreateOptions } from '../types/panelComponents';
+import type { ToolPanel, ToolPanelType } from '../../../shared/types/panels';
+import type { PanelCreateOptions } from '../types/panelComponents';
 import { SessionProvider } from '../contexts/SessionContext';
 import { DetailPanel } from './DetailPanel';
-import { useResizable } from '../hooks/useResizable';
+import type { InspectorTab } from './InspectorTabs';
+import { useObservedContentBox } from '../hooks/useObservedContentBox';
+import { useOuterPanelResize } from '../hooks/useOuterPanelResize';
+import { OUTER_PANEL_CONFIGS } from '../utils/outerPanelSizing';
+import { CommitMessageDialog } from './session/CommitMessageDialog';
+import { SetTrackingBranchDialog } from './session/SetTrackingBranchDialog';
+import { useMainRepoGitActions } from '../hooks/useMainRepoGitActions';
+import { useProjectViewActionsStore } from '../stores/projectViewActionsStore';
+import { useNavigationStore } from '../stores/navigationStore';
+import { PANEL_CAPABILITIES } from '../../../shared/types/panels';
+import type { ProjectEnvironment } from '../../../shared/types/panels';
 
 interface ProjectViewProps {
   projectId: number;
   projectName: string;
-  onGitPull: () => void;
-  onGitPush: () => void;
-  isMerging: boolean;
+  projectEnvironment: ProjectEnvironment | undefined;
+  configuredIDECommand?: string | null;
+  onConfigureIDE: () => void;
 }
 
 export const ProjectView: React.FC<ProjectViewProps> = ({ 
   projectId, 
-  projectName, 
-  onGitPull, 
-  onGitPush, 
-  isMerging
+  projectName,
+  projectEnvironment,
+  configuredIDECommand,
+  onConfigureIDE,
 }) => {
   const [mainRepoSessionId, setMainRepoSessionId] = useState<string | null>(null);
   const [mainRepoSession, setMainRepoSession] = useState<Session | null>(null);
-  const [isLoadingSession, setIsLoadingSession] = useState(false);
+  const [branchState, setBranchState] = useState<{
+    projectId: number;
+    worktreePath: string | null;
+    branch: string | null;
+  }>({ projectId, worktreePath: null, branch: null });
+  const [sessionLoadingState, setSessionLoadingState] = useState({ projectId, isLoading: true });
+  const sessionRequestGeneration = useRef(0);
+  const isLoadingSession = sessionLoadingState.projectId !== projectId || sessionLoadingState.isLoading;
+  const activeMainRepoSession = mainRepoSession?.projectId === projectId ? mainRepoSession : null;
+  const activeWorktreePath = activeMainRepoSession?.worktreePath ?? null;
+  const detectedBranch = branchState.projectId === projectId
+    && branchState.worktreePath === activeWorktreePath
+    ? branchState.branch
+    : null;
+  const displayBranch = activeMainRepoSession?.baseBranch ?? detectedBranch;
   // Panel store state and actions
   const {
     panels,
@@ -37,42 +61,49 @@ export const ProjectView: React.FC<ProjectViewProps> = ({
     setPanels,
     setActivePanel: setActivePanelInStore,
     addPanel,
-    removePanel
+    removePanel,
+    updatePanelState,
   } = usePanelStore();
 
   // Detail panel state
   const [detailVisible, setDetailVisible] = useState(() => {
     const stored = localStorage.getItem('pane-project-detail-panel-visible');
-    return stored !== null ? stored === 'true' : false;
+    return stored !== null ? stored === 'true' : true;
   });
+  const [inspectorTab, setInspectorTab] = useState<InspectorTab>(() => {
+    const stored = localStorage.getItem('pane-project-inspector-tab');
+    return stored === 'files' || stored === 'details' ? stored : 'changes';
+  });
+  useEffect(() => {
+    localStorage.setItem('pane-project-inspector-tab', inspectorTab);
+  }, [inspectorTab]);
+  const openInspector = useCallback((tab: InspectorTab) => {
+    setInspectorTab(tab);
+    setDetailVisible(true);
+  }, []);
 
   // Persist detail panel visibility
   useEffect(() => {
     localStorage.setItem('pane-project-detail-panel-visible', String(detailVisible));
   }, [detailVisible]);
 
-  // Right-side resizable
-  const { width: detailWidth, startResize: startDetailResize } = useResizable({
-    defaultWidth: 320,
-    minWidth: 200,
-    maxWidth: 500,
-    storageKey: 'pane-project-detail-panel-width',
-    side: 'right'
+  const immersiveMode = useNavigationStore(s => s.immersiveMode);
+  const projectContentBox = useObservedContentBox<HTMLDivElement>();
+  const detailResize = useOuterPanelResize({
+    config: OUTER_PANEL_CONFIGS.projectInspector,
+    containerPx: projectContentBox.width,
+    enabled: detailVisible && !immersiveMode,
   });
 
   // Load panels when main repo session changes (no auto-creation, matches worktree session behavior)
   useEffect(() => {
     if (mainRepoSessionId) {
-      console.log('[ProjectView] Loading panels for project session:', mainRepoSessionId);
       panelApi.loadPanelsForSession(mainRepoSessionId).then(async (loadedPanels) => {
-        console.log('[ProjectView] Loaded panels:', loadedPanels);
-
         setPanels(mainRepoSessionId, loadedPanels);
 
-        // Pick default active: prefer diff, then explorer, then first panel
-        const fallback = loadedPanels.find(p => p.type === 'diff')
-          || loadedPanels.find(p => p.type === 'explorer')
-          || loadedPanels[0];
+        // Pick default active: the first working panel (Explorer and Review
+        // live in the inspector, not the stage).
+        const fallback = loadedPanels.find(p => p.type !== 'diff' && p.type !== 'explorer');
 
         const activePanel = await panelApi.getActivePanel(mainRepoSessionId);
         if (activePanel) {
@@ -91,10 +122,68 @@ export const ProjectView: React.FC<ProjectViewProps> = ({
     [panels, mainRepoSessionId]
   );
 
-  const currentActivePanel = useMemo(
-    () => sessionPanels.find(p => p.id === activePanels[mainRepoSessionId || '']),
-    [sessionPanels, activePanels, mainRepoSessionId]
+  const filesPanel = useMemo(() => sessionPanels.find(p => p.type === 'explorer'), [sessionPanels]);
+  const changesPanel = useMemo(() => sessionPanels.find(p => p.type === 'diff'), [sessionPanels]);
+  const workingPanels = useMemo(
+    () => sessionPanels.filter(p => p.type !== 'explorer' && p.type !== 'diff'),
+    [sessionPanels]
   );
+
+  const currentActivePanel = useMemo(
+    () => workingPanels.find(p => p.id === activePanels[mainRepoSessionId || '']),
+    [workingPanels, activePanels, mainRepoSessionId]
+  );
+
+  // A persisted active panel that now lives in the inspector opens that tab
+  // and hands the stage to the first working panel.
+  const staleActiveHandledRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!mainRepoSessionId) return;
+    const activeId = activePanels[mainRepoSessionId];
+    const stale = activeId ? sessionPanels.find(p => p.id === activeId && (p.type === 'explorer' || p.type === 'diff')) : undefined;
+    if (!stale) return;
+    const key = `${mainRepoSessionId}:${stale.id}`;
+    if (staleActiveHandledRef.current === key) return;
+    staleActiveHandledRef.current = key;
+    setInspectorTab(stale.type === 'diff' ? 'changes' : 'files');
+    const next = workingPanels[0];
+    if (next) {
+      setActivePanelInStore(mainRepoSessionId, next.id);
+      void panelApi.setActivePanel(mainRepoSessionId, next.id);
+    }
+  }, [mainRepoSessionId, activePanels, sessionPanels, workingPanels, setActivePanelInStore]);
+
+  const detailSession = useMemo(() => {
+    if (!activeMainRepoSession || !displayBranch) return activeMainRepoSession;
+    if (activeMainRepoSession.baseBranch === displayBranch) return activeMainRepoSession;
+    return { ...activeMainRepoSession, baseBranch: displayBranch };
+  }, [activeMainRepoSession, displayBranch]);
+
+  useEffect(() => {
+    if (!activeWorktreePath) {
+      setBranchState({ projectId, worktreePath: null, branch: null });
+      return;
+    }
+
+    setBranchState({ projectId, worktreePath: activeWorktreePath, branch: null });
+    let cancelled = false;
+    window.electronAPI.projects.detectBranch(activeWorktreePath).then(result => {
+      if (cancelled) return;
+      setBranchState({
+        projectId,
+        worktreePath: activeWorktreePath,
+        branch: result.success ? result.data ?? null : null,
+      });
+    }).catch(() => {
+      if (!cancelled) {
+        setBranchState({ projectId, worktreePath: activeWorktreePath, branch: null });
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeWorktreePath, projectId]);
   
   // Panel event handlers
   const handlePanelSelect = useCallback(
@@ -110,9 +199,9 @@ export const ProjectView: React.FC<ProjectViewProps> = ({
     async (panel: ToolPanel) => {
       if (!mainRepoSessionId) return;
 
-      // Find next panel to activate
-      const panelIndex = sessionPanels.findIndex(p => p.id === panel.id);
-      const nextPanel = sessionPanels[panelIndex + 1] || sessionPanels[panelIndex - 1];
+      // Activate the neighbouring working tab (never an inspector panel).
+      const panelIndex = workingPanels.findIndex(p => p.id === panel.id);
+      const nextPanel = workingPanels[panelIndex + 1] || workingPanels[panelIndex - 1];
 
       // Remove from store first for immediate UI update
       removePanel(mainRepoSessionId, panel.id);
@@ -126,7 +215,7 @@ export const ProjectView: React.FC<ProjectViewProps> = ({
       // Delete on backend
       await panelApi.deletePanel(panel.id);
     },
-    [mainRepoSessionId, sessionPanels, removePanel, setActivePanelInStore]
+    [mainRepoSessionId, workingPanels, removePanel, setActivePanelInStore]
   );
 
   const handlePanelCreate = useCallback(
@@ -134,7 +223,7 @@ export const ProjectView: React.FC<ProjectViewProps> = ({
       if (!mainRepoSessionId) return;
 
       // For terminal panels with initialCommand (e.g., Terminal (Claude))
-      let initialState: { customState?: unknown } | undefined = undefined;
+      let initialState = options?.initialState;
       if (type === 'terminal' && options?.initialCommand) {
         initialState = {
           customState: {
@@ -154,38 +243,77 @@ export const ProjectView: React.FC<ProjectViewProps> = ({
       // The panel:created event will also fire, but addPanel checks for duplicates
       addPanel(newPanel);
       setActivePanelInStore(mainRepoSessionId, newPanel.id);
+      return newPanel;
     },
     [mainRepoSessionId, addPanel, setActivePanelInStore]
   );
-  
-  // Wrapped git operations - just call the handlers directly without navigating to a panel
-  const handleGitPull = useCallback(() => {
-    onGitPull();
-  }, [onGitPull]);
 
-  const handleGitPush = useCallback(() => {
-    onGitPush();
-  }, [onGitPush]);
-  
-  // We don't need terminal handling or the hook for now, as panels handle their own terminals
-  
-  // Debug logging
-  useEffect(() => {
-    console.log('[ProjectView] Session state:', { 
-      mainRepoSessionId, 
-      mainRepoSession: mainRepoSession?.id,
-      activePanelType: currentActivePanel?.type,
-      activeSessionInStore: useSessionStore.getState().activeSessionId
+  const handleOpenUrlInBrowser = useCallback(async (url: string, title: string) => {
+    if (!mainRepoSessionId) return;
+    const existingPanel = workingPanels.find((candidate) => candidate.type === 'browser');
+    if (existingPanel) {
+      const updatedPanel = {
+        ...existingPanel,
+        title,
+        state: { ...existingPanel.state, customState: { ...existingPanel.state.customState, currentUrl: url } },
+      };
+      await panelApi.updatePanel(existingPanel.id, { title, state: updatedPanel.state });
+      updatePanelState(updatedPanel);
+      await handlePanelSelect(updatedPanel);
+      window.dispatchEvent(new CustomEvent('browser-panel:navigate', {
+        detail: { url, sessionId: mainRepoSessionId },
+      }));
+      return;
+    }
+
+    await handlePanelCreate('browser', {
+      title,
+      initialState: { customState: { currentUrl: url } },
     });
-  }, [mainRepoSessionId, mainRepoSession, currentActivePanel]);
+  }, [handlePanelCreate, handlePanelSelect, mainRepoSessionId, updatePanelState, workingPanels]);
+
+  const handleShowExplorer = useCallback(async () => {
+    if (!filesPanel) await handlePanelCreate('explorer');
+    setInspectorTab('files');
+    setDetailVisible(true);
+  }, [filesPanel, handlePanelCreate]);
+  
+  // Expose this view's tab / inspector actions to the global hotkeys.
+  const setProjectViewActions = useProjectViewActionsStore((state) => state.setActions);
+  useEffect(() => {
+    setProjectViewActions({
+      toggleDetail: () => setDetailVisible((v) => !v),
+      showInspector: (tab) => { setInspectorTab(tab); setDetailVisible(true); },
+      addTerminal: () => { void handlePanelCreate('terminal'); },
+      tabCount: () => workingPanels.length,
+      selectTab: (index) => { const panel = workingPanels[index]; if (panel) handlePanelSelect(panel); },
+      cycleTab: (direction) => {
+        if (workingPanels.length < 2) return;
+        const current = workingPanels.findIndex((p) => p.id === currentActivePanel?.id);
+        const next = direction === 'next'
+          ? (current + 1) % workingPanels.length
+          : (current - 1 + workingPanels.length) % workingPanels.length;
+        handlePanelSelect(workingPanels[next]);
+      },
+      canCloseActiveTab: () => !!currentActivePanel
+        && !PANEL_CAPABILITIES[currentActivePanel.type]?.permanent
+        && !currentActivePanel.metadata?.permanent,
+      closeActiveTab: () => { if (currentActivePanel) handlePanelClose(currentActivePanel); },
+    });
+    return () => setProjectViewActions(null);
+  }, [setProjectViewActions, workingPanels, currentActivePanel, handlePanelCreate, handlePanelSelect, handlePanelClose]);
 
   // Get or create main repo session when panels are needed
   useEffect(() => {
+    const requestGeneration = ++sessionRequestGeneration.current;
+    const isLatestRequest = () => requestGeneration === sessionRequestGeneration.current;
+
     // Create main repo session when component mounts to support panels
     const getMainRepoSession = async () => {
-      setIsLoadingSession(true);
+      setSessionLoadingState({ projectId, isLoading: true });
       try {
         const response = await API.sessions.getOrCreateMainRepoSession(projectId);
+        if (!isLatestRequest()) return;
         if (response.success && response.data) {
           setMainRepoSessionId(response.data.id);
           setMainRepoSession(response.data);
@@ -198,25 +326,35 @@ export const ProjectView: React.FC<ProjectViewProps> = ({
           }
           
           // Set as active session
-          useSessionStore.getState().setActiveSession(response.data.id);
+          if (!isLatestRequest()) return;
+          await useSessionStore.getState().setActiveSession(response.data.id);
+          if (!isLatestRequest()) return;
         }
       } catch (error) {
-        console.error('Failed to get main repo session:', error);
+        if (isLatestRequest()) console.error('Failed to get main repo session:', error);
       } finally {
-        setIsLoadingSession(false);
+        if (isLatestRequest()) setSessionLoadingState({ projectId, isLoading: false });
       }
     };
 
-    getMainRepoSession();
+    void getMainRepoSession();
+    return () => {
+      if (isLatestRequest()) sessionRequestGeneration.current += 1;
+    };
   }, [projectId]);
   
   // Subscribe to session updates - optimized to check for actual changes
   useEffect(() => {
     if (!mainRepoSessionId) return;
-    
-    let previousSession = useSessionStore.getState().sessions.find(s => s.id === mainRepoSessionId);
+
+    const selectMainSession = (state: ReturnType<typeof useSessionStore.getState>) => (
+      state.activeMainRepoSession?.id === mainRepoSessionId
+        ? state.activeMainRepoSession
+        : state.sessions.find(s => s.id === mainRepoSessionId)
+    );
+    let previousSession = selectMainSession(useSessionStore.getState());
     const unsubscribe = useSessionStore.subscribe((state) => {
-      const session = state.sessions.find(s => s.id === mainRepoSessionId);
+      const session = selectMainSession(state);
       // Only update if session actually changed
       if (session && session !== previousSession) {
         previousSession = session;
@@ -227,14 +365,14 @@ export const ProjectView: React.FC<ProjectViewProps> = ({
     return unsubscribe;
   }, [mainRepoSessionId]);
 
+  const mainRepoGit = useMainRepoGitActions(mainRepoSessionId, mainRepoSession);
+
   // Listen for panel updates from the backend
   useEffect(() => {
     if (!mainRepoSessionId) return;
 
     // Handle panel creation events (for auto-created panels like logs)
     const handlePanelCreated = (panel: ToolPanel) => {
-      console.log('[ProjectView] Received panel:created event:', panel);
-
       // Only add if it's for the current session
       if (panel.sessionId === mainRepoSessionId) {
         // The store's addPanel now checks for duplicates, so we can safely call it
@@ -254,26 +392,45 @@ export const ProjectView: React.FC<ProjectViewProps> = ({
   return (
     <div className="flex-1 flex flex-col overflow-hidden bg-bg-primary">
       {/* SINGLE SessionProvider wraps everything */}
-      {mainRepoSessionId && (
-        <SessionProvider session={mainRepoSession} projectName={projectName}>
+      {activeMainRepoSession && (
+        <SessionProvider
+          session={detailSession}
+          projectName={projectName}
+          gitBranchActions={mainRepoGit.actions}
+          isMerging={mainRepoGit.actionsBusy}
+          gitCommands={mainRepoGit.gitCommands}
+          onOpenIDEWithCommand={mainRepoGit.handleOpenIDE}
+          onOpenUrlInBrowser={handleOpenUrlInBrowser}
+          onConfigureIDE={onConfigureIDE}
+          onSetTracking={mainRepoGit.handleOpenSetTracking}
+          trackingBranch={mainRepoGit.currentUpstream}
+          configuredIDECommand={configuredIDECommand}
+          isRemoteMode={mainRepoGit.isRemoteMode}
+        >
           {/* Tab bar at top */}
           <PanelTabBar
-            panels={sessionPanels}
+            panels={workingPanels}
             activePanel={currentActivePanel}
             onPanelSelect={handlePanelSelect}
             onPanelClose={handlePanelClose}
             onPanelCreate={handlePanelCreate}
+            onShowExplorer={() => { void handleShowExplorer(); }}
+            projectEnvironment={projectEnvironment}
             context="project"
             onToggleDetailPanel={() => setDetailVisible(v => !v)}
             detailPanelVisible={detailVisible}
           />
 
           {/* Content area: center panels + right detail */}
-          <div className="flex-1 flex flex-row min-h-0">
+          <div ref={projectContentBox.ref} className="pane-project-content flex-1 flex flex-row min-h-0 min-w-0">
             {/* Center: panel content */}
-            <div className="flex-1 relative min-h-0 overflow-hidden">
+            <div className="flex-1 relative min-h-0 min-w-0 overflow-hidden">
               {isLoadingSession ? (
-                <div className="h-full animate-pulse">
+                <div
+                  role="status"
+                  aria-label="Loading main repository session"
+                  className="h-full animate-pulse"
+                >
                   <div className="flex items-center justify-between px-3 py-1.5 border-b border-border-primary bg-surface-secondary">
                     <div className="h-3 w-28 bg-surface-tertiary rounded" />
                     <div className="flex items-center gap-2">
@@ -289,8 +446,8 @@ export const ProjectView: React.FC<ProjectViewProps> = ({
                     <div className="h-3 w-2/3 bg-surface-tertiary rounded" />
                   </div>
                 </div>
-              ) : sessionPanels.length > 0 && currentActivePanel ? (
-                sessionPanels.map(panel => {
+              ) : workingPanels.length > 0 && currentActivePanel ? (
+                workingPanels.map(panel => {
                   const isActive = panel.id === currentActivePanel.id;
                   return (
                     <div
@@ -310,12 +467,14 @@ export const ProjectView: React.FC<ProjectViewProps> = ({
                   );
                 })
               ) : (
-                <div className="flex-1 flex items-center justify-center text-text-secondary">
-                  <div className="text-center p-8">
-                    <div className="text-4xl mb-4">⚡</div>
-                    <h2 className="text-xl font-semibold mb-2">No Active Panel</h2>
-                    <p className="text-sm">Add a tool panel to get started</p>
-                  </div>
+                <div className="flex h-full items-center justify-center">
+                  <button
+                    type="button"
+                    onClick={() => handlePanelCreate('terminal')}
+                    className="flex h-7 items-center gap-2 rounded px-3 text-[13px] text-text-secondary hover:bg-surface-hover hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring-subtle"
+                  >
+                    Open a terminal
+                  </button>
                 </div>
               )}
             </div>
@@ -324,21 +483,35 @@ export const ProjectView: React.FC<ProjectViewProps> = ({
             <DetailPanel
               isVisible={detailVisible}
               onToggle={() => setDetailVisible(v => !v)}
-              width={detailWidth}
-              onResize={startDetailResize}
-              projectGitActions={{
-                onPull: handleGitPull,
-                onPush: handleGitPush,
-                isMerging
-              }}
+              width={detailResize.renderedPx}
+              bodyActive={detailResize.bodyActive}
+              resizeSeparator={detailResize.separatorVisible ? {
+                label: 'Resize main repository inspector',
+                orientation: 'vertical',
+                value: detailResize.effectivePx,
+                minimum: detailResize.floor,
+                maximum: detailResize.cap,
+                ...detailResize.separatorHandlers,
+              } : undefined}
+              mergeError={mainRepoGit.error}
+              inspectorTab={inspectorTab}
+              onInspectorTabChange={openInspector}
+              filesPanel={filesPanel}
+              changesPanel={changesPanel}
+              changesCount={activeMainRepoSession?.gitStatus?.filesChanged || undefined}
+              isMainRepo
             />
           </div>
         </SessionProvider>
       )}
 
       {/* Loading state when no session yet */}
-      {!mainRepoSessionId && (
-        <div className="flex-1 animate-pulse">
+      {!activeMainRepoSession && isLoadingSession && (
+        <div
+          role="status"
+          aria-label="Loading main repository session"
+          className="flex-1 animate-pulse"
+        >
           {/* Tab bar skeleton */}
           <div className="flex items-center gap-1 px-2 py-1 border-b border-border-primary bg-surface-secondary">
             {[1, 2, 3].map(i => (
@@ -355,6 +528,34 @@ export const ProjectView: React.FC<ProjectViewProps> = ({
           </div>
         </div>
       )}
+
+      {!activeMainRepoSession && !isLoadingSession && (
+        <div className="flex-1 flex items-center justify-center text-text-secondary">
+          No session selected
+        </div>
+      )}
+
+      <CommitMessageDialog
+        isOpen={mainRepoGit.showCommitDialog}
+        onClose={() => mainRepoGit.setShowCommitDialog(false)}
+        dialogType="commit"
+        gitCommands={mainRepoGit.gitCommands}
+        commitMessage={mainRepoGit.commitMessage}
+        setCommitMessage={mainRepoGit.setCommitMessage}
+        shouldSquash={false}
+        setShouldSquash={() => {}}
+        onConfirm={mainRepoGit.handleCommit}
+        isMerging={mainRepoGit.isRunning}
+      />
+
+      <SetTrackingBranchDialog
+        isOpen={mainRepoGit.showSetTrackingDialog}
+        currentUpstream={mainRepoGit.currentUpstream}
+        remoteBranches={mainRepoGit.remoteBranches}
+        checkoutLabel="the primary checkout"
+        onSelect={mainRepoGit.handleSelectUpstream}
+        onClose={() => mainRepoGit.setShowSetTrackingDialog(false)}
+      />
     </div>
   );
 };

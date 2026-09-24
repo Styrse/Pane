@@ -2,6 +2,19 @@ import { IpcMain, shell } from 'electron';
 import { execFile } from 'child_process';
 import type { AppServices } from './types';
 import { revealInFileManager } from '../utils/revealInFileManager';
+import type { PaneCommandValue } from '../daemon/commandRegistry';
+import { decodeBoundary } from '../../../shared/validation/boundaryDecoder';
+import {
+  overlayColorsSchema,
+  WINDOW_CONTROLS_OVERLAY_COLORS_KEY,
+  WINDOW_CONTROLS_OVERLAY_HEIGHT,
+  type WindowControlsOverlayColors,
+} from '../utils/windowControlsOverlay';
+import {
+  parseStoredBackgroundColors,
+  windowBackgroundColorSchema,
+  WINDOW_BACKGROUND_COLORS_KEY,
+} from '../utils/windowBackgroundColor';
 
 export function registerAppHandlers(ipcMain: IpcMain, services: AppServices): void {
   const { app } = services;
@@ -17,6 +30,85 @@ export function registerAppHandlers(ipcMain: IpcMain, services: AppServices): vo
 
   ipcMain.handle('is-packaged', () => {
     return app.isPackaged;
+  });
+
+  // The Window Controls Overlay buttons are drawn by the OS, so they cannot pick
+  // up our CSS. The renderer resolves the active theme's tokens to hex and posts
+  // them here on every theme switch; we also persist the pair so the next window
+  // is created already wearing them instead of the system default.
+  ipcMain.handle('window:set-title-bar-overlay', (_event, colors: PaneCommandValue) => {
+    let normalized: WindowControlsOverlayColors;
+    try {
+      normalized = decodeBoundary(colors, overlayColorsSchema);
+    } catch {
+      return { success: false, error: 'Invalid overlay colors' };
+    }
+
+    try {
+      services.databaseService.setUserPreference(
+        WINDOW_CONTROLS_OVERLAY_COLORS_KEY,
+        JSON.stringify(normalized)
+      );
+    } catch (error) {
+      // Losing the cache only costs a themed plate on the next cold start.
+      console.error('Failed to persist window controls overlay colors:', error);
+    }
+
+    const window = services.getMainWindow();
+    if (!window || window.isDestroyed()) {
+      return { success: false, error: 'No window' };
+    }
+
+    try {
+      // Throws on platforms without an overlay (macOS, or a Linux desktop that
+      // failed the gate), so the renderer can call this unconditionally.
+      window.setTitleBarOverlay({ ...normalized, height: WINDOW_CONTROLS_OVERLAY_HEIGHT });
+      return { success: true };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to set title bar overlay',
+      };
+    }
+  });
+
+  ipcMain.handle('window:set-background-color', (_event, payload: PaneCommandValue) => {
+    let normalized;
+    try {
+      normalized = decodeBoundary(payload, windowBackgroundColorSchema);
+    } catch {
+      return { success: false, error: 'Invalid background color' };
+    }
+    let stored;
+    try {
+      stored = parseStoredBackgroundColors(
+        services.databaseService.getUserPreference(WINDOW_BACKGROUND_COLORS_KEY) ?? null,
+      );
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to read window background colors',
+      };
+    }
+    try {
+      services.databaseService.setUserPreference(
+        WINDOW_BACKGROUND_COLORS_KEY,
+        JSON.stringify({ ...stored, [normalized.theme]: normalized.color }),
+      );
+    } catch (error) {
+      console.error('Failed to persist window background color:', error);
+    }
+    const window = services.getMainWindow();
+    if (!window || window.isDestroyed()) return { success: false, error: 'No window' };
+    try {
+      window.setBackgroundColor(normalized.color);
+      return { success: true };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to set window background color',
+      };
+    }
   });
 
   // System utilities
@@ -143,4 +235,4 @@ export function registerAppHandlers(ipcMain: IpcMain, services: AppServices): vo
       return { success: false, error: error instanceof Error ? error.message : 'Failed to get all preferences' };
     }
   });
-} 
+}

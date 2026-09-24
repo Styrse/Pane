@@ -24,7 +24,8 @@ describe('pane runtime', () => {
   });
 
   it('returns the installed runtime and helper accessors', () => {
-    const configManager = { source: 'test' } as unknown as ConfigManager;
+    // SAFETY: This test only verifies ConfigManager reference identity; none of its methods are invoked.
+    const configManager = Object.assign(Object.create(null), { source: 'test' }) as ConfigManager;
     const webviewContextMap = new Map([[1, { panelId: 'panel-1', sessionId: 'session-1' }]]);
     const daemonEventSink = {
       send: () => undefined,

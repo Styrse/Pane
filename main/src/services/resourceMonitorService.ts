@@ -9,6 +9,10 @@ import type {
   SessionResourceInfo,
   ResourceSnapshot,
 } from '../../../shared/types/resourceMonitor';
+import { boundary, decodeBoundary } from '../../../shared/validation/boundaryDecoder';
+import { createRequire } from 'node:module';
+
+const loadResourceDependency = createRequire(__filename);
 
 const execFileAsync = promisify(execFile);
 
@@ -272,16 +276,25 @@ export class ResourceMonitorService extends EventEmitter {
         ['-NoProfile', '-Command', psCmd],
         { encoding: 'utf8', timeout: 10000 }
       );
-      const parsed: unknown = JSON.parse(stdout);
-      const items: WindowsBatchItem[] = Array.isArray(parsed) ? parsed as WindowsBatchItem[] : [parsed as WindowsBatchItem];
+      const itemSchema = boundary.object({
+        Id: boundary.number,
+        Name: boundary.string,
+        CpuSeconds: boundary.number,
+        MemoryMB: boundary.number,
+      });
+      const parsed = JSON.parse(stdout);
+      let items: WindowsBatchItem[];
+      try {
+        items = decodeBoundary(parsed, boundary.array(itemSchema));
+      } catch {
+        items = [decodeBoundary(parsed, itemSchema)];
+      }
       for (const item of items) {
-        if (item && typeof item.Id === 'number') {
-          result.set(item.Id, {
-            name: item.Name || 'unknown',
-            cpuTimeSeconds: item.CpuSeconds || 0,
-            memoryMB: item.MemoryMB || 0,
-          });
-        }
+        result.set(item.Id, {
+          name: item.Name || 'unknown',
+          cpuTimeSeconds: item.CpuSeconds || 0,
+          memoryMB: item.MemoryMB || 0,
+        });
       }
     } catch {
       // PowerShell call failed — return empty results
@@ -355,10 +368,10 @@ export class ResourceMonitorService extends EventEmitter {
     const now = Date.now();
 
     // Lazy imports to avoid circular dependency at module load time
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { terminalPanelManager } = require('./terminalPanelManager') as { terminalPanelManager: { getSessionPids(): Map<string, number[]> } };
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { CliToolRegistry } = require('./cliToolRegistry') as { CliToolRegistry: { getInstance(): { getAllManagers(): { getSessionPids(): Map<string, number[]> }[] } } };
+    // SAFETY: This require targets the statically typed local module and selects its exported singleton.
+    const { terminalPanelManager } = loadResourceDependency('./terminalPanelManager') as { terminalPanelManager: { getSessionPids(): Map<string, number[]> } };
+    // SAFETY: This require targets the statically typed local module and selects its exported registry class.
+    const { CliToolRegistry } = loadResourceDependency('./cliToolRegistry') as { CliToolRegistry: { getInstance(): { getAllManagers(): { getSessionPids(): Map<string, number[]> }[] } } };
 
     // Collect PIDs from all sources: terminal panels + CLI managers (Claude, Codex, etc.)
     const sessionPids = new Map<string, number[]>();

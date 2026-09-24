@@ -2,15 +2,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { decodeRemoteConnectionCode } from '../../../frontend/src/remote/runtime/remoteProfile';
 import {
   RemoteDaemonBrowserClient,
-  parseSseEvents,
 } from '../../../frontend/src/remote/runtime/remoteDaemonBrowserClient';
 import { RemoteRuntimeAdapter } from '../../../frontend/src/remote/runtime/remoteRuntimeAdapter';
 import type { PaneRemoteConnectionImportPayload } from '../../../shared/types/remoteDaemon';
+import { boundary, decodeBoundary } from '../../../shared/validation/boundaryDecoder';
+import type { JsonValue } from '../../../shared/validation/boundaryDecoder';
 
 const originalFetch = globalThis.fetch;
 const originalEventSource = globalThis.EventSource;
 const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
-const originalWindow = (globalThis as typeof globalThis & { window?: unknown }).window;
+const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -21,7 +22,11 @@ afterEach(() => {
     Object.defineProperty(globalThis, 'navigator', originalNavigator);
   }
 
-  (globalThis as typeof globalThis & { window?: unknown }).window = originalWindow;
+  if (originalWindow) {
+    Object.defineProperty(globalThis, 'window', originalWindow);
+  } else {
+    delete globalThis.window;
+  }
 });
 
 describe('Remote PWA browser runtime', () => {
@@ -45,34 +50,8 @@ describe('Remote PWA browser runtime', () => {
     expect(() => decodeRemoteConnectionCode(createConnectionCode({
       label: 'Remote Host',
       token: 'token',
-      transport: 'websocket' as 'http+sse',
+      transport: 'websocket',
     }))).toThrow(/transport/);
-  });
-
-  it('parses ready, heartbeat, and daemon-event SSE frames', () => {
-    const { events, rest } = parseSseEvents([
-      'event: ready',
-      'data: {"timestamp":"2026-05-19T00:00:00.000Z"}',
-      '',
-      'event: heartbeat',
-      'data: {"timestamp":"2026-05-19T00:00:01.000Z"}',
-      '',
-      'event: daemon-event',
-      'data: {"type":"terminal:output","payload":{"panelId":"panel-1","data":"ok"},"timestamp":"2026-05-19T00:00:02.000Z"}',
-      '',
-      'event: partial',
-      'data: pending',
-    ].join('\n'));
-
-    expect(rest).toBe('event: partial\ndata: pending');
-    expect(events).toEqual([
-      { event: 'ready', data: '{"timestamp":"2026-05-19T00:00:00.000Z"}' },
-      { event: 'heartbeat', data: '{"timestamp":"2026-05-19T00:00:01.000Z"}' },
-      {
-        event: 'daemon-event',
-        data: '{"type":"terminal:output","payload":{"panelId":"panel-1","data":"ok"},"timestamp":"2026-05-19T00:00:02.000Z"}',
-      },
-    ]);
   });
 
   it('sends invoke requests without preflight-only auth headers', async () => {
@@ -84,7 +63,7 @@ describe('Remote PWA browser runtime', () => {
       headers: { 'Content-Type': 'application/json' },
       status: 200,
     }));
-    globalThis.fetch = fetchMock as typeof fetch;
+    vi.stubGlobal('fetch', fetchMock);
 
     const client = new RemoteDaemonBrowserClient({
       id: 'profile-1',
@@ -114,6 +93,121 @@ describe('Remote PWA browser runtime', () => {
     });
   });
 
+  it.each(['terminal:input', 'sessions:create', 'panels:create', 'sessions:get-or-create-main-repo', 'new:command'])(
+    'does not replay %s after the host applies it and its response is lost',
+    async (channel) => {
+      installBrowserGlobals();
+      const applied: unknown[] = [];
+      const fetchMock = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+        applied.push(readInvokeBody(init));
+        throw new TypeError('Response connection lost');
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      await expect(createClient().invoke(channel, ['panel-1', 'echo once\r'])).rejects.toThrow(
+        /may have completed.+Check the current state/,
+      );
+      expect(applied).toMatchObject([{ channel, args: ['panel-1', 'echo once\r'] }]);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([408, 425, 429, 500, 503])('does not replay a mutation after HTTP %s', async (status) => {
+    installBrowserGlobals();
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: false }), { status }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(createClient().invoke('sessions:create')).rejects.toThrow(/may have completed/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not replay a mutation when its successful response cannot be decoded', async () => {
+    installBrowserGlobals();
+    const fetchMock = vi.fn(async () => new Response('truncated JSON', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(createClient().invoke('terminal:input')).rejects.toThrow(/may have completed/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('retains bounded retries for explicitly safe reads after network and HTTP failures', async () => {
+    vi.useFakeTimers();
+    try {
+      installBrowserGlobals();
+      const fetchMock = vi.fn()
+        .mockRejectedValueOnce(new TypeError('Network unavailable'))
+        .mockResolvedValueOnce(new Response(JSON.stringify({ ok: false }), { status: 503 }))
+        .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: [] }), { status: 200 }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      const result = createClient().invoke('sessions:get-all-with-projects');
+      await vi.runAllTimersAsync();
+      await expect(result).resolves.toEqual([]);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+
+      fetchMock.mockReset().mockRejectedValue(new TypeError('Still unavailable'));
+      const failed = createClient().invoke('panels:list').catch((cause: unknown) => cause);
+      await vi.runAllTimersAsync();
+      expect(await failed).toMatchObject({ message: 'Still unavailable' });
+      expect(fetchMock).toHaveBeenCalledTimes(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops a pending read retry when disconnected', async () => {
+    vi.useFakeTimers();
+    try {
+      installBrowserGlobals();
+      installMockEventSource();
+      const fetchMock = vi.fn(async (url: RequestInfo | URL) => {
+        if (String(url).endsWith('/invoke')) throw new TypeError('Network unavailable');
+        return new Response('{}', { status: 200 });
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      const client = createClient();
+      await client.connect();
+      const result = client.invoke('panels:list').catch((cause: unknown) => cause);
+      await vi.advanceTimersByTimeAsync(0);
+      client.disconnect();
+      await vi.runAllTimersAsync();
+
+      expect(await result).toMatchObject({ name: 'AbortError' });
+      expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/invoke'))).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('forwards fallback SSE events with split CRLF and UTF-8 bytes', async () => {
+    installBrowserGlobals();
+    vi.stubGlobal('EventSource', undefined);
+    const encoded = new TextEncoder().encode(
+      'event: daemon-event\r\ndata: {"channel":"terminal:output","args":[{"panelId":"panel-1","data":"🙂"}],"timestamp":"2026-05-19T00:00:02.000Z"}\r\n\r\n',
+    );
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const byte of encoded) controller.enqueue(Uint8Array.of(byte));
+      },
+    });
+    vi.stubGlobal('fetch', vi.fn(async (url: RequestInfo | URL) => (
+      String(url).endsWith('/health')
+        ? new Response('{}', { status: 200 })
+        : new Response(stream, { status: 200 })
+    )));
+    const client = createClient();
+    const received = new Promise<unknown>((resolve) => client.onEvent(resolve));
+    try {
+      await client.connect();
+      await expect(received).resolves.toMatchObject({
+        type: 'daemon-event',
+        payload: { channel: 'terminal:output', args: [{ panelId: 'panel-1', data: '🙂' }] },
+      });
+    } finally {
+      client.disconnect();
+    }
+  });
+
   it('opens the event stream with browser auth metadata in query params', async () => {
     installBrowserGlobals();
     const stream = new ReadableStream<Uint8Array>({
@@ -130,7 +224,7 @@ describe('Remote PWA browser runtime', () => {
         status: 200,
       });
     });
-    globalThis.fetch = fetchMock as typeof fetch;
+    vi.stubGlobal('fetch', fetchMock);
 
     const client = new RemoteDaemonBrowserClient({
       id: 'profile-1',
@@ -144,7 +238,7 @@ describe('Remote PWA browser runtime', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(fetchMock).toHaveBeenNthCalledWith(1, 'https://host.example.test/health', {
-      signal: expect.any(AbortSignal) as AbortSignal,
+      signal: expect.any(AbortSignal),
       cache: 'no-store',
     });
 
@@ -165,7 +259,7 @@ describe('Remote PWA browser runtime', () => {
     installBrowserGlobals();
     const MockEventSource = installMockEventSource();
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
-    globalThis.fetch = fetchMock as typeof fetch;
+    vi.stubGlobal('fetch', fetchMock);
 
     const client = new RemoteDaemonBrowserClient({
       id: 'profile-1',
@@ -182,7 +276,7 @@ describe('Remote PWA browser runtime', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock).toHaveBeenNthCalledWith(1, 'https://host.example.test/health', {
-      signal: expect.any(AbortSignal) as AbortSignal,
+      signal: expect.any(AbortSignal),
       cache: 'no-store',
     });
 
@@ -252,7 +346,7 @@ describe('Remote PWA browser runtime', () => {
         status: 403,
       });
     });
-    globalThis.fetch = fetchMock as typeof fetch;
+    vi.stubGlobal('fetch', fetchMock);
 
     const client = new RemoteDaemonBrowserClient({
       id: 'profile-1',
@@ -284,7 +378,7 @@ describe('Remote PWA browser runtime', () => {
       headers: { 'Content-Type': 'application/json' },
       status: 403,
     }));
-    globalThis.fetch = fetchMock as typeof fetch;
+    vi.stubGlobal('fetch', fetchMock);
 
     const client = new RemoteDaemonBrowserClient({
       id: 'profile-1',
@@ -300,6 +394,15 @@ describe('Remote PWA browser runtime', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it.each([401, 403])('does not retry an HTTP %s auth rejection with a non-JSON body', async (status) => {
+    installBrowserGlobals();
+    const fetchMock = vi.fn(async () => new Response('Forbidden', { status }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(createClient().invoke('panels:list')).rejects.toThrow(/connection code is not accepted/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('shows a Safari Tailscale hint when health checks fail before HTTP', async () => {
     vi.useFakeTimers();
     try {
@@ -307,7 +410,7 @@ describe('Remote PWA browser runtime', () => {
       const fetchMock = vi.fn(async () => {
         throw new TypeError('Load failed');
       });
-      globalThis.fetch = fetchMock as typeof fetch;
+      vi.stubGlobal('fetch', fetchMock);
 
       const client = new RemoteDaemonBrowserClient({
         id: 'profile-1',
@@ -317,12 +420,12 @@ describe('Remote PWA browser runtime', () => {
         transport: 'http+sse',
       });
 
-      const connect = client.connect().catch((error: unknown) => error);
+      const connect = client.connect().catch((cause: unknown) => cause);
       await vi.runAllTimersAsync();
 
       const error = await connect;
-      expect(error).toBeInstanceOf(Error);
-      expect((error as Error).message).toMatch(
+      if (!(error instanceof Error)) throw new Error('Expected connection to reject with Error');
+      expect(error.message).toMatch(
         /Safari could not reach the Tailscale host host\.tailnet\.ts\.net.+iCloud Private Relay/,
       );
     } finally {
@@ -333,7 +436,7 @@ describe('Remote PWA browser runtime', () => {
   it('routes remote sidebar mutations through session daemon commands', async () => {
     installBrowserGlobals();
     const fetchMock = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
-      const body = JSON.parse(init?.body as string) as { channel?: string };
+      const body = readInvokeBody(init);
       return new Response(JSON.stringify({
         ok: true,
         result: body.channel === 'sessions:toggle-favorite'
@@ -344,7 +447,7 @@ describe('Remote PWA browser runtime', () => {
         status: 200,
       });
     });
-    globalThis.fetch = fetchMock as typeof fetch;
+    vi.stubGlobal('fetch', fetchMock);
 
     const adapter = new RemoteRuntimeAdapter({
       id: 'profile-1',
@@ -361,8 +464,8 @@ describe('Remote PWA browser runtime', () => {
     await expect(adapter.archiveSession('session-1')).resolves.toBeUndefined();
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    const firstBody = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
-    const secondBody = JSON.parse((fetchMock.mock.calls[1][1] as RequestInit).body as string);
+    const firstBody = readInvokeBody(fetchMock.mock.calls[0][1]);
+    const secondBody = readInvokeBody(fetchMock.mock.calls[1][1]);
     expect(firstBody).toMatchObject({
       channel: 'sessions:toggle-favorite',
       args: ['session-1'],
@@ -382,26 +485,16 @@ describe('Remote PWA browser runtime', () => {
   it('routes remote pane creation through project and session daemon commands', async () => {
     installBrowserGlobals();
     const fetchMock = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
-      const body = JSON.parse(init?.body as string) as { channel?: string };
-      const dataByChannel: Record<string, unknown> = {
-        'projects:list-branches': [{
-          name: 'origin/main',
-          isCurrent: false,
-          hasWorktree: false,
-          isRemote: true,
-        }],
-        'projects:detect-branch': 'main',
-        'sessions:create': { jobId: 'job-1' },
-      };
+      const body = readInvokeBody(init);
       return new Response(JSON.stringify({
         ok: true,
-        result: { success: true, data: dataByChannel[body.channel ?? ''] },
+        result: { success: true, data: responseData(body.channel) },
       }), {
         headers: { 'Content-Type': 'application/json' },
         status: 200,
       });
     });
-    globalThis.fetch = fetchMock as typeof fetch;
+    vi.stubGlobal('fetch', fetchMock);
 
     const adapter = new RemoteRuntimeAdapter({
       id: 'profile-1',
@@ -430,7 +523,7 @@ describe('Remote PWA browser runtime', () => {
     })).resolves.toEqual({ jobId: 'job-1' });
 
     expect(fetchMock).toHaveBeenCalledTimes(3);
-    const bodies = fetchMock.mock.calls.map(call => JSON.parse((call[1] as RequestInit).body as string));
+    const bodies = fetchMock.mock.calls.map((call) => readInvokeBody(call[1]));
     expect(bodies[0]).toMatchObject({
       channel: 'projects:list-branches',
       args: ['42'],
@@ -455,8 +548,20 @@ describe('Remote PWA browser runtime', () => {
   });
 });
 
-function createConnectionCode(overrides: Partial<PaneRemoteConnectionImportPayload> = {}): string {
-  const payload: PaneRemoteConnectionImportPayload = {
+function createClient(): RemoteDaemonBrowserClient {
+  return new RemoteDaemonBrowserClient({
+    id: 'profile-1',
+    baseUrl: 'https://host.example.test',
+    label: 'Remote Host',
+    token: 'secret-token',
+    transport: 'http+sse',
+  });
+}
+
+function createConnectionCode(
+  overrides: Partial<Omit<PaneRemoteConnectionImportPayload, 'transport'>> & { transport?: string } = {},
+): string {
+  const payload = {
     v: 1,
     label: 'Remote Host',
     baseUrl: 'https://host.example.test',
@@ -470,7 +575,10 @@ function createConnectionCode(overrides: Partial<PaneRemoteConnectionImportPaylo
 
 function installBrowserGlobals(): void {
   const values = new Map<string, string>();
-  (globalThis as typeof globalThis & { window?: unknown }).window = {
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    writable: true,
+    value: {
     crypto: {
       randomUUID: () => 'runtime-id-1',
     },
@@ -482,7 +590,8 @@ function installBrowserGlobals(): void {
     },
     setTimeout: globalThis.setTimeout.bind(globalThis),
     clearTimeout: globalThis.clearTimeout.bind(globalThis),
-  };
+    },
+  });
 
   Object.defineProperty(globalThis, 'navigator', {
     configurable: true,
@@ -492,8 +601,8 @@ function installBrowserGlobals(): void {
   });
 }
 
-function installMockEventSource(): { instances: MockEventSourceInstance[] } {
-  const instances: MockEventSourceInstance[] = [];
+function installMockEventSource() {
+  const instances: MockEventSource[] = [];
 
   class MockEventSource implements Partial<EventSource> {
     readonly url: string;
@@ -504,7 +613,7 @@ function installMockEventSource(): { instances: MockEventSourceInstance[] } {
 
     constructor(url: string | URL) {
       this.url = String(url);
-      instances.push(this as MockEventSourceInstance);
+      instances.push(this);
     }
 
     addEventListener(type: string, listener: EventListenerOrEventListenerObject): void {
@@ -518,13 +627,13 @@ function installMockEventSource(): { instances: MockEventSourceInstance[] } {
     }
 
     open(): void {
-      this.onopen?.({ type: 'open' } as Event);
+      this.onopen?.(new Event('open'));
     }
 
     emit(type: string, data: string): void {
-      const event = { type, data } as MessageEvent<string>;
+      const event = new MessageEvent<string>(type, { data });
       for (const listener of this.listeners.get(type) ?? []) {
-        if (typeof listener === 'function') {
+        if (listener instanceof Function) {
           listener(event);
         } else {
           listener.handleEvent(event);
@@ -541,9 +650,28 @@ function installMockEventSource(): { instances: MockEventSourceInstance[] } {
   return { instances };
 }
 
-interface MockEventSourceInstance extends EventSource {
-  url: string;
-  close: ReturnType<typeof vi.fn>;
-  open(): void;
-  emit(type: string, data: string): void;
+function readInvokeBody(init?: RequestInit): {
+  channel?: string;
+  args?: JsonValue[];
+  token?: string;
+  runtimeId?: string;
+  clientLabel?: string;
+} {
+  const serialized = decodeBoundary(init?.body, boundary.string);
+  return decodeBoundary(JSON.parse(serialized), boundary.object({
+    channel: boundary.optional(boundary.string),
+    args: boundary.optional(boundary.array(boundary.json)),
+    token: boundary.optional(boundary.string),
+    runtimeId: boundary.optional(boundary.string),
+    clientLabel: boundary.optional(boundary.string),
+  }));
+}
+
+function responseData(channel?: string): JsonValue | undefined {
+  if (channel === 'projects:list-branches') {
+    return [{ name: 'origin/main', isCurrent: false, hasWorktree: false, isRemote: true }];
+  }
+  if (channel === 'projects:detect-branch') return 'main';
+  if (channel === 'sessions:create') return { jobId: 'job-1' };
+  return undefined;
 }

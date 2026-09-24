@@ -73,6 +73,7 @@ export default {
           'secondary': 'var(--color-surface-secondary)',
           'tertiary': 'var(--color-surface-tertiary)',
           'hover': 'var(--color-surface-hover)',
+          'selected': 'var(--color-surface-selected)',
           'interactive': 'var(--color-surface-interactive)',
           'interactive-hover': 'var(--color-surface-interactive-hover)',
         },
@@ -219,6 +220,18 @@ export default {
         'fast': 'var(--duration-75)',
         'normal': 'var(--duration-150)',
         'slow': 'var(--duration-300)',
+        'press': 'var(--duration-press)',
+        'press-release': 'var(--duration-press-release)',
+        'enter': 'var(--duration-enter)',
+        'reveal': 'var(--duration-reveal)',
+        'modal': 'var(--duration-modal)',
+        'sheet': 'var(--duration-sheet)',
+        'sheet-exit': 'var(--duration-sheet-exit)',
+      },
+      transitionTimingFunction: {
+        'out-strong': 'var(--ease-out-strong)',
+        'in-out-strong': 'var(--ease-in-out-strong)',
+        'drawer': 'var(--ease-drawer)',
       },
       zIndex: {
         'dropdown-backdrop': 'var(--z-dropdown-backdrop)',
@@ -243,8 +256,11 @@ export default {
         'in': 'in 0.2s ease-out',
         'fade-in': 'fade-in 0.2s ease-out',
         'zoom-in-95': 'zoom-in-95 0.2s ease-out',
-        'dropdown-enter': 'dropdown-enter 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94)',
-        'dropdown-enter-up': 'dropdown-enter-up 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94)',
+        'dropdown-enter': 'dropdown-enter var(--duration-enter) var(--ease-out-strong)',
+        'dropdown-enter-up': 'dropdown-enter-up var(--duration-enter) var(--ease-out-strong)',
+        'modal-enter': 'modal-enter var(--duration-modal) var(--ease-out-strong)',
+        'title-pill-enter': 'title-pill-enter var(--duration-150) var(--ease-out-strong)',
+        'modal-overlay-enter': 'fade-in var(--duration-modal) var(--ease-out-strong)',
       },
       keyframes: {
         shimmer: {
@@ -268,25 +284,27 @@ export default {
           '0%': { transform: 'scale(0.95)' },
           '100%': { transform: 'scale(1)' },
         },
+        'modal-enter': {
+          '0%': { opacity: 0, transform: 'scale(0.97)' },
+          '100%': { opacity: 1, transform: 'scale(1)' },
+        },
+        // Grows out of the end of the pane name it hangs off (the element sets
+        // `transform-origin: left center`), so the pill reads as something the
+        // title gained rather than something dropped next to it.
+        'title-pill-enter': {
+          '0%': { opacity: 0, transform: 'translateX(-4px) scale(0.9)' },
+          '100%': { opacity: 1, transform: 'translateX(0) scale(1)' },
+        },
+        // Paired with `transform-origin` at the trigger (see Dropdown.tsx), so
+        // the scale does most of the spatial work and the translate is only the
+        // small nudge that gives the entrance a direction.
         'dropdown-enter': {
-          '0%': { 
-            opacity: 0, 
-            transform: 'translateY(-8px) scale(0.96)' 
-          },
-          '100%': { 
-            opacity: 1, 
-            transform: 'translateY(0) scale(1)' 
-          },
+          '0%': { opacity: 0, transform: 'translateY(-4px) scale(0.96)' },
+          '100%': { opacity: 1, transform: 'translateY(0) scale(1)' },
         },
         'dropdown-enter-up': {
-          '0%': { 
-            opacity: 0, 
-            transform: 'translateY(8px) scale(0.96)' 
-          },
-          '100%': { 
-            opacity: 1, 
-            transform: 'translateY(0) scale(1)' 
-          },
+          '0%': { opacity: 0, transform: 'translateY(4px) scale(0.96)' },
+          '100%': { opacity: 1, transform: 'translateY(0) scale(1)' },
         },
       },
       ringColor: {

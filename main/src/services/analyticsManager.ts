@@ -4,11 +4,6 @@ import { app, BrowserWindow } from 'electron';
 import * as crypto from 'crypto';
 import * as os from 'os';
 
-export interface AnalyticsEvent {
-  eventName: string;
-  properties?: Record<string, string | number | boolean | string[] | undefined>;
-}
-
 export class AnalyticsManager extends EventEmitter {
   private configManager: ConfigManager;
   private mainWindow: BrowserWindow | null = null;

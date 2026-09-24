@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
+import React, { createContext, useState, useEffect, useCallback, ReactNode } from 'react';
 import type { ContextMenuPayload } from '../types/session';
 
 interface ContextMenuPosition {
@@ -20,14 +20,6 @@ interface ContextMenuContextType {
 }
 
 const ContextMenuContext = createContext<ContextMenuContextType | undefined>(undefined);
-
-export const useContextMenu = () => {
-  const context = useContext(ContextMenuContext);
-  if (!context) {
-    throw new Error('useContextMenu must be used within a ContextMenuProvider');
-  }
-  return context;
-};
 
 interface ContextMenuProviderProps {
   children: ReactNode;
@@ -72,6 +64,7 @@ export const ContextMenuProvider: React.FC<ContextMenuProviderProps> = ({ childr
   useEffect(() => {
     const handleGlobalClick = (event: MouseEvent) => {
       // Check if the click is on the context menu itself
+      // SAFETY: The registered DOM/custom-event source establishes this target and detail shape.
       const target = event.target as HTMLElement;
       const isContextMenu = target?.closest?.('.context-menu');
       

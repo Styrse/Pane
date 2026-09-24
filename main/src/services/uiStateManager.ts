@@ -1,11 +1,20 @@
 import { DatabaseService } from '../database/database';
+import { boundary, decodeBoundary } from '../../../shared/validation/boundaryDecoder';
 
 type SidebarSection = 'pinned' | 'repositories';
 
-const SIDEBAR_SECTION_KEYS: Record<SidebarSection, string> = {
+const SIDEBAR_SECTION_KEYS = {
   pinned: 'treeView.pinnedSectionExpanded',
   repositories: 'treeView.repositoriesSectionExpanded'
-};
+} satisfies Record<SidebarSection, string>;
+
+interface ExpandedUiState {
+  expandedProjects: number[];
+  expandedFolders: string[];
+  sessionSortAscending: boolean;
+  pinnedSectionExpanded: boolean;
+  repositoriesSectionExpanded: boolean;
+}
 
 class UIStateManager {
   private db: DatabaseService;
@@ -48,8 +57,7 @@ class UIStateManager {
     const value = this.db.getUIState(SIDEBAR_SECTION_KEYS[section]);
     if (!value) return true;
     try {
-      const parsed = JSON.parse(value);
-      return typeof parsed === 'boolean' ? parsed : true;
+      return decodeBoundary(JSON.parse(value), boundary.boolean);
     } catch {
       return true;
     }
@@ -76,13 +84,7 @@ class UIStateManager {
     this.saveExpandedFolders(folderIds);
   }
 
-  getExpandedState(): {
-    expandedProjects: number[];
-    expandedFolders: string[];
-    sessionSortAscending: boolean;
-    pinnedSectionExpanded: boolean;
-    repositoriesSectionExpanded: boolean;
-  } {
+  getExpandedState(): ExpandedUiState {
     return {
       expandedProjects: this.getExpandedProjects(),
       expandedFolders: this.getExpandedFolders(),

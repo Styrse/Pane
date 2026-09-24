@@ -42,7 +42,13 @@ function assertUnique(items, label) {
 }
 
 function isObject(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+  return Object.prototype.toString.call(value) === '[object Object]';
+}
+
+function runtimeType(value) {
+  if (Array.isArray(value)) return 'array';
+  if (isObject(value)) return 'object';
+  return Object.prototype.toString.call(value).slice(8, -1).toLowerCase();
 }
 
 function pointerSegment(segment) {
@@ -73,7 +79,7 @@ function typeMatches(value, type) {
   if (type === 'object') {
     return isObject(value);
   }
-  return typeof value === type;
+  return runtimeType(value) === type;
 }
 
 function validateJsonSchema(value, schemaNode, label, rootSchema) {
@@ -156,7 +162,7 @@ function validateContract(contract, schema) {
 
   const commandNames = ensureArray(contract.commands, 'commands').map((command) => command.name);
   assertUnique(commandNames, 'commands');
-  for (const required of ['help', 'setup', 'install', 'update', 'version', 'doctor', 'agent-context', 'agents doctor', 'repos list', 'repos add', 'panes list', 'panes create', 'panels create', 'panels list', 'panels output', 'panels input', 'panels screen', 'panels submit', 'panels submit-composer', 'panels wait']) {
+  for (const required of ['help', 'setup', 'install', 'update', 'version', 'doctor', 'daemon repair', 'agent-context', 'agents doctor', 'repos list', 'repos add', 'panes list', 'panes create', 'workspace state', 'watch', 'panels create', 'panels list', 'panels output', 'panels input', 'panels screen', 'panels submit', 'panels submit-composer', 'panels wait']) {
     if (!commandNames.includes(required)) {
       throw new Error(`commands must include "${required}"`);
     }
@@ -181,7 +187,7 @@ function validateContract(contract, schema) {
     if (!template) {
       throw new Error(`agentTemplates.${agent} is required`);
     }
-    if (typeof template.title !== 'string' || typeof template.command !== 'string') {
+    if (runtimeType(template.title) !== 'string' || runtimeType(template.command) !== 'string') {
       throw new Error(`agentTemplates.${agent} must include title and command`);
     }
   }

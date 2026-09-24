@@ -1,3 +1,5 @@
+![Pane — a pixel-art terminal workshop with separate agent workspaces](docs/assets/pane-banner.png)
+
 <p align="center">
   <img src="frontend/src/assets/pane-logo.png" alt="Pane" width="120" height="120">
 </p>
@@ -13,14 +15,27 @@
   <img src="assets/readme-remote-pane.png" alt="Pane desktop app and Remote Pane mobile browser app" title="Pane desktop app and Remote Pane mobile browser app" width="100%">
 </a>
 
+Appearance follows your OS — see [Appearance](docs/APPEARANCE.md).
+
 [![AGPL-3.0 License](https://img.shields.io/badge/License-AGPL--3.0-555555.svg?labelColor=333333&color=666666)](./LICENSE)
-[![Downloads](https://img.shields.io/endpoint?url=https://runpane.com/api/badge/downloads&labelColor=333333&color=666666)](https://github.com/dcouple/Pane/releases)
-[![GitHub](https://img.shields.io/badge/GitHub-source-555555?labelColor=333333&color=666666&logo=github&logoColor=white)](https://github.com/dcouple/Pane)
-[![Latest Release](https://img.shields.io/badge/Release-latest-555555?labelColor=333333&color=666666)](https://github.com/dcouple/Pane/releases/latest)
+[![Downloads](https://img.shields.io/endpoint?url=https://runpane.com/api/badge/downloads&labelColor=333333&color=666666)](https://github.com/greenfield-inc/Pane/releases)
+[![GitHub](https://img.shields.io/badge/GitHub-source-555555?labelColor=333333&color=666666&logo=github&logoColor=white)](https://github.com/greenfield-inc/Pane)
+[![Latest Release](https://img.shields.io/badge/Release-latest-555555?labelColor=333333&color=666666)](https://github.com/greenfield-inc/Pane/releases/latest)
 [![Changelog](https://img.shields.io/badge/Changelog-runpane.com-555555?labelColor=333333&color=666666)](https://runpane.com/changelog)
 [![Active Users](https://img.shields.io/endpoint?url=https://runpane.com/api/badge/installs&labelColor=333333)](https://runpane.com)
 [![Discord](https://img.shields.io/badge/Discord-join-%235462eb?labelColor=%235462eb&logo=discord&logoColor=%23f5f5f5)](https://discord.gg/BdMyubeAZn)
 
+<br />
+
+**Made possible by our amazing contributors**
+
+<a href="https://github.com/greenfield-inc/Pane/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=greenfield-inc/Pane" alt="Pane contributors">
+</a>
+
+<sub><a href="./CONTRIBUTING.md">Join them</a> and help make Pane better.</sub>
+
+<br />
 <br />
 
 **Quick install (recommended)**
@@ -80,7 +95,7 @@ runpane setup</code></pre>
 
 Not an IDE. Not a terminal emulator. **Vim for agent management.**
 
-Pane manages AI coding agents without replacing them. If it runs in a terminal, it runs in Pane — instantly, with zero integration. Claude Code, Codex, Aider, Goose, or any CLI tool. No plugins, no SDK, no waiting for support.
+Pane manages AI coding agents without replacing them. If it runs in a terminal, it runs in Pane — instantly, with zero integration. Claude Code, Codex, Cursor Agent, Aider, Goose, or any CLI tool. No plugins, no SDK, no waiting for support.
 
 ---
 
@@ -104,7 +119,7 @@ Each of these is a small thing. Together they compound fast.
 
 | Feature | | |
 |---|---|---|
-| **Pane Chat** | A global orchestrator terminal that starts in the Pane data directory, loads local Pane orchestration skills, and can coordinate Claude or Codex across repositories, panes, tabs, worktrees, and review loops. | <a href="#pane-chat">Details</a> |
+| **Pane Chat** | A global orchestrator terminal that starts in the Pane data directory, loads local Pane orchestration skills, and can coordinate Claude, Codex, or Cursor across repositories, panes, tabs, worktrees, and review loops. | <a href="#pane-chat">Details</a> |
 | **Remote Pane** | Run panes, worktrees, terminals, files, git state, and approval prompts on a self-hosted remote machine while controlling them from desktop Pane or the browser app at [runpane.com/app](https://runpane.com/app/). | <a href="#remote-pane">Setup</a> |
 | **Agent-Operable CLI** | Pane ships with `runpane agent-context`, `runpane repos add`, and `runpane panes create`, so a coding agent can discover Pane's command schema, register a repo, and open follow-up panes for issues or tasks. | [Contract](docs/RUNPANE_CLI_CONTRACT.md) |
 | **@mention Terminals** | Type `@` in any terminal to pull the last 500 lines from another pane's terminal directly into your context, no copy-paste required. | <img src="images/qol-at-mention.png" alt="Cross-terminal @mention picker" width="420"> |
@@ -183,18 +198,19 @@ Use it for the work that spans panes:
 Add this repo, create three worktree panes for the next features, start Codex in each one, and keep a separate review tab ready for every PR.
 ```
 
-Pane Chat keeps the human discussion at the orchestrator level, distills that into concrete briefs when needed, then delegates authorized lifecycle stages to Claude or Codex panels through RunPane. The active agent's cached `runpane-orchestrator` is the canonical source for the software-work lifecycle, authorization ledger, review-feedback interrupts, current-head evidence rules, and `ready_to_merge` predicate. Pane's generated layer stays focused on the local Pane runtime, skill cache paths, pane/panel/worktree mechanics, and preserving the user's focus.
+Pane Chat keeps the human discussion at the orchestrator level, distills that into concrete briefs when needed, then delegates authorized lifecycle stages to Claude, Codex, or Cursor panels through RunPane. The active agent's cached `runpane-orchestrator` is the canonical source for the software-work lifecycle, authorization ledger, review-feedback interrupts, current-head evidence rules, and `ready_to_merge` predicate. Pane's generated layer stays focused on the local Pane runtime, skill cache paths, pane/panel/worktree mechanics, and preserving the user's focus.
 
 The prompt stays small because Pane writes local project-level skills into the Pane data directory:
 
 - `.codex/skills/pane-orchestrator/SKILL.md`
 - `.claude/skills/pane-orchestrator/SKILL.md`
+- `.cursor/rules/pane-orchestrator.mdc`
 - `skills/pane-chat/runpane-orchestrator.md`
 - `skills/pane-chat/runtime-context.md`
 
 Pane also caches the important workflow skills from the Pane skills repository, including discussion, plan/simple-plan, implement, implementation-reviewer, PR test automation, prepare-pr, `gh-address-comments`, investigate, and commit. The generated orchestrator skill tells Pane Chat to load the workflow map and local skill cache before it coordinates work, while deferring lifecycle policy to the cached active-agent `runpane-orchestrator` so Pane does not maintain a second, drifting copy of the workflow.
 
-The top-right toggle switches Pane Chat between Claude and Codex and persists the default orchestrator agent in Pane settings. Both agents share the same Pane-specific orchestration contract, then follow their own cached downstream skills where the Codex and Claude skill surfaces differ.
+The top-right toggle switches Pane Chat between Claude, Codex, and Cursor and persists the default orchestrator agent in Pane settings. All three share the same Pane-specific orchestration contract, then follow their own cached downstream skills where the agent skill surfaces differ.
 
 ---
 
@@ -202,7 +218,7 @@ The top-right toggle switches Pane Chat between Claude and Codex and persists th
 
 Pane is not just a place where agents run. It exposes a stable `runpane` CLI contract that agents can use to manage the workspace for you.
 
-For example, you can ask an agent to create panes for a set of GitHub issues and start Codex, Claude Code, or any terminal command in each one. The agent can inspect the available Pane commands, register the current repository if needed, and create panes with initial instructions:
+For example, you can ask an agent to create panes for a set of GitHub issues and start Codex, Claude Code, Cursor, or any terminal command in each one. The agent can inspect the available Pane commands, register the current repository if needed, and create panes with initial instructions:
 
 ```bash
 runpane agent-context
@@ -220,6 +236,8 @@ See [Runpane CLI Contract](docs/RUNPANE_CLI_CONTRACT.md) for the full schema and
 ---
 
 ## How It Works
+
+![A saved repository opens into a Pane with a worktree and branch; terminal panels in that Pane share the worktree](docs/assets/pane-workspaces.png)
 
 Two primitives: **panes** and **tabs**. One pane per feature, one worktree each. Inside every pane, everything lives in tabs — agents, diff viewer, file explorer, git tree, logs, multiple terminals. Create a pane, get an isolated workspace. Delete a pane, everything cleans up. Your agents never step on each other, and every tab persists across restarts.
 
@@ -294,13 +312,14 @@ irm https://runpane.com/install.ps1 | iex
 
 ### Direct Download
 
-> **[Download the Latest Release](https://github.com/dcouple/Pane/releases/latest)**
+> **[Download the Latest Release](https://github.com/greenfield-inc/Pane/releases/latest)**
 
 | Platform | File |
 |----------|------|
 | Windows (x64) | `Pane-x.x.x-Windows-x64.exe` |
 | Windows (ARM64) | `Pane-x.x.x-Windows-arm64.exe` |
-| macOS (Universal) | `Pane-x.x.x-macOS-universal.dmg` |
+| macOS (Apple Silicon) | `Pane-x.x.x-macOS-arm64.dmg` |
+| macOS (Intel) | `Pane-x.x.x-macOS-x64.dmg` |
 | Linux (x64) | `Pane-x.x.x-linux-x86_64.AppImage` or `.deb` |
 | Linux (ARM64) | `Pane-x.x.x-linux-arm64.AppImage` or `.deb` |
 
@@ -310,6 +329,7 @@ irm https://runpane.com/install.ps1 | iex
 - At least one AI coding agent CLI installed:
   - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) — `npm install -g @anthropic-ai/claude-code`
   - [Codex](https://github.com/openai/codex) — `npm install -g @openai/codex`
+  - [Cursor Agent](https://cursor.com/docs/cli) — `curl https://cursor.com/install -fsS | bash` (macOS/Linux, or inside WSL on Windows)
   - [Aider](https://aider.chat/) — `pip install aider-chat`
   - [Goose](https://github.com/block/goose) — or any other CLI agent
 
@@ -319,10 +339,15 @@ irm https://runpane.com/install.ps1 | iex
 
 1. **Open Pane** and create or select a project (any git repository)
 2. **Create a pane** — enter a prompt and pick your agent
-3. **Add tabs** — launch a Claude terminal, Codex terminal, diff viewer, file explorer, or any CLI tool
+3. **Add tabs** — launch a Claude, Codex, or Cursor terminal, diff viewer, file explorer, or any CLI tool
 4. **Work in parallel** — create multiple panes for different approaches
 5. **Review diffs** — see what changed with the built-in diff viewer
 6. **Ship** — commit, rebase, and merge from keyboard shortcuts
+
+You can reuse an archived or deleted pane's name. Pane keeps any old worktree
+identity and Git branches separate, choosing a free worktree name for the new
+pane. Creation errors appear in a dismissible error dialog on desktop and Remote
+Pane even if the creation dialog has already closed.
 
 ---
 
@@ -345,7 +370,7 @@ Pane is for the other 75%. And for Mac developers who want to choose their own a
 ## Who Pane Is For
 
 - **Developers on any OS**: Mac, Windows, and Linux are all first-class citizens, with no "Mac-first with a Windows waitlist"
-- **Multi-agent users** who run Claude Code, Codex, Aider, or Goose depending on the task and want one app to manage them all
+- **Multi-agent users** who run Claude Code, Codex, Cursor, Aider, or Goose depending on the task and want one app to manage them all
 - **Keyboard-driven developers** who want Superhuman-level speed in their AI-assisted coding workflow
 - **Teams** where different engineers use different agents and need a consistent workflow layer
 - **Anyone tired of juggling terminal windows**, alt-tabbing between diff viewers and git clients, or waiting for agents one at a time
@@ -403,7 +428,7 @@ Pane uses xterm.js, the same terminal engine that powers VS Code's integrated te
 ## Building from Source
 
 ```bash
-git clone https://github.com/dcouple/Pane.git
+git clone https://github.com/greenfield-inc/Pane.git
 cd Pane
 pnpm run setup
 pnpm run electron-dev
@@ -414,7 +439,7 @@ pnpm run electron-dev
 ```bash
 pnpm build:win:x64    # Windows (x64)
 pnpm build:win:arm64  # Windows (ARM64)
-pnpm build:mac        # macOS (Universal)
+pnpm build:mac        # macOS (Apple Silicon + Intel)
 pnpm build:linux  # Linux (x64 + ARM64)
 ```
 

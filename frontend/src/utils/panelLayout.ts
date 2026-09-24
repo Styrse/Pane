@@ -9,10 +9,14 @@
 
 import type {
   PanelGroupNode,
-  PanelSplitNode,
   PanelLayoutNode,
   SessionPanelLayout,
 } from '../../../shared/types/panels';
+
+interface ReconciledPanelLayout {
+  layout: SessionPanelLayout;
+  changed: boolean;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -56,17 +60,6 @@ export function containsGroup(node: PanelLayoutNode, groupId: string): boolean {
   return node.children.some(c => containsGroup(c, groupId));
 }
 
-/** Find the parent split of a node by the node's id. */
-export function findParent(root: PanelLayoutNode, nodeId: string): PanelSplitNode | null {
-  if (root.type === 'group') return null;
-  for (const child of root.children) {
-    if (child.id === nodeId) return root;
-    const found = findParent(child, nodeId);
-    if (found) return found;
-  }
-  return null;
-}
-
 /** Find which group contains a given panelId. */
 export function findGroupContainingPanel(root: PanelLayoutNode, panelId: string): PanelGroupNode | null {
   if (root.type === 'group') return root.panelIds.includes(panelId) ? root : null;
@@ -75,6 +68,32 @@ export function findGroupContainingPanel(root: PanelLayoutNode, panelId: string)
     if (found) return found;
   }
   return null;
+}
+
+/** Activate a panel and focus its containing group without changing the tree structure. */
+export function activatePanelInLayout(
+  layout: SessionPanelLayout,
+  panelId: string,
+): SessionPanelLayout {
+  const group = findGroupContainingPanel(layout.root, panelId);
+  if (!group) return layout;
+  const groupId = group.id;
+
+  function activate(node: PanelLayoutNode): PanelLayoutNode {
+    if (node.type === 'group') {
+      return node.id === groupId ? { ...node, activePanelId: panelId } : node;
+    }
+    return { ...node, children: node.children.map(activate) };
+  }
+
+  return {
+    ...layout,
+    root: activate(layout.root),
+    focusedGroupId: groupId,
+    zoomedGroupId: layout.zoomedGroupId && layout.zoomedGroupId !== groupId
+      ? null
+      : layout.zoomedGroupId,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -295,12 +314,12 @@ export function splitGroup(
 
 export type DropZone = 'left' | 'right' | 'top' | 'bottom' | 'center';
 
-export interface MoveTargetCenter {
+interface MoveTargetCenter {
   groupId: string;
   index: number;
 }
 
-export interface MoveTargetEdge {
+interface MoveTargetEdge {
   groupId: string;
   edge: 'left' | 'right' | 'top' | 'bottom';
 }
@@ -367,6 +386,7 @@ export function movePanel(
   const removed = removePanelFromTree(root);
   const normalized = normalize(removed);
 
+  // SAFETY: The surrounding typed producer establishes the narrower value shape consumed here.
   const edgeTarget = target as MoveTargetEdge;
   const direction: 'row' | 'column' = (edgeTarget.edge === 'left' || edgeTarget.edge === 'right') ? 'row' : 'column';
   const after = edgeTarget.edge === 'right' || edgeTarget.edge === 'bottom';
@@ -457,7 +477,7 @@ export function removePanelFromLayout(
 export function reconcile(
   layout: SessionPanelLayout,
   livePanelIds: string[],
-): { layout: SessionPanelLayout; changed: boolean } {
+): ReconciledPanelLayout {
   const liveSet = new Set(livePanelIds);
   let changed = false;
   // A panel id may only appear once across the whole tree; keep the first

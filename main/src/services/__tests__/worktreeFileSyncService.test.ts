@@ -1,8 +1,18 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { worktreeFileSyncService } from '../worktreeFileSyncService';
-import type { WorktreeFileSyncEntry } from '../../../../shared/types/worktreeFileSync';
+import { DEFAULT_WORKTREE_FILE_SYNC_ENTRIES, type WorktreeFileSyncEntry } from '../../../../shared/types/worktreeFileSync';
 import type { CommandRunner } from '../../utils/commandRunner';
 import type { ProjectEnvironment } from '../../utils/pathResolver';
+
+type MockCommandRunner = CommandRunner & { execAsync: ReturnType<typeof vi.fn> };
+
+function commandRunnerWith(
+  execAsync: ReturnType<typeof vi.fn>,
+): MockCommandRunner {
+  // SAFETY: WorktreeFileSyncService only invokes execAsync in these scenarios;
+  // each fixture supplies that method with the real result shape.
+  return { execAsync } as MockCommandRunner;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -21,7 +31,7 @@ function makeMockCommandRunner(
   findOutput: string,
   existingDests: ReadonlySet<string>,
   cpCommands: string[],
-): CommandRunner {
+): MockCommandRunner {
   const execAsync = vi.fn().mockImplementation((cmd: string, _cwd: string) => {
     if (cmd.startsWith('find ') || cmd.startsWith('dir /') || cmd.startsWith('sh -c ')) {
       return Promise.resolve({ stdout: findOutput, stderr: '' });
@@ -59,7 +69,7 @@ function makeMockCommandRunner(
     return Promise.resolve({ stdout: '', stderr: '' });
   });
 
-  return { execAsync } as unknown as CommandRunner;
+  return commandRunnerWith(execAsync);
 }
 
 function isMatchCommand(cmd: string): boolean {
@@ -102,6 +112,12 @@ const codexEntry: WorktreeFileSyncEntry = {
 describe('worktreeFileSyncService', () => {
   afterEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('keeps the .cursor entry in the default sync list so Cursor rules reach worktrees', () => {
+    expect(DEFAULT_WORKTREE_FILE_SYNC_ENTRIES).toContainEqual(
+      { id: 'cursor', path: '.cursor', enabled: true, recursive: false },
+    );
   });
 
   // -------------------------------------------------------------------------
@@ -313,8 +329,7 @@ describe('worktreeFileSyncService', () => {
         [envEntry],
       );
 
-      const execAsync = runner.execAsync as ReturnType<typeof vi.fn>;
-      const matchCall = execAsync.mock.calls.find((call) => isMatchCommand(String(call[0])));
+      const matchCall = runner.execAsync.mock.calls.find((call) => isMatchCommand(String(call[0])));
       expect(matchCall).toBeDefined();
       expect(String(matchCall?.[0])).toContain('-type d -name worktrees');
       expect(String(matchCall?.[0])).toContain('-prune -o -print');
@@ -396,7 +411,7 @@ describe('worktreeFileSyncService', () => {
         return Promise.resolve({ stdout: '', stderr: '' });
       });
 
-      return { execAsync } as unknown as CommandRunner;
+      return commandRunnerWith(execAsync);
     }
 
     it('copies .claude contents without entering nested worktrees', async () => {
@@ -481,7 +496,7 @@ describe('worktreeFileSyncService', () => {
         return Promise.resolve({ stdout: '', stderr: '' });
       });
 
-      const runner = { execAsync } as unknown as CommandRunner;
+      const runner = commandRunnerWith(execAsync);
 
       await worktreeFileSyncService.syncWorktree(
         mainRepoPath,
@@ -517,7 +532,7 @@ describe('worktreeFileSyncService', () => {
         return Promise.resolve({ stdout: '', stderr: '' });
       });
 
-      const runner = { execAsync } as unknown as CommandRunner;
+      const runner = commandRunnerWith(execAsync);
 
       await worktreeFileSyncService.syncWorktree(
         mainRepoPath,
@@ -631,7 +646,7 @@ describe('worktreeFileSyncService', () => {
         }
         return Promise.resolve({ stdout: '', stderr: '' });
       });
-      return { execAsync } as unknown as CommandRunner;
+      return commandRunnerWith(execAsync);
     }
 
     it('copies .env entries before node_modules even when node_modules is listed first', async () => {
@@ -681,7 +696,7 @@ describe('worktreeFileSyncService', () => {
         }
         return Promise.resolve({ stdout: '', stderr: '' });
       });
-      const runner = { execAsync } as unknown as CommandRunner;
+      const runner = commandRunnerWith(execAsync);
 
       await worktreeFileSyncService.syncWorktree(
         mainRepoPath,
@@ -718,8 +733,7 @@ describe('worktreeFileSyncService', () => {
         [nodeModulesEntry],
       );
 
-      const execAsync = runner.execAsync as ReturnType<typeof vi.fn>;
-      const cpCall = execAsync.mock.calls.find((call) => String(call[0]).startsWith('cp '));
+      const cpCall = runner.execAsync.mock.calls.find((call) => String(call[0]).startsWith('cp '));
       expect(cpCall).toBeDefined();
       expect(cpCall?.[2]).toMatchObject({ timeout: 600_000 });
     });
@@ -772,7 +786,7 @@ describe('worktreeFileSyncService', () => {
         }
         return Promise.resolve({ stdout: '', stderr: '' });
       });
-      const runner = { execAsync } as unknown as CommandRunner;
+      const runner = commandRunnerWith(execAsync);
 
       const result = await worktreeFileSyncService.syncWorktree(
         mainRepoPath,
@@ -814,7 +828,7 @@ describe('worktreeFileSyncService', () => {
         }
         return Promise.resolve({ stdout: '', stderr: '' });
       });
-      const runner = { execAsync } as unknown as CommandRunner;
+      const runner = commandRunnerWith(execAsync);
 
       const result = await worktreeFileSyncService.syncWorktree(
         mainRepoPath,

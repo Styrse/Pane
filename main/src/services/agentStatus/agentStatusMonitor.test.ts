@@ -13,8 +13,7 @@ const detection = (partial: Partial<AgentDetectionResult>): AgentDetectionResult
 });
 
 const opts = {
-  workingActivityWindowMs: 600,
-  workingToIdleHoldMs: 700,
+  idleSettleMs: 1000,
   startupGraceMs: 3000,
 };
 
@@ -32,10 +31,8 @@ describe('AgentStatusMonitor', () => {
     m.register('p', 0);
     m.noteActivity('p', 4000);
     expect(m.update('p', detection({ state: 'idle' }), 4010)).toBe('working');
-    // Activity window lapses (no new bytes) -> idle candidate begins.
-    expect(m.update('p', detection({ state: 'idle' }), 4800)).toBeNull(); // holding
-    // Hold elapses -> idle published.
-    expect(m.update('p', detection({ state: 'idle' }), 5600)).toBe('idle');
+    expect(m.update('p', detection({ state: 'idle' }), 4999)).toBeNull();
+    expect(m.update('p', detection({ state: 'idle' }), 5000)).toBe('idle');
   });
 
   it('publishes blocked immediately, overriding recent activity', () => {
@@ -76,5 +73,28 @@ describe('AgentStatusMonitor', () => {
     const m = new AgentStatusMonitor(opts);
     expect(m.update('ghost', detection({ state: 'working' }), 0)).toBeNull();
     expect(m.getState('ghost')).toBeUndefined();
+  });
+
+  it('suppresses a single trailing chunk after idle', () => {
+    const m = new AgentStatusMonitor(opts);
+    m.register('p', 0);
+    m.noteActivity('p', 4000);
+    m.noteActivity('p', 4010);
+    expect(m.update('p', detection({ state: 'idle' }), 4020)).toBe('working');
+    expect(m.update('p', detection({ state: 'idle' }), 5010)).toBe('idle');
+
+    m.noteActivity('p', 7000);
+    expect(m.update('p', detection({ state: 'idle' }), 7010)).toBeNull();
+    expect(m.getState('p')).toBe('idle');
+  });
+
+  it('publishes working after two chunks wake an idle panel', () => {
+    const m = new AgentStatusMonitor(opts);
+    m.register('p', 0);
+    expect(m.update('p', detection({ state: 'idle' }), 3000)).toBe('idle');
+    m.noteActivity('p', 4000);
+    expect(m.update('p', detection({ state: 'idle' }), 4010)).toBeNull();
+    m.noteActivity('p', 4020);
+    expect(m.update('p', detection({ state: 'idle' }), 4030)).toBe('working');
   });
 });

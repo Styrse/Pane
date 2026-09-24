@@ -1,24 +1,19 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useState } from 'react';
 import { useSessionStore } from '../stores/sessionStore';
 import { useErrorStore } from '../stores/errorStore';
 import { usePanelStore } from '../stores/panelStore';
 import { useConfigStore } from '../stores/configStore';
 import { panelApi } from '../services/panelApi';
 import { API } from '../utils/api';
+import { devLog } from '../utils/console';
 import type { Session, SessionOutput, GitStatus } from '../types/session';
-import { PANE_CHAT_SESSION_ID } from '../../../shared/types/paneChat';
+import { isOrchestrationInternalSessionId } from '../../../shared/types/orchestrationSession';
 
 interface SessionEventData {
   sessionId: string;
-  [key: string]: unknown;
 }
 
 type ValidatedEventData = SessionEventData | SessionOutput;
-
-interface SessionDeletedEventData {
-  id?: string;
-  sessionId?: string;
-}
 
 async function resyncRemoteRuntimeState(loadSessions: (sessions: Session[]) => void): Promise<void> {
   await useConfigStore.getState().fetchConfig();
@@ -71,14 +66,16 @@ function validateEventSession(eventData: ValidatedEventData, activeSessionId?: s
 
 
 // Throttle utility with external drain support
-function createThrottledWithDrain<T extends (...args: Parameters<T>) => unknown>(
+interface ThrottledWithDrain<T extends (...args: never[]) => void> {
+  throttled: (...args: Parameters<T>) => void;
+  drain: (sessionId: string) => void;
+}
+
+function createThrottledWithDrain<T extends (...args: never[]) => void>(
   fn: T,
   delayMs: number,
   keyFn: (...args: Parameters<T>) => string,
-): {
-  throttled: (...args: Parameters<T>) => void;
-  drain: (sessionId: string) => void;
-} {
+): ThrottledWithDrain<T> {
   const pendingCalls = new Map<string, Parameters<T>>();
   let lastCallTime = 0;
   let timeoutId: NodeJS.Timeout | null = null;
@@ -108,11 +105,14 @@ function createThrottledWithDrain<T extends (...args: Parameters<T>) => unknown>
 }
 
 export function useIPCEvents() {
-  const { setSessions, loadSessions, addSession, updateSession, deleteSession } = useSessionStore();
-  const { showError } = useErrorStore();
+  const loadSessions = useSessionStore(state => state.loadSessions);
+  const addSession = useSessionStore(state => state.addSession);
+  const updateSession = useSessionStore(state => state.updateSession);
+  const deleteSession = useSessionStore(state => state.deleteSession);
+  const showError = useErrorStore(state => state.showError);
   
   // Create throttled handlers for git status events (with drain support)
-  const gitStatusLoadingRef = useRef(
+  const [gitStatusLoading] = useState(() =>
     createThrottledWithDrain(
       (data: { sessionId: string }) => {
         // Validate event has required session context
@@ -129,9 +129,9 @@ export function useIPCEvents() {
       100,
       (data) => data.sessionId,
     )
-  ).current;
+  );
 
-  const gitStatusUpdatedRef = useRef(
+  const [gitStatusUpdated] = useState(() =>
     createThrottledWithDrain(
       (data: { sessionId: string; gitStatus: GitStatus }) => {
         // Validate event has required session context
@@ -141,7 +141,7 @@ export function useIPCEvents() {
 
         // Only log significant status changes in production
         if (data.gitStatus.state !== 'clean' || process.env.NODE_ENV === 'development') {
-          console.log(`[useIPCEvents] Git status: ${data.sessionId.substring(0, 8)} → ${data.gitStatus.state}`);
+          devLog.debug(`[useIPCEvents] Git status: ${data.sessionId.substring(0, 8)} → ${data.gitStatus.state}`);
         }
 
         // Update the store and clear loading state
@@ -156,7 +156,7 @@ export function useIPCEvents() {
       100,
       (data) => data.sessionId,
     )
-  ).current;
+  );
   
   useEffect(() => {
     // Check if we're in Electron environment
@@ -169,8 +169,15 @@ export function useIPCEvents() {
     const unsubscribeFunctions: (() => void)[] = [];
 
     // Listen for session events
+    unsubscribeFunctions.push(window.electronAPI.events.onSessionCreationFailed((failure) => {
+      showError({
+        title: 'Failed to Create Pane',
+        error: failure.error,
+        details: `Pane: ${failure.name}`,
+      });
+    }));
     const unsubscribeSessionCreated = window.electronAPI.events.onSessionCreated((session: Session) => {
-      console.log('[useIPCEvents] Session created:', session.id);
+      devLog.debug('[useIPCEvents] Session created:', session.id);
       addSession({...session, output: session.output || [], jsonMessages: session.jsonMessages || []});
       // Set git status as loading for new sessions
       useSessionStore.getState().setGitStatusLoading(session.id, true);
@@ -178,7 +185,7 @@ export function useIPCEvents() {
     unsubscribeFunctions.push(unsubscribeSessionCreated);
 
     const unsubscribeSessionUpdated = window.electronAPI.events.onSessionUpdated((session: Session) => {
-      console.log('[useIPCEvents] Session updated event received:', {
+      devLog.debug('[useIPCEvents] Session updated event received:', {
         id: session.id,
         status: session.status
       });
@@ -210,15 +217,24 @@ export function useIPCEvents() {
     });
     unsubscribeFunctions.push(unsubscribeSessionUpdated);
 
-    const unsubscribeSessionDeleted = window.electronAPI.events.onSessionDeleted((sessionData: SessionDeletedEventData | string) => {
-      console.log('[useIPCEvents] Session deleted:', sessionData);
-      // The backend sends just { id } for deleted sessions
-      const sessionId = typeof sessionData === 'string' ? sessionData : sessionData.id || sessionData.sessionId;
+    const unsubscribePaneFocusRequested = window.electronAPI.events.onPaneFocusRequested(({ paneId, panelId }) => {
+      devLog.debug('[useIPCEvents] Pane focus requested:', { paneId, panelId });
+      void useSessionStore.getState().setActiveSession(paneId).then(() => {
+        if (panelId) {
+          usePanelStore.getState().setActivePanel(paneId, panelId);
+        }
+      });
+    });
+    unsubscribeFunctions.push(unsubscribePaneFocusRequested);
+
+    const unsubscribeSessionDeleted = window.electronAPI.events.onSessionDeleted((sessionData) => {
+      devLog.debug('[useIPCEvents] Session deleted:', sessionData);
+      const sessionId = sessionData.id;
 
       // Drain any pending throttled git status calls for this session
       if (sessionId) {
-        gitStatusLoadingRef.drain(sessionId);
-        gitStatusUpdatedRef.drain(sessionId);
+        gitStatusLoading.drain(sessionId);
+        gitStatusUpdated.drain(sessionId);
       }
 
       // Dispatch a custom event for other components to listen to
@@ -227,7 +243,7 @@ export function useIPCEvents() {
       }));
 
       // Create a minimal session object for deletion
-      deleteSession({ id: sessionId } as Session);
+      deleteSession(sessionData);
     });
     unsubscribeFunctions.push(unsubscribeSessionDeleted);
 
@@ -236,9 +252,9 @@ export function useIPCEvents() {
       const withStatus = sessions.filter(s => s.gitStatus).length;
       const withoutStatus = sessions.filter(s => !s.gitStatus).length;
       if (withoutStatus > 0) {
-        console.log(`[useIPCEvents] Sessions: ${sessions.length} total (${withStatus} with status, ${withoutStatus} pending)`);
+        devLog.debug(`[useIPCEvents] Sessions: ${sessions.length} total (${withStatus} with status, ${withoutStatus} pending)`);
       } else {
-        console.log(`[useIPCEvents] Sessions: ${sessions.length} loaded`);
+        devLog.debug(`[useIPCEvents] Sessions: ${sessions.length} loaded`);
       }
       
       const sessionsWithJsonMessages = sessions.map(session => ({
@@ -261,7 +277,7 @@ export function useIPCEvents() {
         return; // Ignore invalid events
       }
 
-      console.log(`[useIPCEvents] Received session output for ${output.sessionId}, type: ${output.type}`);
+      devLog.debug(`[useIPCEvents] Received session output for ${output.sessionId}, type: ${output.type}`);
 
       // Just emit custom event to notify that new output is available
       // Include panelId (if present) so panel-based views can react precisely
@@ -271,19 +287,16 @@ export function useIPCEvents() {
     });
     unsubscribeFunctions.push(unsubscribeSessionOutput);
 
-    const unsubscribeTerminalOutput = window.electronAPI.events.onTerminalOutput((output: { sessionId: string; type: 'stdout' | 'stderr'; data: string }) => {
-      if (output.sessionId === PANE_CHAT_SESSION_ID) {
+    const unsubscribeTerminalOutput = window.electronAPI.events.onTerminalOutput((output) => {
+      if (isOrchestrationInternalSessionId(output.sessionId)) {
         return;
       }
 
-      // Validate event has required session context
-      if (!validateEventSession(output)) {
-        return; // Ignore invalid events
-      }
-
-      console.log(`[useIPCEvents] Received terminal output for ${output.sessionId}`);
-      // Store terminal output in session store for display
-      useSessionStore.getState().addTerminalOutput(output);
+      devLog.debug(`[useIPCEvents] Received terminal output for ${output.sessionId}`);
+      const terminalOutput = 'output' in output
+        ? { sessionId: output.sessionId, type: 'stdout' as const, data: output.output }
+        : output;
+      useSessionStore.getState().addTerminalOutput(terminalOutput);
     });
     unsubscribeFunctions.push(unsubscribeTerminalOutput);
     
@@ -293,7 +306,7 @@ export function useIPCEvents() {
         return; // Ignore invalid events
       }
 
-      console.log(`[useIPCEvents] Output available notification for session ${info.sessionId}`);
+      devLog.debug(`[useIPCEvents] Output available notification for session ${info.sessionId}`);
       
       // Emit custom event to notify that output is available
       window.dispatchEvent(new CustomEvent('session-output-available', {
@@ -301,6 +314,16 @@ export function useIPCEvents() {
       }));
     });
     unsubscribeFunctions.push(unsubscribeOutputAvailable);
+
+    const unsubscribeOrchestrationChanged = window.electronAPI.events.onOrchestrationSessionsChanged?.((change) => {
+      window.dispatchEvent(new CustomEvent('orchestration-sessions-changed', { detail: change }));
+    });
+    if (unsubscribeOrchestrationChanged) unsubscribeFunctions.push(unsubscribeOrchestrationChanged);
+
+    const unsubscribeOrchestrationOverview = window.electronAPI.events.onOrchestrationSessionsOverviewUpdated?.((change) => {
+      window.dispatchEvent(new CustomEvent('orchestration-sessions-overview-updated', { detail: change }));
+    });
+    if (unsubscribeOrchestrationOverview) unsubscribeFunctions.push(unsubscribeOrchestrationOverview);
     
     // Listen for zombie process detection
     const unsubscribeZombieProcesses = window.electronAPI.events.onZombieProcessesDetected((data: { sessionId?: string | null; pids?: number[]; message: string }) => {
@@ -326,11 +349,11 @@ export function useIPCEvents() {
     unsubscribeFunctions.push(unsubscribeZombieProcesses);
 
     // Listen for git status updates (throttled)
-    const unsubscribeGitStatusUpdated = window.electronAPI.events.onGitStatusUpdated(gitStatusUpdatedRef.throttled);
+    const unsubscribeGitStatusUpdated = window.electronAPI.events.onGitStatusUpdated(gitStatusUpdated.throttled);
     unsubscribeFunctions.push(unsubscribeGitStatusUpdated);
 
     // Listen for git status loading events (throttled)
-    const unsubscribeGitStatusLoading = window.electronAPI.events.onGitStatusLoading?.(gitStatusLoadingRef.throttled);
+    const unsubscribeGitStatusLoading = window.electronAPI.events.onGitStatusLoading?.(gitStatusLoading.throttled);
     if (unsubscribeGitStatusLoading) {
       unsubscribeFunctions.push(unsubscribeGitStatusLoading);
     }
@@ -357,7 +380,7 @@ export function useIPCEvents() {
     }
 
     const unsubscribeGitStatusUpdatedBatch = window.electronAPI.events.onGitStatusUpdatedBatch?.((updates: Array<{ sessionId: string; status: GitStatus }>) => {
-      console.log(`[useIPCEvents] Git status batch update: ${updates.length} sessions`);
+      devLog.debug(`[useIPCEvents] Git status batch update: ${updates.length} sessions`);
       const state = useSessionStore.getState();
       const knownIds = new Set(state.sessions.map((s) => s.id));
       const filtered = updates.filter((entry) => knownIds.has(entry.sessionId));
@@ -378,7 +401,7 @@ export function useIPCEvents() {
 
     // Listen for spotlight events
     const unsubscribeSpotlightStatus = window.electronAPI.events.onSpotlightStatusChanged?.((data: { sessionId: string; projectId: number; active: boolean }) => {
-      console.log(`[useIPCEvents] Spotlight status changed: session=${data.sessionId}, project=${data.projectId}, active=${data.active}`);
+      devLog.debug(`[useIPCEvents] Spotlight status changed: session=${data.sessionId}, project=${data.projectId}, active=${data.active}`);
       useSessionStore.getState().setSpotlightActive(data.sessionId, data.projectId, data.active);
     });
     if (unsubscribeSpotlightStatus) {
@@ -442,11 +465,5 @@ export function useIPCEvents() {
       // Clean up all event listeners
       unsubscribeFunctions.forEach(unsubscribe => unsubscribe());
     };
-  }, [setSessions, loadSessions, addSession, updateSession, deleteSession, showError]);
-  
-  // Return a mock socket object for compatibility
-  return {
-    connected: true,
-    disconnect: () => {},
-  };
+  }, [loadSessions, addSession, updateSession, deleteSession, showError, gitStatusLoading, gitStatusUpdated]);
 }

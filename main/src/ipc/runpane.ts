@@ -3,19 +3,30 @@ import fs from 'fs';
 import path from 'path';
 import type { IpcMain } from 'electron';
 import type { AppServices } from './types';
-import type { PaneCommandRegistry } from '../daemon/commandRegistry';
-import { PathResolver } from '../utils/pathResolver';
+import type { PaneCommandRegistry, PaneCommandValue } from '../daemon/commandRegistry';
+import { PathResolver, ProjectEnvironment, expandUserRepoPath } from '../utils/pathResolver';
 import { sanitizeTerminalOutput } from '../utils/terminalOutputSanitizer';
+import { escapeShellArg } from '../utils/shellEscape';
 import { panelManager } from '../services/panelManager';
 import { terminalPanelManager, type TerminalPanelSnapshot } from '../services/terminalPanelManager';
+import { databaseService as panelDatabase } from '../services/database';
+import type { PanelBuffers } from '../database/panelBuffers';
 import { ensureProjectAgentContext } from '../services/agentContextManager';
-import { fastCheckWorkingDirectory, fastGetAheadBehind } from '../services/gitPlumbingCommands';
+import { fastCheckWorkingDirectory, listCommitsAhead } from '../services/gitPlumbingCommands';
 import { assessComposerEvidence, isSlashCommandInput } from './runpaneComposerEvidence';
+import { projectWorkspaceEntry } from '../services/workspaceJournal';
 import type { ArchiveProgressManager, SerializedArchiveTask } from '../services/archiveProgressManager';
+import type { CommandRunner } from '../utils/commandRunner';
 import type { Project } from '../database/models';
 import type { Session, SessionOutput } from '../types/session';
 import type { CreatePanelRequest, TerminalPanelState, ToolPanel } from '../../../shared/types/panels';
 import { RUNPANE_CONTRACT } from '../../../shared/types/generatedRunpaneContract';
+import { isAgentSupportedOnPlatform } from '../../../shared/constants/agentLaunchPresets';
+import {
+  TERMINAL_IMAGE_OPTIONS,
+  terminalGraphicsProtocols,
+} from '../../../shared/constants/terminalGraphics';
+import { boundary, decodeBoundary } from '../../../shared/validation/boundaryDecoder';
 import type {
   RunpaneAgentId,
   RunpaneAgentDoctorRequest,
@@ -28,16 +39,27 @@ import type {
   RunpanePaneArchiveResult,
   RunpanePaneArchiveSafetyCheck,
   RunpanePaneArchiveSuccessResult,
+  RunpanePaneAdoptRequest,
+  RunpanePaneAdoptResult,
+  RunpanePaneCostRequest,
+  RunpanePaneCostResult,
   RunpanePaneListRequest,
   RunpanePaneListResult,
   RunpanePanePinRequest,
   RunpanePanePinResult,
+  RunpanePaneRenameRequest,
+  RunpanePaneRenameResult,
+  RunpanePaneFocusRequest,
+  RunpanePaneFocusRequestedEvent,
+  RunpanePaneFocusResult,
   RunpanePaneCreateFailureItem,
   RunpanePaneCreateItem,
   RunpanePaneCreateRequest,
   RunpanePaneCreateResult,
   RunpanePaneCreateResultItem,
   RunpanePaneReadiness,
+  RunpanePaneSummary,
+  RunpanePanelActivityStatus,
   RunpanePanelBlockedState,
   RunpanePanelCreateRequest,
   RunpanePanelCreateResult,
@@ -68,15 +90,61 @@ import type {
   RunpaneResolvedTool,
   RunpaneToolSpec,
   RunpaneWorktreeCleanupState,
+  RunpaneWorkspaceEntry,
+  RunpaneWorkspaceEntryKind,
+  RunpaneWorkspaceStateResult,
+  RunpaneWorkspaceWaitRequest,
+  RunpaneWorkspaceWaitResult,
+  RunpaneSessionListResult,
+  RunpaneSessionResult,
+  RunpaneSessionOverviewResult,
+  RunpaneSessionSelector,
 } from '../../../shared/types/runpaneOrchestration';
+import type {
+  OrchestrationAssociationInput,
+  OrchestrationSessionCreateInput,
+  OrchestrationSessionUpdateInput,
+} from '../../../shared/types/orchestrationSession';
+import type { PaneChatAgent } from '../../../shared/types/paneChat';
+import { getAppDirectory } from '../utils/appDirectory';
+import { collectRemoteDaemonExecutableHealth } from '../daemon/remoteDaemonExecutableHealth';
+import {
+  WorkspaceJournal,
+  matchesFilter,
+  workspaceFilterKey,
+  type WorkspaceJournalFilter,
+} from '../services/workspaceJournal';
+import { WatchCadence, type WatchCadenceOptions } from '../services/workspaceWatchCadence';
+import { WorkspaceStateReader } from '../services/workspaceStateReader';
+import { WorkspaceCursorStore } from '../services/workspaceCursorStore';
+import { usageManager } from '../services/usage/usageManager';
+import { parseWSLPath } from '../utils/wslUtils';
+import {
+  dueIdleEntries,
+  nextIdleDeadline,
+  type WorkspaceIdleCandidate,
+  type WorkspaceIdleSchedule,
+} from '../services/workspaceIdleTracker';
 
 const RUNPANE_CHANNELS = [
   'runpane:doctor',
   'runpane:repos:list',
   'runpane:repos:add',
+  'runpane:sessions:list',
+  'runpane:sessions:create',
+  'runpane:sessions:get',
+  'runpane:sessions:update',
+  'runpane:sessions:set-agent',
+  'runpane:sessions:associate',
+  'runpane:sessions:detach',
+  'runpane:sessions:overview',
   'runpane:panes:list',
+  'runpane:panes:cost',
   'runpane:panes:create',
+  'runpane:panes:adopt',
   'runpane:panes:pin',
+  'runpane:panes:rename',
+  'runpane:panes:focus',
   'runpane:panes:archive',
   'runpane:panels:create',
   'runpane:panels:list',
@@ -86,6 +154,8 @@ const RUNPANE_CHANNELS = [
   'runpane:panels:submit',
   'runpane:panels:submit-composer',
   'runpane:panels:wait',
+  'runpane:workspace:state',
+  'runpane:workspace:wait',
   'runpane:agents:doctor',
 ] as const;
 
@@ -97,10 +167,78 @@ const DEFAULT_PANEL_WAIT_TIMEOUT_MS = 30_000;
 const DEFAULT_PANEL_WAIT_INTERVAL_MS = 500;
 const DEFAULT_COMPOSER_VERIFY_TIMEOUT_MS = 3_000;
 const DEFAULT_COMPOSER_VERIFY_INTERVAL_MS = 100;
+const CODEX_SUBMIT_STAGE_DELAY_MS = 500;
+const CLAUDE_INPUT_WAIT_TIMEOUT_MS = 15_000;
+const CLAUDE_UI_QUIET_MS = 3_000;
 const MAX_CREATE_SUBMIT_ATTEMPTS = 3;
 const CREATE_SUBMIT_CONFIRMATION_DELAY_MS = 400;
 const DEFAULT_ARCHIVE_CLEANUP_TIMEOUT_MS = 30_000;
 const DEFAULT_ARCHIVE_CLEANUP_POLL_INTERVAL_MS = 200;
+const DEFAULT_WORKSPACE_WAIT_TIMEOUT_MS = 60_000;
+const MAX_WORKSPACE_WAIT_TIMEOUT_MS = 120_000;
+const DEFAULT_WORKSPACE_WAIT_LIMIT = 256;
+const WORKSPACE_CONSUMER_PATTERN = /^[A-Za-z0-9._-]{1,64}$/u;
+const MUTATING_RUNPANE_ACTIONS = new Set([
+  'panes:create',
+  'panes:adopt',
+  'panes:archive',
+  'panes:pin',
+  'panes:rename',
+  'panels:create',
+  'panels:input',
+  'panels:submit',
+  'panels:submit-composer',
+  'sessions:create',
+  'sessions:update',
+  'sessions:set-agent',
+  'sessions:associate',
+  'sessions:detach',
+]);
+
+const orchestrationSelectorSchema = boundary.object({
+  sessionId: boundary.optional(boundary.nonEmptyString),
+  name: boundary.optional(boundary.nonEmptyString),
+});
+const orchestrationLinkSchema = boundary.object({
+  label: boundary.nonEmptyString,
+  url: boundary.nonEmptyString,
+  kind: boundary.optional(boundary.enumeration('evidence', 'output', 'ticket', 'pull-request', 'other')),
+  provenance: boundary.optional(boundary.string),
+  addedAt: boundary.nonEmptyString,
+});
+const orchestrationSessionCreateSchema = boundary.object({
+  name: boundary.nonEmptyString,
+  agent: boundary.optional(boundary.enumeration('claude', 'codex', 'cursor')),
+  goal: boundary.optional(boundary.string),
+  context: boundary.optional(boundary.string),
+  decisions: boundary.optional(boundary.array(boundary.string)),
+  blockers: boundary.optional(boundary.array(boundary.string)),
+  nextAction: boundary.optional(boundary.string),
+  evidence: boundary.optional(boundary.array(orchestrationLinkSchema)),
+  outputs: boundary.optional(boundary.array(orchestrationLinkSchema)),
+});
+const orchestrationSessionUpdateSchema = boundary.object({
+  name: boundary.optional(boundary.string),
+  archived: boundary.optional(boundary.boolean),
+  isPinned: boundary.optional(boundary.boolean),
+  agent: boundary.optional(boundary.enumeration('claude', 'codex', 'cursor')),
+  goal: boundary.optional(boundary.string),
+  context: boundary.optional(boundary.string),
+  decisions: boundary.optional(boundary.array(boundary.string)),
+  blockers: boundary.optional(boundary.array(boundary.string)),
+  nextAction: boundary.optional(boundary.string),
+  evidence: boundary.optional(boundary.array(orchestrationLinkSchema)),
+  outputs: boundary.optional(boundary.array(orchestrationLinkSchema)),
+  report: boundary.optional(boundary.nullable(boundary.object({
+    summary: boundary.nonEmptyString,
+    status: boundary.enumeration('reported', 'verified'),
+    evidence: boundary.array(orchestrationLinkSchema),
+    reportedAt: boundary.nonEmptyString,
+    provenance: boundary.nonEmptyString,
+  }))),
+  expectedRevision: boundary.optional(boundary.number),
+  source: boundary.optional(boundary.enumeration('user', 'agent')),
+});
 
 export function registerRunpaneHandlers(
   _ipcMain: IpcMain,
@@ -108,6 +246,19 @@ export function registerRunpaneHandlers(
   commandRegistry: PaneCommandRegistry,
 ): void {
   const { databaseService, sessionManager, taskQueue, configManager } = services;
+  const workspaceJournal = services.workspaceJournal ?? createWorkspaceJournal(services);
+  const workspaceStateReader = services.workspaceStateReader ?? new WorkspaceStateReader(
+    sessionManager,
+    () => workspaceJournal.epoch,
+    () => workspaceJournal.generation,
+  );
+  const workspaceCursorStore = services.workspaceCursorStore ?? new WorkspaceCursorStore(
+    path.join(getAppDirectory(), 'workspace-cursors.json'),
+  );
+  const consumerRuntime = new Map<string, { lastReadAt?: number; cadence?: WatchCadence }>();
+  services.workspaceJournal = workspaceJournal;
+  services.workspaceStateReader = workspaceStateReader;
+  services.workspaceCursorStore = workspaceCursorStore;
 
   commandRegistry.register('runpane:doctor', async (): Promise<RunpaneDoctorResult> => {
     return withRunpaneAction(services, 'doctor', {}, () => {
@@ -125,10 +276,19 @@ export function registerRunpaneHandlers(
         },
         daemon: {
           channels: [...runpaneDaemonChannels()],
+          executableHealth: collectRemoteDaemonExecutableHealth(getAppDirectory()),
         },
         repos: {
           count: repos.length,
           active: repos.find(repo => repo.active),
+        },
+        terminal: {
+          graphicsProtocols: terminalGraphicsProtocols(),
+          sizeReports: TERMINAL_IMAGE_OPTIONS.enableSizeReports,
+          imageLimits: {
+            storageLimitMb: TERMINAL_IMAGE_OPTIONS.storageLimit,
+            pixelLimit: TERMINAL_IMAGE_OPTIONS.pixelLimit,
+          },
         },
         agentContext: {
           recommendedFirstCommands: [
@@ -150,7 +310,7 @@ export function registerRunpaneHandlers(
     }, result => ({ resultCount: result.repos.length }));
   });
 
-  commandRegistry.register('runpane:repos:add', async (request: unknown): Promise<RunpaneRepoAddResult> => {
+  commandRegistry.register('runpane:repos:add', async (request: PaneCommandValue): Promise<RunpaneRepoAddResult> => {
     return withRunpaneAction(services, 'repos:add', {}, async () => {
       const normalized = parseRepoAddRequest(request);
       const existing = resolveProjectByPath(databaseService.getAllProjects(), normalized.path);
@@ -215,7 +375,76 @@ export function registerRunpaneHandlers(
     }, result => ({ repoId: result.repo?.id, resultCount: result.created ? 1 : 0 }));
   });
 
-  commandRegistry.register('runpane:panes:list', async (request: unknown = {}): Promise<RunpanePaneListResult> => {
+  commandRegistry.register('runpane:sessions:list', async (): Promise<RunpaneSessionListResult> => {
+    return withRunpaneAction(services, 'sessions:list', {}, async () => {
+      const manager = requireOrchestrationSessionManager(services);
+      const result = await manager.list();
+      return { ok: true, ...result };
+    }, result => ({ resultCount: result.sessions.length }));
+  });
+
+  commandRegistry.register('runpane:sessions:create', async (request: PaneCommandValue): Promise<RunpaneSessionResult> => {
+    return withRunpaneAction(services, 'sessions:create', {}, async () => {
+      const manager = requireOrchestrationSessionManager(services);
+      const input = parseOrchestrationSessionCreateRequest(request);
+      const view = await manager.create(input);
+      return { ok: true, session: view.session, panelId: view.panel.id, internalSessionId: view.internalSession.id };
+    }, result => ({ resultCount: 1, panelId: result.panelId }));
+  });
+
+  commandRegistry.register('runpane:sessions:get', async (request: PaneCommandValue): Promise<RunpaneSessionResult> => {
+    return withRunpaneAction(services, 'sessions:get', {}, async () => {
+      const manager = requireOrchestrationSessionManager(services);
+      const session = await manager.get(parseOrchestrationSessionSelector(request));
+      return { ok: true, session };
+    }, result => ({ resultCount: 1 }));
+  });
+
+  commandRegistry.register('runpane:sessions:update', async (request: PaneCommandValue): Promise<RunpaneSessionResult> => {
+    return withRunpaneAction(services, 'sessions:update', {}, async () => {
+      const manager = requireOrchestrationSessionManager(services);
+      const normalized = parseOrchestrationSessionUpdateRequest(request);
+      const session = await manager.update(normalized.selector, normalized.input);
+      return { ok: true, session };
+    }, result => ({ resultCount: 1 }));
+  });
+
+  commandRegistry.register('runpane:sessions:set-agent', async (request: PaneCommandValue): Promise<RunpaneSessionResult> => {
+    return withRunpaneAction(services, 'sessions:set-agent', {}, async () => {
+      const manager = requireOrchestrationSessionManager(services);
+      const normalized = parseOrchestrationSessionAgentRequest(request);
+      const view = await manager.setAgent(normalized.selector, normalized.agent);
+      return { ok: true, session: view.session, panelId: view.panel.id, internalSessionId: view.internalSession.id };
+    }, result => ({ resultCount: 1, panelId: result.panelId }));
+  });
+
+  commandRegistry.register('runpane:sessions:associate', async (request: PaneCommandValue): Promise<RunpaneSessionResult> => {
+    return withRunpaneAction(services, 'sessions:associate', {}, async () => {
+      const manager = requireOrchestrationSessionManager(services);
+      const normalized = parseOrchestrationSessionAssociationRequest(request);
+      const session = await manager.associate(normalized.selector, normalized.association);
+      return { ok: true, session };
+    }, result => ({ resultCount: 1 }));
+  });
+
+  commandRegistry.register('runpane:sessions:detach', async (request: PaneCommandValue): Promise<RunpaneSessionResult> => {
+    return withRunpaneAction(services, 'sessions:detach', {}, async () => {
+      const manager = requireOrchestrationSessionManager(services);
+      const normalized = parseOrchestrationSessionDetachRequest(request);
+      const session = await manager.detach(normalized.selector, normalized.paneId);
+      return { ok: true, session };
+    }, result => ({ resultCount: 1 }));
+  });
+
+  commandRegistry.register('runpane:sessions:overview', async (request: PaneCommandValue): Promise<RunpaneSessionOverviewResult> => {
+    return withRunpaneAction(services, 'sessions:overview', {}, async () => {
+      const manager = requireOrchestrationSessionManager(services);
+      const overview = await manager.overview(parseOrchestrationSessionSelector(request));
+      return { ok: true, ...overview };
+    }, result => ({ resultCount: result.panes.length }));
+  });
+
+  commandRegistry.register('runpane:panes:list', async (request: PaneCommandValue = {}): Promise<RunpanePaneListResult> => {
     return withRunpaneAction(services, 'panes:list', {}, () => {
       const normalized = parsePaneListRequest(request);
       const projects = databaseService.getAllProjects();
@@ -239,7 +468,55 @@ export function registerRunpaneHandlers(
     }, result => ({ repoId: result.repo?.id, resultCount: result.panes.length }));
   });
 
-  commandRegistry.register('runpane:panes:pin', async (request: unknown): Promise<RunpanePanePinResult> => {
+  commandRegistry.register('runpane:panes:cost', async (request: PaneCommandValue = {}): Promise<RunpanePaneCostResult> => {
+    let repoId: number | undefined;
+    return withRunpaneAction(services, 'panes:cost', {}, (): RunpanePaneCostResult => {
+      const normalized = parsePaneCostRequest(request);
+      const report = usageManager.getPaneCosts();
+      let panes = report.byPane.panes;
+
+      if (normalized.paneId) {
+        const pane = panes.find(entry => entry.paneId === normalized.paneId);
+        if (pane) {
+          panes = [pane];
+        } else {
+          const session = databaseService.getSession(normalized.paneId);
+          if (!session) throw new Error(`No Pane pane found with id ${normalized.paneId}`);
+          panes = [{
+            paneId: session.id,
+            paneName: session.name,
+            worktreePath: session.worktree_path,
+            repoId: session.project_id ?? null,
+            archived: isSessionArchived(session.archived),
+            createdAtMs: parseSessionTimestampMs(session.created_at),
+            ...emptyPaneCostSlice(),
+          }];
+        }
+      }
+
+      if (normalized.repo) {
+        const project = resolveRepoSelector(databaseService.getAllProjects(), normalized.repo);
+        repoId = project.id;
+        panes = panes.filter(pane => pane.repoId === project.id);
+      }
+
+      const scoped = normalized.paneId !== undefined || normalized.repo !== undefined;
+      const result: RunpanePaneCostResult = {
+        ok: true,
+        fromMs: report.fromMs,
+        toMs: report.toMs,
+        pricingAsOf: report.pricingAsOf,
+        panes,
+      };
+      if (!scoped) {
+        result.unattributed = report.byPane.unattributed;
+        result.totals = report.totals;
+      }
+      return result;
+    }, result => ({ repoId, resultCount: result.panes.length }));
+  });
+
+  commandRegistry.register('runpane:panes:pin', async (request: PaneCommandValue): Promise<RunpanePanePinResult> => {
     return withRunpaneAction(services, 'panes:pin', {}, () => {
       const normalized = parsePanePinRequest(request);
       const pane = resolvePane(sessionManager, normalized.paneId);
@@ -271,7 +548,85 @@ export function registerRunpaneHandlers(
     }, result => ({ paneId: result.paneId }));
   });
 
-  commandRegistry.register('runpane:panes:create', async (request: unknown): Promise<RunpanePaneCreateResult> => {
+  commandRegistry.register('runpane:panes:rename', async (request: PaneCommandValue): Promise<RunpanePaneRenameResult> => {
+    return withRunpaneAction(services, 'panes:rename', {}, () => {
+      const normalized = parsePaneRenameRequest(request);
+      const pane = resolvePane(sessionManager, normalized.paneId);
+      const project = sessionManager.getProjectForSession(pane.id);
+      if (!project) {
+        throw new Error(`No Pane repo found for pane ${pane.id}`);
+      }
+
+      if (normalized.dryRun) {
+        return {
+          ok: true,
+          dryRun: true,
+          pane: sessionToPaneSummary({ ...pane, name: normalized.name }, project),
+        };
+      }
+
+      const updatedSession = databaseService.updateSession(pane.id, { name: normalized.name });
+      if (!updatedSession) {
+        throw new Error(`Failed to rename Pane ${pane.id}`);
+      }
+
+      pane.name = normalized.name;
+      sessionManager.emit('session-updated', pane);
+
+      return {
+        ok: true,
+        pane: sessionToPaneSummary(pane, project),
+      };
+    }, result => ({ paneId: result.pane.paneId }));
+  });
+
+  commandRegistry.register('runpane:panes:focus', async (request: PaneCommandValue): Promise<RunpanePaneFocusResult> => {
+    return withRunpaneAction(services, 'panes:focus', {}, async () => {
+      const normalized = parsePaneFocusRequest(request);
+      const pane = resolvePane(sessionManager, normalized.paneId);
+
+      if (pane.archived) {
+        throw new Error(`Pane ${normalized.paneId} is archived and cannot be focused`);
+      }
+
+      if (normalized.panelId) {
+        const panel = resolvePanel(normalized.panelId);
+        if (panel.sessionId !== pane.id) {
+          throw new Error(`Panel ${normalized.panelId} does not belong to Pane ${pane.id}`);
+        }
+      }
+
+      const window = services.getMainWindow();
+      if (!window) {
+        throw new Error('Pane window is not available to focus');
+      }
+
+      if (normalized.panelId) {
+        await panelManager.setActivePanel(pane.id, normalized.panelId);
+      }
+
+      if (window.isMinimized()) {
+        window.restore();
+      }
+      window.show();
+      window.focus();
+
+      const focusEvent: RunpanePaneFocusRequestedEvent = {
+        paneId: pane.id,
+        panelId: normalized.panelId,
+      };
+      window.webContents.send('pane:focus-requested', focusEvent);
+
+      return {
+        ok: true,
+        paneId: pane.id,
+        panelId: normalized.panelId,
+        focused: true,
+      };
+    }, result => ({ paneId: result.paneId, ok: result.ok }));
+  });
+
+  commandRegistry.register('runpane:panes:create', async (request: PaneCommandValue): Promise<RunpanePaneCreateResult> => {
     return withRunpaneAction(services, 'panes:create', {}, async () => {
       const normalized = parsePaneCreateRequest(request);
       const repo = resolveRepoSelector(databaseService.getAllProjects(), normalized.repo);
@@ -286,7 +641,7 @@ export function registerRunpaneHandlers(
             index,
             name: pane.name,
             pinned: Boolean(pane.pinned),
-            tool: describeTool(resolveToolSpec(pane.tool)),
+            tool: describeTool(resolveToolSpec(pane.tool, new PathResolver(repo).environment)),
           })),
         };
       }
@@ -313,7 +668,120 @@ export function registerRunpaneHandlers(
     }, result => ({ repoId: result.repo.id, resultCount: result.items.length }));
   });
 
-  commandRegistry.register('runpane:panes:archive', async (request: unknown): Promise<RunpanePaneArchiveResult> => {
+  commandRegistry.register('runpane:panes:adopt', async (request: PaneCommandValue): Promise<RunpanePaneAdoptResult> => {
+    return withRunpaneAction(services, 'panes:adopt', {}, async () => {
+      const normalized = parsePaneAdoptRequest(request);
+      const repo = resolveRepoSelector(databaseService.getAllProjects(), normalized.repo);
+      const repoSummary = projectToRepoSummary(repo, sessionManager.getSessionsForProject(repo.id).length);
+      const items: RunpanePaneCreateResultItem[] = [];
+
+      for (const [index, item] of normalized.panes.entries()) {
+        let createdSessionId: string | undefined;
+        let storedWorktreePath = item.path;
+        try {
+          const validatedPath = await validateAdoptedWorktree(services, repo, item.path);
+          storedWorktreePath = validatedPath.storagePath;
+          const existing = findSessionByWorktreeIdentity(
+            databaseService.getAllSessionsIncludingArchived({ includeHidden: true }),
+            validatedPath.identityPath,
+            validatedPath.pathResolver,
+          );
+          if (existing) {
+            throw new Error(`Worktree path is already registered by pane "${existing.name}" (${existing.id})`);
+          }
+          const tool = resolveToolSpec(item.tool, new PathResolver(repo).environment);
+          if (normalized.dryRun) {
+            items.push({ ok: true, index, name: item.name, pinned: item.pinned !== false, worktreePath: storedWorktreePath, tool: describeTool(tool) });
+            continue;
+          }
+
+          const session = await sessionManager.createSession(
+            item.name,
+            storedWorktreePath,
+            '',
+            path.basename(storedWorktreePath),
+            'ignore',
+            repo.id,
+            false,
+            item.folder
+              ? resolveOrCreateAdoptFolder(databaseService, repo.id, item.folder)
+              : undefined,
+            'none',
+            undefined,
+            item.baseBranch,
+            item.pinned !== false,
+            { worktreeOwnership: 'external' },
+          );
+          createdSessionId = session.id;
+          await sessionManager.updateSession(session.id, { status: 'stopped' });
+          const stoppedSession = sessionManager.getSession(session.id);
+          if (!stoppedSession) throw new Error(`Created session ${session.id} was not found after status update`);
+          await Promise.all([
+            panelManager.ensureExplorerPanel(session.id),
+            panelManager.ensureDiffPanel(session.id),
+          ]);
+
+          const resumeCommand = item.resume && tool.agent
+            ? buildAdoptResumeCommand(tool.agent, item.resume)
+            : tool.command;
+          const initialState: TerminalPanelState = {
+            initialCommand: item.launch ? resumeCommand : undefined,
+            agentType: tool.agent,
+            agentSessionId: item.resume,
+            hasClaudeSessionId: tool.agent === 'claude' && Boolean(item.resume),
+            isCliPanel: Boolean(tool.agent),
+          };
+          const panel = await panelManager.createPanel({
+            sessionId: session.id,
+            type: 'terminal',
+            title: tool.title,
+            initialState,
+            activate: normalized.focus === true,
+          });
+          const context = sessionManager.getProjectContext(session.id);
+          await terminalPanelManager.initializeTerminal(panel, storedWorktreePath, context?.commandRunner.wslContext ?? null);
+          if (!item.launch) {
+            terminalPanelManager.writeToTerminal(panel.id, resumeCommand);
+          }
+          sessionManager.emitSessionCreated(stoppedSession, {
+            activateOnCreate: normalized.focus === true,
+            createDefaultTerminalOnCreate: false,
+          });
+          items.push({
+            ok: true,
+            index,
+            name: item.name,
+            pinned: item.pinned !== false,
+            sessionId: session.id,
+            paneId: session.id,
+            panelId: panel.id,
+            worktreePath: storedWorktreePath,
+            tool: describeTool(tool),
+            active: Boolean(panel.state.isActive),
+            focused: Boolean(panel.state.isActive),
+            nextCommand: panelOutputCommand(panel.id),
+          });
+        } catch (error) {
+          let failureSessionId = createdSessionId;
+          if (createdSessionId) {
+            try {
+              await sessionManager.archiveSession(createdSessionId);
+              if (databaseService.deleteArchivedSessionPermanently(createdSessionId)) {
+                failureSessionId = undefined;
+              }
+            } catch (rollbackError) {
+              console.error(`[Runpane] Failed to roll back adopted pane ${createdSessionId}:`, rollbackError);
+            }
+          }
+          items.push(createFailureItem(index, item, error, failureSessionId, storedWorktreePath));
+        }
+      }
+
+      return { ok: items.every(item => item.ok), repo: repoSummary, items };
+    }, result => ({ repoId: result.repo.id, resultCount: result.items.length }));
+  });
+
+  commandRegistry.register('runpane:panes:archive', async (request: PaneCommandValue): Promise<RunpanePaneArchiveResult> => {
     return withRunpaneAction(services, 'panes:archive', {}, async () => {
       const normalized = parsePaneArchiveRequest(request);
       const pane = resolvePane(sessionManager, normalized.paneId);
@@ -322,13 +790,33 @@ export function registerRunpaneHandlers(
         throw new Error(`Pane ${normalized.paneId} is already archived`);
       }
 
-      const worktreeCleanupApplicable = Boolean(pane.projectId) && !pane.isMainRepo;
+      const worktreeCleanupApplicable = Boolean(pane.projectId)
+        && !pane.isMainRepo
+        && pane.worktreeOwnership !== 'external';
       const safetyCheck = worktreeCleanupApplicable
         ? await computeArchiveSafety(services, pane)
         : { performed: false };
 
+      const blockCode = classifyArchiveBlock(safetyCheck, worktreeCleanupApplicable);
+      if (normalized.dryRun) {
+        return {
+          ok: true,
+          paneId: normalized.paneId,
+          dryRun: true,
+          wouldArchive: Boolean(normalized.force) || !blockCode,
+          forced: Boolean(normalized.force),
+          safetyCheck: toPublicSafetyCheck(safetyCheck),
+          blocked: blockCode
+            ? {
+                code: blockCode,
+                message: describeArchiveBlock(blockCode, safetyCheck),
+                safetyCheck: toPublicSafetyCheck(safetyCheck),
+              }
+            : undefined,
+        };
+      }
+
       if (!normalized.force) {
-        const blockCode = classifyArchiveBlock(safetyCheck, worktreeCleanupApplicable);
         if (blockCode) {
           const blocked: RunpanePaneArchiveBlockedResult = {
             ok: false,
@@ -348,8 +836,13 @@ export function registerRunpaneHandlers(
         ? waitForArchiveProgressCompletion(services.archiveProgressManager, normalized.paneId, DEFAULT_ARCHIVE_CLEANUP_TIMEOUT_MS)
         : null;
 
-      const deleteResult = await commandRegistry.invoke('sessions:delete', [normalized.paneId]) as
-        { success: boolean; error?: string };
+      const deleteResult = decodeBoundary(
+        await commandRegistry.invoke('sessions:delete', [normalized.paneId]),
+        boundary.object({
+          success: boundary.boolean,
+          error: boundary.optional(boundary.string),
+        }),
+      );
       if (!deleteResult.success) {
         throw new Error(deleteResult.error ?? `Failed to archive pane ${normalized.paneId}`);
       }
@@ -376,7 +869,7 @@ export function registerRunpaneHandlers(
     }, result => ({ paneId: result.paneId, ok: result.ok }));
   });
 
-  commandRegistry.register('runpane:panels:list', async (request: unknown): Promise<RunpanePanelListResult> => {
+  commandRegistry.register('runpane:panels:list', async (request: PaneCommandValue): Promise<RunpanePanelListResult> => {
     return withRunpaneAction(services, 'panels:list', {}, () => {
       const normalized = parsePanelListRequest(request);
       const pane = resolvePane(sessionManager, normalized.paneId);
@@ -390,11 +883,15 @@ export function registerRunpaneHandlers(
     }, result => ({ paneId: result.paneId, resultCount: result.panels.length }));
   });
 
-  commandRegistry.register('runpane:panels:create', async (request: unknown): Promise<RunpanePanelCreateResult> => {
+  commandRegistry.register('runpane:panels:create', async (request: PaneCommandValue): Promise<RunpanePanelCreateResult> => {
     return withRunpaneAction(services, 'panels:create', {}, async () => {
       const normalized = parsePanelCreateRequest(request);
       const pane = resolvePane(sessionManager, normalized.paneId);
-      const tool = resolveToolSpec(normalized.tool);
+      const repo = sessionManager.getProjectForSession(pane.id);
+      if (!repo) {
+        throw new Error(`No Pane repo found for pane ${pane.id}`);
+      }
+      const tool = resolveToolSpec(normalized.tool, new PathResolver(repo).environment);
       const { panel, readiness, initialInput } = await createTerminalPanelForSession(services, pane, tool, {
         activate: resolvePanelCreateActivation(normalized, tool),
         waitReady: normalized.waitReady,
@@ -421,7 +918,7 @@ export function registerRunpaneHandlers(
     }));
   });
 
-  commandRegistry.register('runpane:panels:output', async (request: unknown): Promise<RunpanePanelOutputResult> => {
+  commandRegistry.register('runpane:panels:output', async (request: PaneCommandValue): Promise<RunpanePanelOutputResult> => {
     return withRunpaneAction(services, 'panels:output', {}, () => {
       const normalized = parsePanelOutputRequest(request);
       const panel = resolvePanel(normalized.panelId);
@@ -470,7 +967,7 @@ export function registerRunpaneHandlers(
     }));
   });
 
-  commandRegistry.register('runpane:panels:input', async (request: unknown): Promise<RunpanePanelInputResult> => {
+  commandRegistry.register('runpane:panels:input', async (request: PaneCommandValue): Promise<RunpanePanelInputResult> => {
     return withRunpaneAction(services, 'panels:input', {}, () => {
       const normalized = parsePanelInputRequest(request);
       const panel = resolvePanel(normalized.panelId);
@@ -499,7 +996,7 @@ export function registerRunpaneHandlers(
     }));
   });
 
-  commandRegistry.register('runpane:panels:screen', async (request: unknown): Promise<RunpanePanelScreenResult> => {
+  commandRegistry.register('runpane:panels:screen', async (request: PaneCommandValue): Promise<RunpanePanelScreenResult> => {
     return withRunpaneAction(services, 'panels:screen', {}, async () => {
       const normalized = parsePanelScreenRequest(request);
       const panel = resolveTerminalPanel(normalized.panelId);
@@ -512,12 +1009,58 @@ export function registerRunpaneHandlers(
     }));
   });
 
-  commandRegistry.register('runpane:panels:submit', async (request: unknown): Promise<RunpanePanelSubmitResult> => {
-    return withRunpaneAction(services, 'panels:submit', {}, () => {
+  commandRegistry.register('runpane:panels:submit', async (request: PaneCommandValue): Promise<RunpanePanelSubmitResult> => {
+    return withRunpaneAction(services, 'panels:submit', {}, async () => {
       const normalized = parsePanelSubmitRequest(request);
       const panel = resolveTerminalPanel(normalized.panelId);
       if (!terminalPanelManager.isTerminalInitialized(panel.id)) {
         throw new Error(`Terminal panel ${panel.id} is not initialized`);
+      }
+
+      let beforeScreen = await buildPanelScreenResult(panel, DEFAULT_PANEL_SCREEN_LIMIT);
+      const stagedInput = stripSubmitEnter(normalized.input);
+      const { agentType, activityStatus, isCliReady } = beforeScreen.state;
+      // Claude reads text and Enter arriving in one read as a paste and keeps
+      // the Enter as a newline. Terminal readiness can precede Claude drawing
+      // its UI or reading input, so wait while it is still drawing for its
+      // composer, then for the staged text to show, before sending Enter alone.
+      // Claude draws its UI on the alternate screen, so a quiet alternate
+      // screen without a composer is a menu or picker and gets the plain
+      // write. Startup can pause for seconds before the first frame.
+      if (stagedInput.length > 0 && agentType === 'claude' && !beforeScreen.composer.isPresent) {
+        beforeScreen = await waitForPanelScreen(
+          panel,
+          screen => screen.composer.isPresent ||
+            (screen.state.isAlternateScreen === true && !panelHasOutputWithin(panel.id, CLAUDE_UI_QUIET_MS)),
+        );
+      }
+      const stagesComposer = beforeScreen.composer.isPresent && (agentType === 'claude' ||
+        (agentType === 'codex' && activityStatus === 'idle' && isCliReady === true));
+      if (stagedInput.length > 0 && stagesComposer) {
+        const outputGenerationBeforeStage = terminalPanelManager.getOutputGeneration(panel.id);
+        terminalPanelManager.writeToTerminal(panel.id, stagedInput);
+        if (agentType === 'claude') {
+          await waitForPanelScreen(
+            panel,
+            screen => screen.composer.hasUndeliveredText && panelHasFreshOutputSince(panel.id, outputGenerationBeforeStage),
+          );
+        } else {
+          await sleep(CODEX_SUBMIT_STAGE_DELAY_MS);
+        }
+        const submission = await submitComposerForPanel(panel, 'auto');
+        return {
+          ok: submission.ok,
+          panelId: panel.id,
+          paneId: panel.sessionId,
+          inputBytes: Buffer.byteLength(stagedInput, 'utf8') + submission.inputBytes,
+          enter: 'cr',
+          sequenceName: submission.sequenceName,
+          verifiedSubmitted: submission.verifiedSubmitted,
+          verification: submission.verification,
+          sentAt: submission.sentAt,
+          blocked: submission.blocked,
+          nextCommand: submission.nextCommand,
+        };
       }
 
       const input = ensureSubmitEnter(normalized.input);
@@ -529,6 +1072,8 @@ export function registerRunpaneHandlers(
         paneId: panel.sessionId,
         inputBytes: Buffer.byteLength(input, 'utf8'),
         enter: 'cr',
+        sequenceName: 'enter-cr',
+        verifiedSubmitted: false,
         sentAt: new Date().toISOString(),
         nextCommand: panelWaitCommand(panel.id),
       };
@@ -539,7 +1084,7 @@ export function registerRunpaneHandlers(
     }));
   });
 
-  commandRegistry.register('runpane:panels:submit-composer', async (request: unknown): Promise<RunpanePanelSubmitComposerResult> => {
+  commandRegistry.register('runpane:panels:submit-composer', async (request: PaneCommandValue): Promise<RunpanePanelSubmitComposerResult> => {
     return withRunpaneAction(services, 'panels:submit-composer', {}, async () => {
       const normalized = parsePanelSubmitComposerRequest(request);
       const panel = resolveTerminalPanel(normalized.panelId);
@@ -556,7 +1101,7 @@ export function registerRunpaneHandlers(
     }));
   });
 
-  commandRegistry.register('runpane:panels:wait', async (request: unknown): Promise<RunpanePanelWaitResult> => {
+  commandRegistry.register('runpane:panels:wait', async (request: PaneCommandValue): Promise<RunpanePanelWaitResult> => {
     return withRunpaneAction(services, 'panels:wait', {}, async () => {
       const normalized = parsePanelWaitRequest(request);
       const panel = resolveTerminalPanel(normalized.panelId);
@@ -571,7 +1116,195 @@ export function registerRunpaneHandlers(
     }));
   });
 
-  commandRegistry.register('runpane:agents:doctor', async (request: unknown): Promise<RunpaneAgentDoctorResult> => {
+  commandRegistry.register('runpane:workspace:state', async (request: PaneCommandValue = {}): Promise<RunpaneWorkspaceStateResult> => {
+    return withRunpaneAction(services, 'workspace:state', {}, () => {
+      const normalized = parsePaneListRequest(request);
+      const project = normalized.repo
+        ? resolveRepoSelector(databaseService.getAllProjects(), normalized.repo)
+        : undefined;
+      return workspaceStateReader.read(project?.id);
+    }, result => ({ resultCount: result.entries.length }));
+  });
+
+  commandRegistry.register('runpane:workspace:wait', async (request: PaneCommandValue = {}): Promise<RunpaneWorkspaceWaitResult> => {
+    return withRunpaneAction(services, 'workspace:wait', {}, async () => {
+      const normalized = parseWorkspaceWaitRequest(request);
+      const project = normalized.repo
+        ? resolveRepoSelector(databaseService.getAllProjects(), normalized.repo)
+        : undefined;
+      const filter: WorkspaceJournalFilter = {
+        kinds: normalized.kinds,
+        paneIds: normalized.paneIds,
+        excludePaneIds: normalized.excludePaneIds,
+        repoId: project?.id,
+        nameContains: normalized.nameContains,
+        agentsOnly: normalized.agentsOnly,
+        includeHeldInput: normalized.includeHeldInput,
+        includeHeldInputPresence: normalized.includeHeldInputPresence,
+      };
+      const timeoutMs = Math.min(normalized.timeoutMs ?? DEFAULT_WORKSPACE_WAIT_TIMEOUT_MS, MAX_WORKSPACE_WAIT_TIMEOUT_MS);
+      const limit = normalized.limit ?? DEFAULT_WORKSPACE_WAIT_LIMIT;
+      const idleSchedule: WorkspaceIdleSchedule = { idleAfterMs: normalized.idleAfterMs ?? 0, backoff: normalized.idleBackoff ?? false };
+      const requestStartedAt = Date.now();
+      // Take the consumer's in-memory record now; it is put back only on a non-reset exit.
+      const runtime = normalized.as ? consumerRuntime.get(normalized.as) : undefined;
+      if (normalized.as) consumerRuntime.delete(normalized.as);
+      let idleWindowStart = normalized.idleWindowStartMs ?? (normalized.as
+        ? runtime?.lastReadAt ?? 0
+        : normalized.since !== undefined ? 0 : requestStartedAt);
+      let cursor = normalized.since ?? workspaceJournal.generation;
+      let reset: RunpaneWorkspaceWaitResult['reset'];
+      const cadenceOptions = normalized.as ? workspaceCadenceOptions(normalized, filter, idleSchedule) : undefined;
+      const readFilter = cadenceOptions ? WatchCadence.observeFilter(filter) : filter;
+      const currentIdleEntries = (candidates: readonly WorkspaceIdleCandidate[]): RunpaneWorkspaceEntry[] => dueIdleEntries(
+        candidates,
+        idleSchedule,
+        idleWindowStart,
+        Date.now(),
+        workspaceJournal.generation,
+      )
+        .filter(entry => matchesFilter(entry, filter))
+        .map(entry => projectWorkspaceEntry(entry, filter));
+      const baselineEntries = (): RunpaneWorkspaceEntry[] => workspaceStateReader.read(project?.id).entries
+        .filter(entry => matchesFilter(entry, filter))
+        .map(entry => projectWorkspaceEntry(entry, filter));
+
+      if (normalized.as) {
+        const evicted = workspaceCursorStore.evictStale();
+        for (const name of evicted) consumerRuntime.delete(name);
+        let named = workspaceCursorStore.get(normalized.as);
+        if (!named) {
+          cursor = normalized.from === 'earliest'
+            ? Math.max(0, workspaceJournal.oldestGeneration - 1)
+            : workspaceJournal.generation;
+          workspaceCursorStore.create(normalized.as, cursor, workspaceJournal.epoch);
+          reset = { reason: evicted.includes(normalized.as) ? 'unknown-consumer' : 'first-use' };
+        } else if (named.epoch !== workspaceJournal.epoch) {
+          cursor = workspaceJournal.generation;
+          workspaceCursorStore.create(normalized.as, cursor, workspaceJournal.epoch);
+          reset = { reason: 'epoch-changed' };
+        } else {
+          named = workspaceCursorStore.commitPending(normalized.as) ?? named;
+          cursor = named.gen;
+        }
+      }
+
+      if (reset) {
+        const silentBaseline = reset.reason === 'first-use' && normalized.from !== 'earliest';
+        const baseline = silentBaseline ? [] : baselineEntries()
+          .map(entry => reset?.reason === 'epoch-changed' ? { ...entry, changedWhileAway: true as const } : entry);
+        const entries = [...baseline, ...currentIdleEntries(workspaceIdleCandidates(workspaceStateReader, workspaceJournal, project?.id))];
+        if (normalized.as) consumerRuntime.set(normalized.as, { lastReadAt: Date.now() });
+        return {
+          ok: true,
+          epoch: workspaceJournal.epoch,
+          generation: workspaceJournal.generation,
+          entries,
+          timedOut: false,
+          reset,
+          nextCommand: workspaceNextCommand(normalized, workspaceJournal.generation),
+        };
+      }
+
+      let cadence: WatchCadence | undefined;
+      if (cadenceOptions) {
+        cadence = runtime?.cadence?.options.key === cadenceOptions.key ? runtime.cadence : new WatchCadence(cadenceOptions);
+        cursor = cadence.readCursor ?? cursor;
+      }
+
+      const deadlineAt = requestStartedAt + timeoutMs;
+      const startCursor = cursor;
+      let readAny = false;
+      let waited: Awaited<ReturnType<WorkspaceJournal['waitAfter']>>;
+      let entries: RunpaneWorkspaceEntry[];
+      for (;;) {
+        const idleCandidates = workspaceIdleCandidates(workspaceStateReader, workspaceJournal, project?.id);
+        const initial = workspaceJournal.readAfter(cursor, readFilter, limit);
+        let idleEntries = currentIdleEntries(idleCandidates);
+        if (initial.entries.length > 0 || initial.dropped !== undefined || idleEntries.length > 0) {
+          waited = { ...initial, timedOut: initial.entries.length === 0 };
+        } else {
+          const now = Date.now();
+          const parkUntil = Math.min(
+            deadlineAt,
+            nextIdleDeadline(idleCandidates, idleSchedule, now) ?? Number.POSITIVE_INFINITY,
+            cadence?.nextDeadline(now) ?? Number.POSITIVE_INFINITY,
+          );
+          waited = await workspaceJournal.waitAfter(
+            cursor,
+            readFilter,
+            Math.max(0, parkUntil - now),
+            limit,
+            normalized.as ?? 'anonymous',
+          );
+          idleEntries = currentIdleEntries(workspaceIdleCandidates(workspaceStateReader, workspaceJournal, project?.id));
+        }
+        if (waited.dropped) {
+          reset = { reason: 'cursor-truncated' };
+        }
+        entries = [...reset ? baselineEntries() : waited.entries, ...idleEntries];
+
+        if (!cadence || reset) {
+          if (normalized.as && (!waited.timedOut || waited.dropped !== undefined)) {
+            workspaceCursorStore.advance(
+              normalized.as,
+              waited.generation,
+              workspaceJournal.epoch,
+              !normalized.ackNow,
+            );
+          }
+          break;
+        }
+
+        // Drain the rest of the backlog before flushing so a BUSY on a later page
+        // can still cancel a READY on an earlier one.
+        const now = Date.now();
+        if (waited.entries.length > 0) readAny = true;
+        cadence.ingest(entries, now);
+        idleWindowStart = now;
+        cursor = Math.max(cursor, waited.generation);
+        if (waited.entries.length > 0 && cursor < workspaceJournal.generation) {
+          const rest = workspaceJournal.readAfter(cursor, readFilter, Number.MAX_SAFE_INTEGER);
+          cadence.ingest(rest.entries, now);
+          cursor = Math.max(cursor, rest.generation);
+        }
+        cadence.readCursor = cursor;
+        entries = cadence.flush(now);
+        if (entries.length > 0 || now >= deadlineAt) break;
+      }
+      if (cadence && !reset && readAny) {
+        // The durable cursor never passes an entry still pending or held in memory. The
+        // instance resumes from its own read cursor, so nothing repeats while it lives. If
+        // the instance is discarded (request shape change, eviction, reset, or a call without
+        // cadence flags) the re-read from the durable cursor re-delivers the held entries under
+        // the new filter, and later entries already delivered may repeat: that is the accepted
+        // at-least-once contract.
+        const lowestUnflushed = cadence.lowestUnflushedGen();
+        const durableGen = Math.max(
+          startCursor,
+          Math.min(cursor, lowestUnflushed === undefined ? cursor : lowestUnflushed - 1),
+        );
+        workspaceCursorStore.advance(normalized.as ?? '', durableGen, workspaceJournal.epoch, !normalized.ackNow);
+      }
+      // A reset drops the cadence; the idle window still moves forward.
+      if (normalized.as) consumerRuntime.set(normalized.as, { lastReadAt: Date.now(), cadence: reset ? undefined : cadence });
+
+      const generation = cadence && !reset ? cursor : waited.generation;
+      return {
+        ok: true,
+        epoch: workspaceJournal.epoch,
+        generation,
+        entries,
+        timedOut: entries.length === 0 && (cadence !== undefined || waited.timedOut),
+        dropped: waited.dropped,
+        reset,
+        nextCommand: workspaceNextCommand(normalized, generation),
+      };
+    }, result => ({ resultCount: result.entries.length, timedOut: result.timedOut }), result =>
+      result.entries.length > 0 || result.reset !== undefined);
+  });
+
+  commandRegistry.register('runpane:agents:doctor', async (request: PaneCommandValue): Promise<RunpaneAgentDoctorResult> => {
     return withRunpaneAction(services, 'agents:doctor', {}, async () => {
       const normalized = parseAgentDoctorRequest(request);
       const repo = normalized.repo
@@ -588,7 +1321,7 @@ export function registerRunpaneHandlers(
   });
 }
 
-export function runpaneDaemonChannels(): readonly string[] {
+function runpaneDaemonChannels(): readonly string[] {
   return RUNPANE_CHANNELS;
 }
 
@@ -603,29 +1336,42 @@ function projectToRepoSummary(project: Project, sessionCount: number): RunpaneRe
   };
 }
 
-function sessionToPaneSummary(session: Session, project: Project) {
+function sessionToPaneSummary(session: Session, project: Project): RunpanePaneSummary {
+  const panels = panelManager.getPanelsForSession(session.id);
+  const agentStatus = resolveAggregatedAgentStatus(panels);
+
   return {
     id: session.id,
     paneId: session.id,
     name: session.name,
     status: session.status,
+    agentStatus,
     worktreePath: session.worktreePath,
     repoId: project.id,
     repoName: project.name,
-    panelCount: panelManager.getPanelsForSession(session.id).length,
+    panelCount: panels.length,
     pinned: Boolean(session.isFavorite),
     createdAt: toIsoString(session.createdAt),
     lastActivity: toIsoString(session.lastActivity),
     archived: session.archived || undefined,
+    ownership: session.worktreeOwnership ?? 'pane',
   };
+}
+
+function resolveAggregatedAgentStatus(panels: readonly ToolPanel[]): RunpanePanelActivityStatus {
+  for (const panel of panels) {
+    const state = terminalPanelManager.getAgentStatus(panel.id);
+    if (state === 'working' || state === 'blocked') {
+      return 'active';
+    }
+  }
+  return 'idle';
 }
 
 function panelToSummary(panel: ToolPanel) {
   const customState = isRecord(panel.state.customState) ? panel.state.customState : {};
-  const agentType = typeof customState.agentType === 'string' && AGENT_IDS.has(customState.agentType)
-    ? customState.agentType as RunpaneAgentId
-    : undefined;
-  const isCliPanel = typeof customState.isCliPanel === 'boolean' ? customState.isCliPanel : undefined;
+  const agentType = optionalAgentId(customState.agentType);
+  const isCliPanel = optionalBoolean(customState.isCliPanel);
 
   return {
     id: panel.id,
@@ -637,7 +1383,7 @@ function panelToSummary(panel: ToolPanel) {
     initialized: panel.type === 'terminal' ? terminalPanelManager.isTerminalInitialized(panel.id) : undefined,
     agentType,
     isCliPanel,
-    position: typeof panel.metadata.position === 'number' ? panel.metadata.position : undefined,
+    position: optionalNumber(panel.metadata.position),
     createdAt: toIsoString(panel.metadata.createdAt),
     lastActiveAt: toIsoString(panel.metadata.lastActiveAt),
   };
@@ -678,16 +1424,18 @@ async function createTerminalPanelForSession(
   const initialState: TerminalPanelState = {
     initialCommand: tool.command,
     initialInput: tool.initialInput,
-    ...(useArgumentDelivery ? { initialInputMode: 'argument' as const } : {}),
     initialInputSubmitStrategy: tool.agent === 'codex' && !useArgumentDelivery
       ? 'codex-ctrl-enter'
       : 'enter',
-    ...(shouldCreateSubmitInitialInput ? {
-      initialInputSentAt: new Date().toISOString(),
-    } : {}),
     agentType: tool.agent,
     isCliPanel: Boolean(tool.agent),
   };
+  if (useArgumentDelivery) {
+    initialState.initialInputMode = 'argument';
+  }
+  if (shouldCreateSubmitInitialInput) {
+    initialState.initialInputSentAt = new Date().toISOString();
+  }
 
   const createRequest: CreatePanelRequest = {
     sessionId: session.id,
@@ -738,7 +1486,7 @@ async function submitCreateInitialInput(
     const sentAt = optionalString(customState.initialInputSentAt);
     const deliveryError = optionalString(customState.initialInputError);
     const delivered = Boolean(sentAt) && !deliveryError;
-    return {
+    const result: RunpaneInitialInputDeliveryResult = {
       delivered,
       submitted: delivered,
       inputBytes: Buffer.byteLength(tool.initialInput, 'utf8'),
@@ -746,13 +1494,14 @@ async function submitCreateInitialInput(
       sequenceName: 'argument',
       verifiedSubmitted: delivered,
       sentAt,
-      ...(delivered ? {} : {
-        error: {
-          message: deliveryError ?? 'Initial input was not attached to the agent launch command.',
-        },
-      }),
       nextCommand: readiness?.nextCommand ?? panelWaitCommand(panel.id),
     };
+    if (!delivered) {
+      result.error = {
+        message: deliveryError ?? 'Initial input was not attached to the agent launch command.',
+      };
+    }
+    return result;
   }
 
   if (!tool.agent || !readiness) {
@@ -798,6 +1547,7 @@ function shouldUseArgumentDelivery(tool: RunpaneResolvedTool): boolean {
   return Boolean(
     tool.initialInput &&
     (tool.agent === 'claude' ||
+      tool.agent === 'cursor' ||
       (tool.agent === 'codex' && !isSlashCommandInput(tool.initialInput))),
   );
 }
@@ -829,7 +1579,7 @@ async function submitCreateComposerInput(
         stagedText: input,
       });
 
-      if (lastVerdict === 'cleared' && afterScreen.state.activityStatus === 'active') {
+      if (lastVerdict === 'cleared' && panelHasFreshOutputSince(panel.id, outputGenerationBeforeSubmit)) {
         return {
           delivered: true,
           submitted: true,
@@ -837,6 +1587,7 @@ async function submitCreateComposerInput(
           strategy: submit.strategy,
           sequenceName: submit.sequenceName,
           verifiedSubmitted: true,
+          verification: 'observed' as const,
           staged: false,
           attempts,
           sentAt: new Date().toISOString(),
@@ -903,6 +1654,11 @@ function panelHasFreshOutputSince(panelId: string, generation: number): boolean 
   return terminalPanelManager.getOutputGeneration(panelId) > generation;
 }
 
+function panelHasOutputWithin(panelId: string, windowMs: number): boolean {
+  const lastOutputAt = terminalPanelManager.getLastOutputAt(panelId);
+  return lastOutputAt !== undefined && Date.now() - Date.parse(lastOutputAt) < windowMs;
+}
+
 async function createPaneItem(
   services: AppServices,
   repo: Project,
@@ -915,8 +1671,12 @@ async function createPaneItem(
     throw new Error('Task queue not initialized');
   }
 
+  const tool = resolveToolSpec(item.tool, new PathResolver(repo).environment);
+
+  let createdSessionId: string | undefined;
+  let createdWorktreePath: string | undefined;
+
   try {
-    const tool = resolveToolSpec(item.tool);
     const sessionResult = await taskQueue.createSessionAndWait({
       prompt: item.sessionPrompt ?? '',
       worktreeTemplate: item.worktreeName ?? item.name,
@@ -927,10 +1687,13 @@ async function createPaneItem(
       activateOnCreate: options.activate !== false,
     }, { timeoutMs: options.timeoutMs });
 
+    createdSessionId = sessionResult.sessionId;
+
     const session = sessionManager.getSession(sessionResult.sessionId);
     if (!session) {
       throw new Error(`Created session ${sessionResult.sessionId} was not found`);
     }
+    createdWorktreePath = session.worktreePath;
 
     const { panel, readiness, initialInput } = await createTerminalPanelForSession(services, session, tool, {
       activate: options.activate,
@@ -956,7 +1719,7 @@ async function createPaneItem(
       initialInput,
     };
   } catch (error) {
-    return createFailureItem(index, item, error);
+    return createFailureItem(index, item, error, createdSessionId, createdWorktreePath);
   }
 }
 
@@ -1028,8 +1791,13 @@ async function buildPanelScreenResult(panel: ToolPanel, limit: number): Promise<
   const liveSnapshot = terminalPanelManager.getTerminalSnapshot(panel.id);
   const customState = getTerminalCustomState(panel);
   const state = panelStateSummary(panel, liveSnapshot, customState);
-  const { source, rawText } = selectPanelScreenText(liveSnapshot, customState);
+  const persisted = liveSnapshot ? null : panelDatabase.getPanelBuffers(panel.id);
+  const { source, rawText } = selectPanelScreenText(liveSnapshot, customState, persisted);
   const bounded = boundSanitizedLines(rawText, limit);
+  const composerText = state.agentType === 'claude' && liveSnapshot
+    ? terminalPanelManager.getInputScreenText(panel.id) ?? bounded.text
+    : bounded.text;
+  const composer = detectPanelComposer(composerText, state.agentType);
 
   return {
     ok: true,
@@ -1041,14 +1809,71 @@ async function buildPanelScreenResult(panel: ToolPanel, limit: number): Promise<
     hasMore: bounded.hasMore,
     text: bounded.text,
     state,
+    composer,
     nextCommand: bounded.hasMore ? panelOutputCommand(panel.id) : panelWaitCommand(panel.id),
   };
+}
+
+function detectPanelComposer(
+  text: string,
+  agentType: RunpaneAgentId | undefined,
+): RunpanePanelScreenResult['composer'] {
+  if (agentType === 'claude') {
+    return detectClaudeComposer(text);
+  }
+  if (agentType !== 'codex') {
+    return { isPresent: false, hasUndeliveredText: false };
+  }
+
+  const lines = text.split(/\r?\n/u).map(line => line.trim());
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const match = lines[index].match(/^[›❯]\s*(.*)$/u);
+    if (!match) continue;
+
+    const content = match[1].trim();
+    const isPlaceholder = /^ask codex to do anything[.!]?$/iu.test(content);
+    return {
+      isPresent: true,
+      hasUndeliveredText: content.length > 0 && !isPlaceholder,
+    };
+  }
+
+  const hasPastedContent = /\[Pasted Content[^\]]*\]/iu.test(text);
+  return {
+    isPresent: hasPastedContent,
+    hasUndeliveredText: hasPastedContent,
+  };
+}
+
+// Claude draws its composer as a `❯` line boxed between two horizontal rules;
+// held input is anything between the prompt marker and the closing rule.
+function detectClaudeComposer(text: string): RunpanePanelScreenResult['composer'] {
+  const lines = text.split(/\r?\n/u).map(line => line.trim());
+  const isRule = (line: string | undefined) => line !== undefined && /^─{3,}$/u.test(line);
+  for (let index = lines.length - 1; index > 0; index -= 1) {
+    const match = lines[index].match(/^❯(?:\s+(.*))?$/u);
+    if (!match || !isRule(lines[index - 1])) continue;
+
+    const closingRule = lines.findIndex((line, lineIndex) => lineIndex > index && isRule(line));
+    const held = [match[1] ?? '', ...lines.slice(index + 1, closingRule < 0 ? undefined : closingRule)];
+    return {
+      isPresent: true,
+      hasUndeliveredText: held.some(line => line.length > 0),
+    };
+  }
+  return { isPresent: false, hasUndeliveredText: false };
+}
+
+interface PanelScreenText {
+  source: RunpanePanelScreenSource;
+  rawText: string;
 }
 
 function selectPanelScreenText(
   snapshot: TerminalPanelSnapshot | null,
   customState: TerminalPanelState,
-): { source: RunpanePanelScreenSource; rawText: string } {
+  persisted: PanelBuffers | null,
+): PanelScreenText {
   if (snapshot) {
     if (snapshot.screenText !== undefined) {
       return {
@@ -1065,12 +1890,12 @@ function selectPanelScreenText(
     return { source: 'empty', rawText: '' };
   }
 
-  const persistedAlternate = customState.alternateScreenBuffer;
+  const persistedAlternate = persisted?.alternate;
   if (customState.isAlternateScreen && persistedAlternate) {
     return { source: 'persistedOutput', rawText: persistedAlternate };
   }
 
-  const persistedScrollback = normalizeScrollbackBuffer(customState.scrollbackBuffer);
+  const persistedScrollback = persisted?.scrollback;
   if (persistedScrollback) {
     return { source: 'persistedOutput', rawText: persistedScrollback };
   }
@@ -1083,9 +1908,7 @@ function panelStateSummary(
   snapshot: TerminalPanelSnapshot | null,
   customState: TerminalPanelState = getTerminalCustomState(panel),
 ): RunpanePanelStateSummary {
-  const customAgentType = typeof customState.agentType === 'string' && AGENT_IDS.has(customState.agentType)
-    ? customState.agentType as RunpaneAgentId
-    : undefined;
+  const customAgentType = optionalAgentId(customState.agentType);
   const hasLiveTerminal = Boolean(snapshot || terminalPanelManager.isTerminalInitialized(panel.id));
 
   return {
@@ -1100,20 +1923,26 @@ function panelStateSummary(
 }
 
 function getTerminalCustomState(panel: ToolPanel): TerminalPanelState {
-  return (isRecord(panel.state.customState) ? panel.state.customState : {}) as TerminalPanelState;
+  try {
+    return decodeBoundary(panel.state.customState, boundary.object({
+      isAlternateScreen: boundary.optional(boundary.boolean),
+      agentType: boundary.optional(boundary.enumeration(...RUNPANE_CONTRACT.enums.agents)),
+      isCliReady: boundary.optional(boundary.boolean),
+      isCliPanel: boundary.optional(boundary.boolean),
+      lastActivityTime: boundary.optional(boundary.string),
+    }));
+  } catch {
+    return {};
+  }
 }
 
-function normalizeScrollbackBuffer(value: TerminalPanelState['scrollbackBuffer']): string {
-  if (typeof value === 'string') {
-    return value;
-  }
-  if (Array.isArray(value)) {
-    return value.join('\n');
-  }
-  return '';
+interface BoundedSanitizedLines {
+  text: string;
+  hasMore: boolean;
+  returnedLineCount: number;
 }
 
-function boundSanitizedLines(rawText: string, limit: number): { text: string; hasMore: boolean; returnedLineCount: number } {
+function boundSanitizedLines(rawText: string, limit: number): BoundedSanitizedLines {
   const stripped = sanitizeTerminalOutput(rawText);
   if (!stripped) {
     return { text: '', hasMore: false, returnedLineCount: 0 };
@@ -1135,8 +1964,10 @@ async function waitForPanel(panel: ToolPanel, request: RunpanePanelWaitRequest):
   const intervalMs = request.intervalMs ?? DEFAULT_PANEL_WAIT_INTERVAL_MS;
   let lastScreen = await buildPanelScreenResult(panel, DEFAULT_PANEL_SCREEN_LIMIT);
   let condition = request.condition ?? defaultWaitCondition(lastScreen.state);
+  let requiresFirstEvaluation = true;
 
-  while (Date.now() - startedAt <= timeoutMs) {
+  while (requiresFirstEvaluation || Date.now() - startedAt <= timeoutMs) {
+    requiresFirstEvaluation = false;
     lastScreen = await buildPanelScreenResult(panel, DEFAULT_PANEL_SCREEN_LIMIT);
     condition = request.condition ?? defaultWaitCondition(lastScreen.state);
     const blocked = detectPanelBlocker(lastScreen.text, lastScreen.state.agentType, panel.id);
@@ -1249,14 +2080,22 @@ function ensureSubmitEnter(input: string): string {
   return `${input}\r`;
 }
 
-function resolveComposerSubmit(
-  strategy: RunpanePanelSubmitComposerStrategy | undefined,
-  agentType: RunpaneAgentId | undefined,
-): {
+function stripSubmitEnter(input: string): string {
+  if (input.endsWith('\r\n')) return input.slice(0, -2);
+  if (input.endsWith('\r') || input.endsWith('\n')) return input.slice(0, -1);
+  return input;
+}
+
+interface ComposerSubmit {
   strategy: 'codex-ctrl-enter' | 'enter';
   sequenceName: RunpanePanelSubmitComposerResult['sequenceName'];
   input: string;
-} {
+}
+
+function resolveComposerSubmit(
+  strategy: RunpanePanelSubmitComposerStrategy | undefined,
+  agentType: RunpaneAgentId | undefined,
+): ComposerSubmit {
   if (strategy === 'codex-ctrl-enter' || ((!strategy || strategy === 'auto') && agentType === 'codex')) {
     return {
       strategy: 'codex-ctrl-enter',
@@ -1279,8 +2118,9 @@ async function submitComposerForPanel(
   const beforeScreen = await buildPanelScreenResult(panel, DEFAULT_PANEL_SCREEN_LIMIT);
   const state = beforeScreen.state;
   const submit = resolveComposerSubmit(strategy, state.agentType);
+  const outputGenerationBeforeSubmit = terminalPanelManager.getOutputGeneration(panel.id);
   terminalPanelManager.writeToTerminal(panel.id, submit.input);
-  const verification = await verifyComposerSubmitted(panel, beforeScreen);
+  const verification = await verifyComposerSubmitted(panel, beforeScreen, outputGenerationBeforeSubmit);
 
   return {
     ok: verification.ok,
@@ -1290,45 +2130,83 @@ async function submitComposerForPanel(
     strategy: submit.strategy,
     sequenceName: submit.sequenceName,
     verifiedSubmitted: verification.verifiedSubmitted,
+    verification: verification.verification,
     sentAt: new Date().toISOString(),
     blocked: verification.blocked,
     nextCommand: verification.blocked?.suggestedCommand ?? panelWaitCommand(panel.id),
   };
 }
 
+async function waitForPanelScreen(
+  panel: ToolPanel,
+  isReady: (screen: RunpanePanelScreenResult) => boolean,
+): Promise<RunpanePanelScreenResult> {
+  const startedAt = Date.now();
+  let screen = await buildPanelScreenResult(panel, DEFAULT_PANEL_SCREEN_LIMIT);
+  while (!isReady(screen) && Date.now() - startedAt < CLAUDE_INPUT_WAIT_TIMEOUT_MS) {
+    await sleep(DEFAULT_COMPOSER_VERIFY_INTERVAL_MS);
+    screen = await buildPanelScreenResult(panel, DEFAULT_PANEL_SCREEN_LIMIT);
+  }
+  return screen;
+}
+
 async function verifyComposerSubmitted(
   panel: ToolPanel,
   beforeScreen: RunpanePanelScreenResult,
+  outputGenerationBeforeSubmit: number,
 ): Promise<{
   ok: boolean;
   verifiedSubmitted: boolean;
+  verification?: 'observed' | 'unverifiable';
   blocked?: RunpanePanelBlockedState;
 }> {
-  const beforeHadComposerPrompt = looksLikePendingComposer(beforeScreen.text);
+  const beforeHadComposerPrompt = beforeScreen.composer.hasUndeliveredText || looksLikePendingComposer(beforeScreen.text);
   if (!beforeHadComposerPrompt && !beforeScreen.text.trim()) {
     return { ok: true, verifiedSubmitted: false };
   }
+  const stagedText = composerEvidenceText(beforeScreen.text);
   let latestScreen = beforeScreen;
+  let previousPollShowedEmptyComposer = false;
   const startedAt = Date.now();
 
   while (Date.now() - startedAt <= DEFAULT_COMPOSER_VERIFY_TIMEOUT_MS) {
     await sleep(DEFAULT_COMPOSER_VERIFY_INTERVAL_MS);
     latestScreen = await buildPanelScreenResult(panel, DEFAULT_PANEL_SCREEN_LIMIT);
 
-    if (latestScreen.state.activityStatus === 'active') {
-      return { ok: true, verifiedSubmitted: true };
+    // Claude always draws its composer box, and repaints (at startup, say)
+    // briefly show neither the box nor the prompt; only a steady empty box
+    // proves the prompt was taken.
+    if (beforeScreen.state.agentType === 'claude') {
+      const showsEmptyComposer = latestScreen.composer.isPresent && !latestScreen.composer.hasUndeliveredText;
+      if (beforeHadComposerPrompt && showsEmptyComposer && previousPollShowedEmptyComposer) {
+        return { ok: true, verifiedSubmitted: true, verification: 'observed' };
+      }
+      previousPollShowedEmptyComposer = showsEmptyComposer;
+      continue;
     }
 
-    if (beforeHadComposerPrompt && !looksLikePendingComposer(latestScreen.text)) {
-      return { ok: true, verifiedSubmitted: true };
+    const verdict = assessComposerEvidence({
+      beforeText: beforeScreen.text,
+      afterText: latestScreen.text,
+      stagedText,
+    });
+    const hasFreshOutput = panelHasFreshOutputSince(panel.id, outputGenerationBeforeSubmit);
+
+    if (verdict === 'cleared' && hasFreshOutput) {
+      return { ok: true, verifiedSubmitted: true, verification: 'observed' };
+    }
+
+    if (beforeHadComposerPrompt && !latestScreen.composer.hasUndeliveredText && !looksLikePendingComposer(latestScreen.text)) {
+      return { ok: true, verifiedSubmitted: true, verification: 'observed' };
     }
 
   }
 
-  if (beforeHadComposerPrompt && looksLikePendingComposer(latestScreen.text)) {
+  if (beforeHadComposerPrompt && (latestScreen.composer.hasUndeliveredText || looksLikePendingComposer(latestScreen.text))) {
     return {
       ok: false,
       verifiedSubmitted: false,
+      verification: panelHasFreshOutputSince(panel.id, outputGenerationBeforeSubmit) ? 'unverifiable' : undefined,
       blocked: {
         kind: 'agent-prompt',
         message: 'Pane sent the composer submit sequence, but the prompt still appears to be sitting in the composer.',
@@ -1337,13 +2215,32 @@ async function verifyComposerSubmitted(
     };
   }
 
+  if (panelHasFreshOutputSince(panel.id, outputGenerationBeforeSubmit)) {
+    return { ok: true, verifiedSubmitted: false, verification: 'unverifiable' };
+  }
+
   return { ok: true, verifiedSubmitted: false };
 }
 
+function composerEvidenceText(text: string): string {
+  const lines = text.split(/\r?\n/u);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const match = lines[index].trim().match(/^[>›❯▌]\s*(.+)$/u);
+    if (match?.[1]) return match[1];
+  }
+  const pasted = text.match(/\[Pasted (?:Content|text)[^\]]*\]/iu);
+  return pasted?.[0] ?? '';
+}
+
 function looksLikePendingComposer(text: string): boolean {
-  return /\[Pasted Content[^\]]*\]/i.test(text) ||
+  return /\[Pasted (?:Content|text)[^\]]*\]/i.test(text) ||
     /(?:press\s+)?(?:ctrl|control)\+enter\s+to\s+submit/i.test(text);
 }
+
+// GUI-launched Electron PATHs typically miss ~/.local/bin, cursor-agent's install target.
+const AGENT_FALLBACK_BIN_PATHS = {
+  cursor: ['$HOME/.local/bin/cursor-agent'],
+} satisfies Partial<Record<RunpaneAgentId, readonly string[]>>;
 
 async function runAgentDoctor(
   services: AppServices,
@@ -1357,6 +2254,24 @@ async function runAgentDoctor(
   const executable = agentCommandExecutable(command);
   const checks: RunpaneAgentDoctorResult['checks'] = [];
   const warnings: string[] = [];
+
+  if (!isAgentSupportedOnPlatform(agent, environment)) {
+    checks.push({
+      name: 'platform',
+      ok: false,
+      message: `${AGENT_TEMPLATES[agent].title} is not supported on ${environment} repos.`,
+    });
+    return {
+      ok: false,
+      agent,
+      command,
+      repo: repoSummary,
+      environment,
+      available: false,
+      checks,
+      warnings: warnings.length > 0 ? warnings : undefined,
+    };
+  }
 
   if (!context) {
     checks.push({
@@ -1379,6 +2294,7 @@ async function runAgentDoctor(
   const lookupCommand = environment === 'windows' ? `where ${executable}` : `command -v ${executable}`;
   let executablePath: string | undefined;
   let version: string | undefined;
+  let versionCommand = `${executable} --version`;
 
   try {
     const result = await context.commandRunner.execAsync(lookupCommand, repo.path, {
@@ -1399,9 +2315,35 @@ async function runAgentDoctor(
     });
   }
 
+  if (!executablePath && environment !== 'windows') {
+    const fallbackPaths = agent === 'cursor' ? AGENT_FALLBACK_BIN_PATHS.cursor : [];
+    for (const fallback of fallbackPaths) {
+      try {
+        const result = await context.commandRunner.execAsync(`command -v "${fallback}"`, repo.path, {
+          timeout: 5_000,
+          silent: true,
+        });
+        const fallbackPath = firstNonEmptyLine(result.stdout);
+        if (fallbackPath) {
+          executablePath = fallbackPath;
+          versionCommand = `"${fallback}" --version`;
+          checks.push({
+            name: 'executable-fallback',
+            ok: true,
+            message: `Found ${executable} at ${fallbackPath}.`,
+          });
+          warnings.push(`${executable} is installed at ${fallbackPath} but not on PATH; GUI-launched apps may not see it.`);
+          break;
+        }
+      } catch {
+        // Fallback probes are best-effort; the PATH check already reported the miss.
+      }
+    }
+  }
+
   if (executablePath) {
     try {
-      const result = await context.commandRunner.execAsync(`${executable} --version`, repo.path, {
+      const result = await context.commandRunner.execAsync(versionCommand, repo.path, {
         timeout: 5_000,
         silent: true,
       });
@@ -1449,8 +2391,10 @@ function outputToRecord(output: SessionOutput): RunpanePanelOutputRecord {
 }
 
 function outputToText(output: SessionOutput): string {
-  if (typeof output.data === 'string') {
-    return output.data;
+  try {
+    return decodeBoundary(output.data, boundary.string);
+  } catch {
+    // Non-string output is serialized below.
   }
 
   try {
@@ -1485,12 +2429,7 @@ function getPanelScrollback(panel: ToolPanel): string | null {
     return liveScrollback;
   }
 
-  const customState = panel.state.customState;
-  if (!isRecord(customState) || !('scrollbackBuffer' in customState)) {
-    return null;
-  }
-
-  const persisted = normalizeScrollbackBuffer((customState as TerminalPanelState).scrollbackBuffer);
+  const persisted = panelDatabase.getPanelBuffers(panel.id)?.scrollback;
   if (persisted) return persisted;
 
   return null;
@@ -1508,7 +2447,7 @@ function panelWaitCommand(panelId: string, condition: RunpanePanelWaitCondition 
   return `runpane panels wait --panel ${panelId} --for ${condition} --timeout-ms ${DEFAULT_PANEL_WAIT_TIMEOUT_MS} --json`;
 }
 
-function parsePaneListRequest(value: unknown): RunpanePaneListRequest {
+function parsePaneListRequest(value: PaneCommandValue): RunpanePaneListRequest {
   if (value === undefined || value === null) {
     return {};
   }
@@ -1524,7 +2463,187 @@ function parsePaneListRequest(value: unknown): RunpanePaneListRequest {
   };
 }
 
-function parsePaneCreateRequest(value: unknown): RunpanePaneCreateRequest {
+function requireOrchestrationSessionManager(services: AppServices) {
+  if (!services.orchestrationSessionManager) throw new Error('Sessions manager is not initialized');
+  return services.orchestrationSessionManager;
+}
+
+function parseOrchestrationSessionSelector(value: PaneCommandValue): RunpaneSessionSelector {
+  const selector = decodeBoundary(value, orchestrationSelectorSchema);
+  if (!selector.sessionId && !selector.name) throw new Error('Named Session id or name is required');
+  return selector;
+}
+
+function parseOrchestrationSessionCreateRequest(value: PaneCommandValue): OrchestrationSessionCreateInput {
+  return decodeBoundary(value, orchestrationSessionCreateSchema);
+}
+
+interface OrchestrationSessionUpdateRequest {
+  selector: RunpaneSessionSelector;
+  input: OrchestrationSessionUpdateInput;
+}
+
+function parseOrchestrationSessionUpdateRequest(value: PaneCommandValue): OrchestrationSessionUpdateRequest {
+  if (!isRecord(value)) throw new Error('Session update request must be an object');
+  const selector = parseOrchestrationSessionSelector(value.selector);
+  const input = decodeBoundary(value.input, orchestrationSessionUpdateSchema);
+  return { selector, input };
+}
+
+interface OrchestrationSessionAgentRequest {
+  selector: RunpaneSessionSelector;
+  agent: PaneChatAgent;
+}
+
+function parseOrchestrationSessionAgentRequest(value: PaneCommandValue): OrchestrationSessionAgentRequest {
+  if (!isRecord(value)) throw new Error('Session agent request must be an object');
+  const selector = parseOrchestrationSessionSelector(value.selector);
+  const agent = decodeBoundary(value.agent, boundary.enumeration('claude', 'codex', 'cursor'));
+  return { selector, agent };
+}
+
+interface OrchestrationSessionAssociationRequest {
+  selector: RunpaneSessionSelector;
+  association: OrchestrationAssociationInput;
+}
+
+function parseOrchestrationSessionAssociationRequest(value: PaneCommandValue): OrchestrationSessionAssociationRequest {
+  if (!isRecord(value)) throw new Error('Session association request must be an object');
+  const selector = parseOrchestrationSessionSelector(value.selector);
+  const association = decodeBoundary(value.association, boundary.object({
+    paneId: boundary.nonEmptyString,
+    panelIds: boundary.optional(boundary.array(boundary.nonEmptyString)),
+  }));
+  return { selector, association };
+}
+
+interface OrchestrationSessionDetachRequest {
+  selector: RunpaneSessionSelector;
+  paneId?: string;
+}
+
+function parseOrchestrationSessionDetachRequest(value: PaneCommandValue): OrchestrationSessionDetachRequest {
+  if (!isRecord(value)) throw new Error('Session detach request must be an object');
+  const selector = parseOrchestrationSessionSelector(value.selector);
+  const paneId = value.paneId === undefined ? undefined : decodeBoundary(value.paneId, boundary.nonEmptyString);
+  return { selector, paneId };
+}
+
+function parsePaneCostRequest(value: PaneCommandValue): RunpanePaneCostRequest {
+  if (value === undefined || value === null) return {};
+  if (!isRecord(value)) throw new Error('Pane cost request must be an object');
+  const paneId = optionalString(value.paneId)?.trim();
+  if (value.paneId !== undefined && !paneId) {
+    throw new Error('Pane cost paneId must be a non-empty string');
+  }
+  return {
+    repo: value.repo === undefined || value.repo === null || value.repo === ''
+      ? undefined
+      : parseRepoSelector(value.repo),
+    paneId,
+  };
+}
+
+function emptyPaneCostSlice() {
+  return {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    totalTokens: 0,
+    messageCount: 0,
+    estimatedCostUsd: 0,
+    costIncomplete: false,
+    cacheSavingsUsd: 0,
+    uncachedCostUsd: 0,
+    uncachedInputTokens: 0,
+    cacheHitRate: 0,
+    byModel: [],
+  };
+}
+
+function parseSessionTimestampMs(value: string): number {
+  const sqliteTimestamp = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(value);
+  return Date.parse(sqliteTimestamp ? `${value.replace(' ', 'T')}Z` : value);
+}
+
+function isSessionArchived(value: boolean | number | null | undefined): boolean {
+  return value === true || value === 1;
+}
+
+function parseWorkspaceWaitRequest(value: PaneCommandValue): RunpaneWorkspaceWaitRequest {
+  if (!isRecord(value)) throw new Error('Workspace wait request must be an object');
+  const consumer = optionalString(value.as)?.trim();
+  if (consumer && !WORKSPACE_CONSUMER_PATTERN.test(consumer)) {
+    throw new Error('Workspace wait as must contain 1-64 letters, numbers, dots, underscores, or hyphens');
+  }
+  const since = parseNonNegativeInteger(value.since, 'since');
+  if (consumer && since !== undefined) throw new Error('Workspace wait request cannot include both as and since');
+  if (value.from !== undefined && value.from !== 'now' && value.from !== 'earliest') {
+    throw new Error('Workspace wait from must be now or earliest');
+  }
+
+  return {
+    since,
+    as: consumer,
+    from: value.from === 'earliest' ? 'earliest' : value.from === 'now' ? 'now' : undefined,
+    timeoutMs: parseNonNegativeInteger(value.timeoutMs, 'timeoutMs'),
+    limit: parsePositiveInteger(value.limit, 'limit'),
+    kinds: parseWorkspaceKinds(value.kinds),
+    paneIds: parseStringArray(value.paneIds, 'paneIds'),
+    excludePaneIds: parseStringArray(value.excludePaneIds, 'excludePaneIds'),
+    repo: value.repo === undefined || value.repo === null || value.repo === '' ? undefined : parseRepoSelector(value.repo),
+    nameContains: optionalString(value.nameContains),
+    agentsOnly: optionalBoolean(value.agentsOnly),
+    ackNow: optionalBoolean(value.ackNow),
+    includeHeldInput: optionalBoolean(value.includeHeldInput),
+    includeHeldInputPresence: optionalBoolean(value.includeHeldInputPresence),
+    idleAfterMs: parseNonNegativeInteger(value.idleAfterMs, 'idleAfterMs'),
+    idleWindowStartMs: parseNonNegativeInteger(value.idleWindowStartMs, 'idleWindowStartMs'),
+    settleMs: parseNonNegativeInteger(value.settleMs, 'settleMs'),
+    blockedSettleMs: parseNonNegativeInteger(value.blockedSettleMs, 'blockedSettleMs'),
+    minIntervalMs: parseNonNegativeInteger(value.minIntervalMs, 'minIntervalMs'),
+    idleBackoff: optionalBoolean(value.idleBackoff),
+  };
+}
+
+const workspaceEntryKindSchema = boundary.enumeration(
+  'agent.ready',
+  'agent.busy',
+  'agent.blocked',
+  'agent.unknown',
+  'agent.idle',
+  'pane.created',
+  'pane.gone',
+  'panel.exited',
+);
+
+function parseWorkspaceKinds(value: PaneCommandValue): RunpaneWorkspaceEntryKind[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  return decodeBoundary(value, boundary.array(workspaceEntryKindSchema));
+}
+
+function parseStringArray(value: PaneCommandValue, field: string): string[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  try {
+    return decodeBoundary(value, boundary.array(boundary.string))
+      .map(item => item.trim())
+      .filter(Boolean);
+  } catch {
+    throw new Error(`Workspace wait ${field} must be an array of strings`);
+  }
+}
+
+function parseNonNegativeInteger(value: PaneCommandValue, field: string): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  const decoded = decodeBoundary(value, boundary.number);
+  if (!Number.isInteger(decoded) || decoded < 0) {
+    throw new Error(`${field} must be a non-negative integer`);
+  }
+  return decoded;
+}
+
+function parsePaneCreateRequest(value: PaneCommandValue): RunpanePaneCreateRequest {
   if (!isRecord(value)) {
     throw new Error('Pane create request must be an object');
   }
@@ -1544,18 +2663,144 @@ function parsePaneCreateRequest(value: unknown): RunpanePaneCreateRequest {
   return {
     repo,
     panes: panesValue.map(parsePaneCreateItem),
-    dryRun: typeof value.dryRun === 'boolean' ? value.dryRun : undefined,
-    timeoutMs: typeof value.timeoutMs === 'number' ? value.timeoutMs : undefined,
-    waitReady: typeof value.waitReady === 'boolean' ? value.waitReady : undefined,
+    dryRun: optionalBoolean(value.dryRun),
+    timeoutMs: optionalNumber(value.timeoutMs),
+    waitReady: optionalBoolean(value.waitReady),
     readyTimeoutMs: parsePositiveInteger(value.readyTimeoutMs, 'readyTimeoutMs'),
     concurrency: parsePositiveInteger(value.concurrency, 'concurrency'),
-    noFocus: typeof value.noFocus === 'boolean' ? value.noFocus : undefined,
-    focus: typeof value.focus === 'boolean' ? value.focus : undefined,
+    noFocus: optionalBoolean(value.noFocus),
+    focus: optionalBoolean(value.focus),
     source: value.source === 'user' || value.source === 'agent' ? value.source : undefined,
   };
 }
 
-function parsePanelListRequest(value: unknown): RunpanePanelListRequest {
+function parsePaneAdoptRequest(value: PaneCommandValue): RunpanePaneAdoptRequest {
+  if (!isRecord(value)) throw new Error('Pane adopt request must be an object');
+  if (!Array.isArray(value.panes) || value.panes.length === 0) {
+    throw new Error('Pane adopt request must include at least one pane');
+  }
+  if (value.noFocus === true && value.focus === true) {
+    throw new Error('Pane adopt request cannot include both noFocus and focus');
+  }
+  return {
+    repo: parseRepoSelector(value.repo),
+    panes: value.panes.map((entry, index) => {
+      if (!isRecord(entry)) throw new Error(`Pane adopt item ${index} must be an object`);
+      const worktreePath = optionalString(entry.path)?.trim();
+      const name = optionalString(entry.name)?.trim();
+      if (!worktreePath) throw new Error(`Pane adopt item ${index} must include path`);
+      if (!name) throw new Error(`Pane adopt item ${index} must include name`);
+      return {
+        path: worktreePath,
+        name,
+        baseBranch: optionalString(entry.baseBranch),
+        folder: optionalString(entry.folder),
+        pinned: optionalBoolean(entry.pinned),
+        tool: parseRunpaneToolSpec(entry.tool, `Pane adopt item ${index}`),
+        resume: optionalString(entry.resume),
+        launch: optionalBoolean(entry.launch),
+      };
+    }),
+    dryRun: optionalBoolean(value.dryRun),
+    noFocus: optionalBoolean(value.noFocus),
+    focus: optionalBoolean(value.focus),
+    source: value.source === 'user' || value.source === 'agent' ? value.source : undefined,
+  };
+}
+
+async function validateAdoptedWorktree(
+  services: AppServices,
+  repo: Project,
+  requestedPath: string,
+): Promise<{ storagePath: string; identityPath: string; pathResolver: PathResolver }> {
+  const context = services.sessionManager.getProjectContextByProjectId(repo.id);
+  if (!context) throw new Error(`Project context is unavailable for ${repo.name}`);
+  let identityPath: string;
+  try {
+    identityPath = resolvePathIdentity(requestedPath, context.pathResolver);
+  } catch {
+    throw new Error(`Adopt path does not exist: ${requestedPath}`);
+  }
+  const worktrees = await services.worktreeManager.listWorktrees(repo.path, context.commandRunner);
+  const registeredPaths = worktrees.flatMap(entry => {
+    try {
+      return [resolvePathIdentity(entry.path, context.pathResolver)];
+    } catch {
+      return [];
+    }
+  });
+  if (!registeredPaths.some(registeredPath => pathsHaveSameIdentity(registeredPath, identityPath))) {
+    throw new Error(`Adopt path is not a git worktree of the selected repository: ${requestedPath}`);
+  }
+
+  const storagePath = context.pathResolver.environment === 'wsl'
+    ? parseWSLPath(identityPath)?.linuxPath ?? requestedPath
+    : identityPath;
+  const candidateCommon = await resolveGitCommonDirectory(storagePath, context.pathResolver, context.commandRunner);
+  const repoCommon = await resolveGitCommonDirectory(repo.path, context.pathResolver, context.commandRunner);
+  if (!pathsHaveSameIdentity(candidateCommon, repoCommon)) {
+    throw new Error(`Adopt path belongs to a different git repository: ${requestedPath}`);
+  }
+  return { storagePath, identityPath, pathResolver: context.pathResolver };
+}
+
+async function resolveGitCommonDirectory(
+  directory: string,
+  pathResolver: PathResolver,
+  commandRunner: CommandRunner,
+): Promise<string> {
+  const { stdout } = await commandRunner.execAsync('git rev-parse --git-common-dir', directory);
+  const common = stdout.trim();
+  const storedCommon = pathResolver.environment === 'wsl'
+    ? common.startsWith('/') ? common : path.posix.resolve(directory, common)
+    : path.resolve(directory, common);
+  return resolvePathIdentity(storedCommon, pathResolver);
+}
+
+function resolvePathIdentity(storedPath: string, pathResolver: PathResolver): string {
+  return fs.realpathSync.native(pathResolver.toFileSystem(storedPath));
+}
+
+function pathsHaveSameIdentity(left: string, right: string): boolean {
+  const normalize = (value: string): string => {
+    const normalized = path.normalize(value).replace(/[\\/]+$/u, '');
+    return process.platform === 'win32' ? normalized.toLocaleLowerCase('en-US') : normalized;
+  };
+  return normalize(left) === normalize(right);
+}
+
+function findSessionByWorktreeIdentity<T extends { worktree_path: string }>(
+  sessions: readonly T[],
+  identityPath: string,
+  pathResolver: PathResolver,
+): T | undefined {
+  return sessions.find(session => {
+    try {
+      return pathsHaveSameIdentity(resolvePathIdentity(session.worktree_path, pathResolver), identityPath);
+    } catch {
+      return false;
+    }
+  });
+}
+
+function buildAdoptResumeCommand(agent: RunpaneAgentId, sessionId: string): string {
+  const id = escapeShellArg(sessionId);
+  if (agent === 'claude') return `claude --resume ${id} --dangerously-skip-permissions`;
+  if (agent === 'codex') return `codex resume --yolo ${id}`;
+  return `cursor-agent --force --trust --resume ${id}`;
+}
+
+function resolveOrCreateAdoptFolder(
+  databaseService: AppServices['databaseService'],
+  projectId: number,
+  folderName: string,
+): string {
+  const existing = databaseService.getFoldersForProject(projectId)
+    .find(folder => folder.name === folderName && !folder.parent_folder_id);
+  return existing?.id ?? databaseService.createFolder(folderName, projectId).id;
+}
+
+function parsePanelListRequest(value: PaneCommandValue): RunpanePanelListRequest {
   if (!isRecord(value)) {
     throw new Error('Panel list request must be an object');
   }
@@ -1568,7 +2813,7 @@ function parsePanelListRequest(value: unknown): RunpanePanelListRequest {
   return { paneId };
 }
 
-function parsePanelCreateRequest(value: unknown): RunpanePanelCreateRequest {
+function parsePanelCreateRequest(value: PaneCommandValue): RunpanePanelCreateRequest {
   if (!isRecord(value)) {
     throw new Error('Panel create request must be an object');
   }
@@ -1591,15 +2836,15 @@ function parsePanelCreateRequest(value: unknown): RunpanePanelCreateRequest {
     paneId,
     type: 'terminal',
     tool: parseRunpaneToolSpec(value.tool, 'Panel create request'),
-    noFocus: typeof value.noFocus === 'boolean' ? value.noFocus : undefined,
-    focus: typeof value.focus === 'boolean' ? value.focus : undefined,
+    noFocus: optionalBoolean(value.noFocus),
+    focus: optionalBoolean(value.focus),
     source: value.source === 'user' || value.source === 'agent' ? value.source : undefined,
-    waitReady: typeof value.waitReady === 'boolean' ? value.waitReady : undefined,
+    waitReady: optionalBoolean(value.waitReady),
     readyTimeoutMs: parsePositiveInteger(value.readyTimeoutMs, 'readyTimeoutMs'),
   };
 }
 
-function parsePanelOutputRequest(value: unknown): RunpanePanelOutputRequest {
+function parsePanelOutputRequest(value: PaneCommandValue): RunpanePanelOutputRequest {
   if (!isRecord(value)) {
     throw new Error('Panel output request must be an object');
   }
@@ -1615,7 +2860,7 @@ function parsePanelOutputRequest(value: unknown): RunpanePanelOutputRequest {
   };
 }
 
-function parsePanelInputRequest(value: unknown): RunpanePanelInputRequest {
+function parsePanelInputRequest(value: PaneCommandValue): RunpanePanelInputRequest {
   if (!isRecord(value)) {
     throw new Error('Panel input request must be an object');
   }
@@ -1624,17 +2869,18 @@ function parsePanelInputRequest(value: unknown): RunpanePanelInputRequest {
   if (!panelId) {
     throw new Error('Panel input request must include panelId');
   }
-  if (typeof value.input !== 'string') {
+  const input = optionalString(value.input);
+  if (input === undefined) {
     throw new Error('Panel input request must include input');
   }
 
   return {
     panelId,
-    input: value.input,
+    input,
   };
 }
 
-function parsePanelScreenRequest(value: unknown): RunpanePanelScreenRequest {
+function parsePanelScreenRequest(value: PaneCommandValue): RunpanePanelScreenRequest {
   if (!isRecord(value)) {
     throw new Error('Panel screen request must be an object');
   }
@@ -1650,7 +2896,7 @@ function parsePanelScreenRequest(value: unknown): RunpanePanelScreenRequest {
   };
 }
 
-function parsePanelSubmitRequest(value: unknown): RunpanePanelSubmitRequest {
+function parsePanelSubmitRequest(value: PaneCommandValue): RunpanePanelSubmitRequest {
   if (!isRecord(value)) {
     throw new Error('Panel submit request must be an object');
   }
@@ -1659,17 +2905,18 @@ function parsePanelSubmitRequest(value: unknown): RunpanePanelSubmitRequest {
   if (!panelId) {
     throw new Error('Panel submit request must include panelId');
   }
-  if (typeof value.input !== 'string') {
+  const input = optionalString(value.input);
+  if (input === undefined) {
     throw new Error('Panel submit request must include input');
   }
 
   return {
     panelId,
-    input: value.input,
+    input,
   };
 }
 
-function parsePanelSubmitComposerRequest(value: unknown): RunpanePanelSubmitComposerRequest {
+function parsePanelSubmitComposerRequest(value: PaneCommandValue): RunpanePanelSubmitComposerRequest {
   if (!isRecord(value)) {
     throw new Error('Panel submit-composer request must be an object');
   }
@@ -1689,11 +2936,13 @@ function parsePanelSubmitComposerRequest(value: unknown): RunpanePanelSubmitComp
 
   return {
     panelId,
-    strategy: value.strategy as RunpanePanelSubmitComposerStrategy | undefined,
+    strategy: value.strategy === undefined
+      ? undefined
+      : decodeBoundary(value.strategy, boundary.enumeration('auto', 'codex-ctrl-enter', 'enter')),
   };
 }
 
-function parsePanelWaitRequest(value: unknown): RunpanePanelWaitRequest {
+function parsePanelWaitRequest(value: PaneCommandValue): RunpanePanelWaitRequest {
   if (!isRecord(value)) {
     throw new Error('Panel wait request must be an object');
   }
@@ -1718,23 +2967,24 @@ function parsePanelWaitRequest(value: unknown): RunpanePanelWaitRequest {
   };
 }
 
-function parseAgentDoctorRequest(value: unknown): RunpaneAgentDoctorRequest {
+function parseAgentDoctorRequest(value: PaneCommandValue): RunpaneAgentDoctorRequest {
   if (!isRecord(value)) {
     throw new Error('Agent doctor request must be an object');
   }
-  if (typeof value.agent !== 'string' || !AGENT_IDS.has(value.agent)) {
+  const agent = optionalAgentId(value.agent);
+  if (!agent) {
     throw new Error(`Agent doctor request must include agent: ${[...AGENT_IDS].join(', ')}`);
   }
 
   return {
-    agent: value.agent as RunpaneAgentId,
+    agent,
     repo: value.repo === undefined || value.repo === null || value.repo === ''
       ? undefined
       : parseRepoSelector(value.repo),
   };
 }
 
-function parseWaitCondition(value: unknown, contains?: string): RunpanePanelWaitCondition | undefined {
+function parseWaitCondition(value: PaneCommandValue, contains?: string): RunpanePanelWaitCondition | undefined {
   if (value === undefined || value === null || value === '') {
     return contains ? 'text' : undefined;
   }
@@ -1744,23 +2994,24 @@ function parseWaitCondition(value: unknown, contains?: string): RunpanePanelWait
   throw new Error('Panel wait condition must be one of: initialized, ready, idle, text');
 }
 
-function parseRepoAddRequest(value: unknown): Required<Pick<RunpaneRepoAddRequest, 'path' | 'name'>> & Pick<RunpaneRepoAddRequest, 'dryRun'> {
+function parseRepoAddRequest(value: PaneCommandValue): Required<Pick<RunpaneRepoAddRequest, 'path' | 'name'>> & Pick<RunpaneRepoAddRequest, 'dryRun'> {
   if (!isRecord(value)) {
     throw new Error('Repo add request must be an object');
   }
 
-  if (typeof value.path !== 'string' || value.path.trim().length === 0) {
+  const requestedPath = optionalString(value.path)?.trim();
+  if (!requestedPath) {
     throw new Error('Repo add request must include a path');
   }
 
-  const repoPath = path.resolve(value.path);
+  const repoPath = expandUserRepoPath(requestedPath);
   const providedName = optionalString(value.name)?.trim();
   const defaultName = path.basename(repoPath) || repoPath;
 
   return {
     path: repoPath,
     name: providedName && providedName.length > 0 ? providedName : defaultName,
-    dryRun: typeof value.dryRun === 'boolean' ? value.dryRun : undefined,
+    dryRun: optionalBoolean(value.dryRun),
   };
 }
 
@@ -1786,31 +3037,74 @@ async function computeArchiveSafety(services: AppServices, pane: Session): Promi
     // Deliberately bypass gitStatusManager's cache (up to CACHE_TTL_MS stale)
     // and read git plumbing directly — a safety gate must see the current
     // state, not a snapshot from moments-ago that predates a recent commit.
-    const workingDirectory = fastCheckWorkingDirectory(pane.worktreePath, ctx.commandRunner.wslContext);
+    const workingDirectory = await fastCheckWorkingDirectory(pane.worktreePath, ctx.commandRunner.wslContext);
     const hasUncommittedChanges = workingDirectory.hasModified || workingDirectory.hasStaged || workingDirectory.hasConflicts;
     const hasUntrackedFiles = workingDirectory.hasUntracked;
 
     const upstream = await services.worktreeManager.getUpstream(pane.worktreePath, ctx.commandRunner);
     if (upstream) {
-      const { ahead } = fastGetAheadBehind(pane.worktreePath, upstream, ctx.commandRunner.wslContext);
-      return { performed: true, hasUncommittedChanges, hasUntrackedFiles, hasUpstream: true, unpushedCommits: ahead };
+      const remote = await resolveUpstreamRemote(pane.worktreePath, upstream, ctx.commandRunner);
+      await ctx.commandRunner.execAsync(
+        `git fetch --no-tags --prune ${escapeShellArg(remote)}`,
+        pane.worktreePath,
+        { timeout: 30000 },
+      );
+      const unpushedCommitDetails = await listCommitsAhead(
+        pane.worktreePath,
+        upstream,
+        ctx.commandRunner.wslContext,
+      );
+      return {
+        performed: true,
+        hasUncommittedChanges,
+        hasUntrackedFiles,
+        hasUpstream: true,
+        upstream,
+        upstreamRefreshed: true,
+        unpushedCommits: unpushedCommitDetails.length,
+        unpushedCommitDetails,
+      };
     }
 
     // No upstream at all (never pushed, or detached HEAD): the branch's own
     // commits ahead of its base/comparison branch are the closest proxy for
     // "unpushed work".
     const comparisonBranch = await services.worktreeManager.getSessionComparisonBranch(pane, ctx);
-    const { ahead } = fastGetAheadBehind(pane.worktreePath, comparisonBranch, ctx.commandRunner.wslContext);
+    const unpushedCommitDetails = await listCommitsAhead(
+      pane.worktreePath,
+      comparisonBranch,
+      ctx.commandRunner.wslContext,
+    );
     return {
       performed: true,
       hasUncommittedChanges,
       hasUntrackedFiles,
       hasUpstream: false,
-      unpushedCommits: ahead,
+      upstreamRefreshed: false,
+      unpushedCommits: unpushedCommitDetails.length,
+      unpushedCommitDetails,
     };
   } catch {
     return { performed: false, reasonUnavailable: 'git-status-error' };
   }
+}
+
+async function resolveUpstreamRemote(
+  worktreePath: string,
+  upstream: string,
+  commandRunner: CommandRunner,
+): Promise<string> {
+  const { stdout } = await commandRunner.execAsync('git remote', worktreePath);
+  const remote = stdout
+    .split('\n')
+    .map(value => value.trim())
+    .filter(Boolean)
+    .sort((left, right) => right.length - left.length)
+    .find(value => upstream.startsWith(`${value}/`));
+  if (!remote) {
+    throw new Error(`Could not resolve remote for upstream ${upstream}`);
+  }
+  return remote;
 }
 
 function classifyArchiveBlock(check: ArchiveSafetyCheck, applicable: boolean): RunpanePaneArchiveBlockCode | undefined {
@@ -1851,7 +3145,10 @@ function toPublicSafetyCheck(check: ArchiveSafetyCheck): RunpanePaneArchiveSafet
     hasUncommittedChanges: check.hasUncommittedChanges,
     hasUntrackedFiles: check.hasUntrackedFiles,
     hasUpstream: check.hasUpstream,
+    upstream: check.upstream,
+    upstreamRefreshed: check.upstreamRefreshed,
     unpushedCommits: check.unpushedCommits,
+    unpushedCommitDetails: check.unpushedCommitDetails,
   };
 }
 
@@ -1899,7 +3196,7 @@ async function waitForWorktreeRemovalByPolling(
   return fs.existsSync(worktreePath) ? 'timeout' : 'completed';
 }
 
-function parsePaneArchiveRequest(value: unknown): RunpanePaneArchiveRequest {
+function parsePaneArchiveRequest(value: PaneCommandValue): RunpanePaneArchiveRequest {
   if (!isRecord(value)) {
     throw new Error('Pane archive request must be an object');
   }
@@ -1914,12 +3211,13 @@ function parsePaneArchiveRequest(value: unknown): RunpanePaneArchiveRequest {
 
   return {
     paneId,
-    force: typeof value.force === 'boolean' ? value.force : undefined,
+    force: optionalBoolean(value.force),
     source: value.source === 'user' || value.source === 'agent' ? value.source : undefined,
+    dryRun: optionalBoolean(value.dryRun),
   };
 }
 
-function parsePanePinRequest(value: unknown): RunpanePanePinRequest {
+function parsePanePinRequest(value: PaneCommandValue): RunpanePanePinRequest {
   if (!isRecord(value)) {
     throw new Error('Pane pin request must be an object');
   }
@@ -1928,14 +3226,57 @@ function parsePanePinRequest(value: unknown): RunpanePanePinRequest {
   if (!paneId) {
     throw new Error('Pane pin request must include a paneId');
   }
-  if (typeof value.pinned !== 'boolean') {
+  const pinned = optionalBoolean(value.pinned);
+  if (pinned === undefined) {
     throw new Error('Pane pin request must include pinned as a boolean');
   }
 
   return {
     paneId,
-    pinned: value.pinned,
-    dryRun: typeof value.dryRun === 'boolean' ? value.dryRun : undefined,
+    pinned,
+    dryRun: optionalBoolean(value.dryRun),
+  };
+}
+
+function parsePaneRenameRequest(value: PaneCommandValue): RunpanePaneRenameRequest {
+  if (!isRecord(value)) {
+    throw new Error('Pane rename request must be an object');
+  }
+
+  const paneId = optionalString(value.paneId)?.trim();
+  if (!paneId) {
+    throw new Error('Pane rename request must include a paneId');
+  }
+  const name = optionalString(value.name)?.trim();
+  if (!name) {
+    throw new Error('Pane rename request must include a non-empty name');
+  }
+
+  return {
+    paneId,
+    name,
+    dryRun: optionalBoolean(value.dryRun),
+  };
+}
+
+function parsePaneFocusRequest(value: PaneCommandValue): RunpanePaneFocusRequest {
+  if (!isRecord(value)) {
+    throw new Error('Pane focus request must be an object');
+  }
+
+  const paneId = optionalString(value.paneId)?.trim();
+  if (!paneId) {
+    throw new Error('Pane focus request must include a paneId');
+  }
+  const panelId = optionalString(value.panelId)?.trim();
+  if (value.source !== undefined && value.source !== 'user' && value.source !== 'agent') {
+    throw new Error('Pane focus source must be user or agent');
+  }
+
+  return {
+    paneId,
+    panelId: panelId || undefined,
+    source: value.source === 'user' || value.source === 'agent' ? value.source : undefined,
   };
 }
 
@@ -1947,40 +3288,44 @@ function resolvePanel(panelId: string): ToolPanel {
   return panel;
 }
 
-function parsePaneCreateItem(value: unknown, index: number): RunpanePaneCreateItem {
+function parsePaneCreateItem(value: PaneCommandValue, index: number): RunpanePaneCreateItem {
   if (!isRecord(value)) {
     throw new Error(`Pane create item ${index} must be an object`);
   }
 
-  if (typeof value.name !== 'string' || value.name.trim().length === 0) {
+  const name = optionalString(value.name);
+  if (!name || name.trim().length === 0) {
     throw new Error(`Pane create item ${index} must include a name`);
   }
 
   return {
-    name: value.name,
+    name,
     worktreeName: optionalString(value.worktreeName),
     baseBranch: optionalString(value.baseBranch),
     sessionPrompt: optionalString(value.sessionPrompt),
-    pinned: typeof value.pinned === 'boolean' ? value.pinned : undefined,
+    // CLI/daemon-created Panes pin by default so orchestrated work stays visible
+    // in the sidebar; the Pane UI create dialog has its own startPinned preference.
+    pinned: optionalBoolean(value.pinned) ?? true,
     tool: parseRunpaneToolSpec(value.tool, `Pane create item ${index}`),
   };
 }
 
 function validateRepositoryPath(repoPath: string): void {
+  const resolvedPath = expandUserRepoPath(repoPath);
   let stat: fs.Stats;
   try {
-    stat = fs.statSync(repoPath);
+    stat = fs.statSync(resolvedPath);
   } catch {
-    throw new Error(`Repo path does not exist: ${repoPath}`);
+    throw new Error(`Repo path does not exist: ${resolvedPath}`);
   }
 
   if (!stat.isDirectory()) {
-    throw new Error(`Repo path must be a directory: ${repoPath}`);
+    throw new Error(`Repo path must be a directory: ${resolvedPath}`);
   }
 
   try {
     const output = execFileSync('git', ['rev-parse', '--is-inside-work-tree'], {
-      cwd: repoPath,
+      cwd: resolvedPath,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();
@@ -1989,29 +3334,28 @@ function validateRepositoryPath(repoPath: string): void {
       throw new Error('not inside work tree');
     }
   } catch {
-    throw new Error(`Repo path must be an existing git repository: ${repoPath}`);
+    throw new Error(`Repo path must be an existing git repository: ${resolvedPath}`);
   }
 }
 
-function parseRunpaneToolSpec(value: unknown, label: string): RunpaneToolSpec {
+function parseRunpaneToolSpec(value: PaneCommandValue, label: string): RunpaneToolSpec {
   if (!isRecord(value)) {
     throw new Error(`${label} must include a tool object`);
   }
 
-  if (typeof value.agent === 'string') {
-    if (!AGENT_IDS.has(value.agent)) {
-      throw new Error(`Unsupported agent "${value.agent}" in ${label}`);
-    }
+  const agent = optionalAgentId(value.agent);
+  if (agent) {
     return {
-      agent: value.agent as RunpaneAgentId,
+      agent,
       title: optionalString(value.title),
       initialInput: optionalString(value.initialInput),
     };
   }
 
-  if (typeof value.command === 'string' && value.command.trim().length > 0) {
+  const command = optionalString(value.command);
+  if (command && command.trim().length > 0) {
     return {
-      command: value.command,
+      command,
       title: optionalString(value.title),
       initialInput: optionalString(value.initialInput),
     };
@@ -2020,24 +3364,20 @@ function parseRunpaneToolSpec(value: unknown, label: string): RunpaneToolSpec {
   throw new Error(`${label} tool must include agent or command`);
 }
 
-function parseRepoSelector(value: unknown): RunpaneRepoSelector {
-  if (typeof value === 'string') {
-    return value;
-  }
+function parseRepoSelector(value: PaneCommandValue): RunpaneRepoSelector {
+  const selectorText = optionalString(value);
+  if (selectorText !== undefined) return selectorText;
 
   if (!isRecord(value)) {
     throw new Error('Pane create request must include a repo selector');
   }
 
-  if (typeof value.id === 'number') {
-    return { id: value.id };
-  }
-  if (typeof value.path === 'string') {
-    return { path: value.path };
-  }
-  if (typeof value.name === 'string') {
-    return { name: value.name };
-  }
+  const id = optionalNumber(value.id);
+  if (id !== undefined) return { id };
+  const selectorPath = optionalString(value.path);
+  if (selectorPath !== undefined) return { path: selectorPath };
+  const name = optionalString(value.name);
+  if (name !== undefined) return { name };
   if (value.active === true) {
     return { active: true };
   }
@@ -2046,44 +3386,52 @@ function parseRepoSelector(value: unknown): RunpaneRepoSelector {
 }
 
 function resolveRepoSelector(projects: Project[], selector: RunpaneRepoSelector): Project {
-  if (typeof selector === 'string') {
-    if (selector === 'active' || selector === 'default') {
+  const selectorText = optionalString(selector);
+  if (selectorText !== undefined) {
+    if (selectorText === 'active' || selectorText === 'default') {
       return resolveActiveProject(projects);
     }
 
-    if (/^\d+$/.test(selector)) {
-      const byId = projects.find(project => project.id === Number(selector));
+    if (/^\d+$/.test(selectorText)) {
+      const byId = projects.find(project => project.id === Number(selectorText));
       if (byId) {
         return byId;
       }
     }
 
-    const byPath = resolveProjectByPath(projects, selector);
+    const byPath = resolveProjectByPath(projects, selectorText);
     if (byPath) {
       return byPath;
     }
 
-    return resolveProjectByName(projects, selector);
+    return resolveProjectByName(projects, selectorText);
   }
 
-  if ('id' in selector) {
-    const project = projects.find(candidate => candidate.id === selector.id);
+  const selectorObject = decodeBoundary(selector, boundary.object({
+    id: boundary.optional(boundary.number),
+    path: boundary.optional(boundary.string),
+    name: boundary.optional(boundary.string),
+    active: boundary.optional(boundary.literal(true)),
+  }));
+
+  if (selectorObject.id !== undefined) {
+    const project = projects.find(candidate => candidate.id === selectorObject.id);
     if (!project) {
-      throw new Error(`No Pane repo found with id ${selector.id}`);
+      throw new Error(`No Pane repo found with id ${selectorObject.id}`);
     }
     return project;
   }
 
-  if ('path' in selector) {
-    const project = resolveProjectByPath(projects, selector.path);
+  if (selectorObject.path !== undefined) {
+    const project = resolveProjectByPath(projects, selectorObject.path);
     if (!project) {
-      throw new Error(`No Pane repo found at path ${selector.path}`);
+      throw new Error(`No Pane repo found at path ${selectorObject.path}`);
     }
     return project;
   }
 
-  if ('name' in selector) {
-    return resolveProjectByName(projects, selector.name);
+  if (selectorObject.name !== undefined) {
+    return resolveProjectByName(projects, selectorObject.name);
   }
 
   return resolveActiveProject(projects);
@@ -2113,9 +3461,12 @@ function resolveProjectByName(projects: Project[], selectorName: string): Projec
   return matches[0];
 }
 
-function resolveToolSpec(tool: RunpaneToolSpec): RunpaneResolvedTool {
+function resolveToolSpec(tool: RunpaneToolSpec, environment?: ProjectEnvironment): RunpaneResolvedTool {
   if ('agent' in tool) {
     const template = AGENT_TEMPLATES[tool.agent];
+    if (environment && !isAgentSupportedOnPlatform(tool.agent, environment)) {
+      throw new Error(`${template.title} is not supported on ${environment} repos.`);
+    }
     return {
       title: tool.title ?? template.title,
       command: template.command,
@@ -2131,7 +3482,9 @@ function resolveToolSpec(tool: RunpaneToolSpec): RunpaneResolvedTool {
   };
 }
 
-function describeTool(tool: RunpaneResolvedTool): { title: string; command: string; agent?: RunpaneAgentId } {
+type DescribedTool = Pick<RunpaneResolvedTool, 'title' | 'command' | 'agent'>;
+
+function describeTool(tool: RunpaneResolvedTool): DescribedTool {
   return {
     title: tool.title,
     command: tool.command,
@@ -2139,26 +3492,36 @@ function describeTool(tool: RunpaneResolvedTool): { title: string; command: stri
   };
 }
 
-function createFailureItem(index: number, item: RunpanePaneCreateItem, error: unknown): RunpanePaneCreateFailureItem {
+function createFailureItem(
+  index: number,
+  item: RunpanePaneCreateItem,
+  cause: unknown,
+  sessionId?: string,
+  worktreePath?: string,
+): RunpanePaneCreateFailureItem {
   return {
     ok: false,
     index,
     name: item.name,
+    sessionId,
+    paneId: sessionId,
+    worktreePath,
     error: {
-      message: error instanceof Error ? error.message : String(error),
+      message: cause instanceof Error ? cause.message : String(cause),
       code: 'ERR_RUNPANE_PANE_CREATE_FAILED',
     },
   };
 }
 
-function parsePositiveInteger(value: unknown, label: string): number | undefined {
+function parsePositiveInteger(value: PaneCommandValue, label: string): number | undefined {
   if (value === undefined || value === null) {
     return undefined;
   }
-  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
+  const numberValue = optionalNumber(value);
+  if (numberValue === undefined || !Number.isInteger(numberValue) || numberValue <= 0) {
     throw new Error(`${label} must be a positive integer`);
   }
-  return value;
+  return numberValue;
 }
 
 function toIsoString(value: Date | string | undefined): string | undefined {
@@ -2198,22 +3561,34 @@ interface RunpaneActionMetadata {
   environment?: string;
 }
 
-async function withRunpaneAction<T>(
+async function withRunpaneAction<T extends { ok: boolean }>(
   services: AppServices,
   action: string,
   metadata: RunpaneActionMetadata,
   handler: () => Promise<T> | T,
   resultMetadata?: (result: T) => RunpaneActionMetadata,
+  shouldTrackResult: (result: T) => boolean = () => true,
 ): Promise<T> {
   const startedAt = Date.now();
+  const generation = MUTATING_RUNPANE_ACTIONS.has(action)
+    ? services.workspaceJournal?.generation
+    : undefined;
   try {
     const result = await handler();
-    const commandOk = isRecord(result) && typeof result.ok === 'boolean' ? result.ok : true;
-    trackRunpaneAction(services, action, 'success', Date.now() - startedAt, {
+    if (generation !== undefined && !('dryRun' in result && result.dryRun === true)) {
+      Object.assign(result, { generation });
+    }
+    const commandOk = result.ok;
+    const actionMetadata: RunpaneActionMetadata = {
       ...metadata,
       ok: commandOk,
-      ...(resultMetadata ? resultMetadata(result) : {}),
-    });
+    };
+    if (resultMetadata) {
+      Object.assign(actionMetadata, resultMetadata(result));
+    }
+    if (shouldTrackResult(result)) {
+      trackRunpaneAction(services, action, 'success', Date.now() - startedAt, actionMetadata);
+    }
     return result;
   } catch (error) {
     trackRunpaneAction(services, action, 'failure', Date.now() - startedAt, {
@@ -2224,19 +3599,103 @@ async function withRunpaneAction<T>(
   }
 }
 
+function createWorkspaceJournal(services: AppServices): WorkspaceJournal {
+  const journal = new WorkspaceJournal({
+    resolvePane: (paneId) => {
+      const session = services.sessionManager.getSession(paneId);
+      if (!session) return undefined;
+      const project = services.sessionManager.getProjectForSession(paneId);
+      return {
+        paneId,
+        paneName: session.name,
+        repoId: project?.id,
+        repoName: project?.name,
+        worktreePath: session.worktreePath,
+      };
+    },
+    resolvePanel: (panelId) => {
+      const panel = panelManager.getPanel(panelId);
+      if (!panel) return undefined;
+      const snapshot = terminalPanelManager.getTerminalSnapshot(panelId);
+      const customState = isRecord(panel.state.customState) ? panel.state.customState : {};
+      return {
+        panelId,
+        paneId: panel.sessionId,
+        panelTitle: panel.title,
+        isCliPanel: snapshot?.isCliPanel ?? optionalBoolean(customState.isCliPanel) ?? false,
+        agentType: snapshot?.agentType ?? optionalString(customState.agentType),
+        lastActivityAt: snapshot?.lastActivityTime,
+        screenText: snapshot?.screenText,
+      };
+    },
+  });
+  const sessions = services.sessionManager.getAllSessions();
+  for (const session of sessions) {
+    const project = services.sessionManager.getProjectForSession(session.id);
+    journal.rememberPane({
+      paneId: session.id,
+      paneName: session.name,
+      repoId: project?.id,
+      repoName: project?.name,
+      worktreePath: session.worktreePath,
+    });
+  }
+  return journal;
+}
+
+function workspaceCadenceOptions(
+  request: RunpaneWorkspaceWaitRequest,
+  filter: WorkspaceJournalFilter,
+  idleSchedule: WorkspaceIdleSchedule,
+): WatchCadenceOptions | undefined {
+  const settleMs = request.settleMs ?? 0;
+  const blockedSettleMs = request.blockedSettleMs ?? 0;
+  const minIntervalMs = request.minIntervalMs ?? 0;
+  if (settleMs <= 0 && blockedSettleMs <= 0 && minIntervalMs <= 0) return undefined;
+  const key = JSON.stringify({
+    settleMs,
+    blockedSettleMs,
+    minIntervalMs,
+    idleAfterMs: idleSchedule.idleAfterMs,
+    idleBackoff: idleSchedule.backoff === true,
+    filter: workspaceFilterKey(filter),
+  });
+  return { settleMs, blockedSettleMs, minIntervalMs, emitKinds: request.kinds, key };
+}
+
+function workspaceNextCommand(request: RunpaneWorkspaceWaitRequest, generation: number): string {
+  const cursor = request.as ? `--as ${request.as}` : `--since ${generation}`;
+  return `runpane watch ${cursor}`;
+}
+
+function workspaceIdleCandidates(
+  workspaceStateReader: WorkspaceStateReader,
+  workspaceJournal: WorkspaceJournal,
+  repoId?: number,
+): WorkspaceIdleCandidate[] {
+  return workspaceStateReader.listManagedCliPanels(repoId).flatMap((panel) => {
+    if (panel.agentState !== 'idle' || !panel.agentType) return [];
+    const snapshotTime = panel.lastActivityTime ? Date.parse(panel.lastActivityTime) : Number.NaN;
+    const idleSinceMs = workspaceJournal.readySince(panel.panelId)
+      ?? (Number.isFinite(snapshotTime) ? snapshotTime : undefined);
+    if (idleSinceMs === undefined) return [];
+    return [{ ...panel, agentType: panel.agentType, idleSinceMs }];
+  });
+}
+
 function trackRunpaneAction(
   services: AppServices,
   action: string,
   status: 'success' | 'failure',
   durationMs: number,
   metadata: RunpaneActionMetadata,
-  error?: unknown,
+  cause?: unknown,
 ): void {
   const analyticsManager = services.analyticsManager;
   const paneIdHash = metadata.paneId && analyticsManager?.hashSessionId(metadata.paneId);
   const panelIdHash = metadata.panelId && analyticsManager?.hashSessionId(metadata.panelId);
-  const errorMessage = error instanceof Error ? error.message : error ? String(error) : undefined;
-  const errorType = error instanceof Error ? error.name : error ? 'Error' : undefined;
+  const errorMessage = cause instanceof Error ? cause.message : cause ? String(cause) : undefined;
+  const errorType = cause instanceof Error ? cause.name : cause ? 'Error' : undefined;
 
   analyticsManager?.track('runpane_local_control', {
     action,
@@ -2296,15 +3755,21 @@ function firstNonEmptyLine(value: string | undefined): string | undefined {
     .find(line => line.length > 0);
 }
 
-function commandErrorMessage(error: unknown, fallback: string): string {
-  if (isRecord(error)) {
-    const stderr = firstNonEmptyLine(typeof error.stderr === 'string' ? error.stderr : undefined);
-    const stdout = firstNonEmptyLine(typeof error.stdout === 'string' ? error.stdout : undefined);
+function commandErrorMessage(cause: unknown, fallback: string): string {
+  try {
+    const details = decodeBoundary(cause, boundary.object({
+      stderr: boundary.optional(boundary.string),
+      stdout: boundary.optional(boundary.string),
+    }));
+    const stderr = firstNonEmptyLine(details.stderr);
+    const stdout = firstNonEmptyLine(details.stdout);
     if (stderr) return stderr;
     if (stdout) return stdout;
+  } catch {
+    // Fall through to the standard Error contract.
   }
-  if (error instanceof Error && error.message) {
-    return error.message;
+  if (cause instanceof Error && cause.message) {
+    return cause.message;
   }
   return fallback;
 }
@@ -2313,10 +3778,43 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function optionalString(value: unknown): string | undefined {
-  return typeof value === 'string' ? value : undefined;
+function optionalString(value: PaneCommandValue): string | undefined {
+  try {
+    return decodeBoundary(value, boundary.string);
+  } catch {
+    return undefined;
+  }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+function isRecord(value: PaneCommandValue): value is Record<string, PaneCommandValue> {
+  try {
+    decodeBoundary(value, boundary.jsonObject);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function optionalBoolean(value: PaneCommandValue): boolean | undefined {
+  try {
+    return decodeBoundary(value, boundary.boolean);
+  } catch {
+    return undefined;
+  }
+}
+
+function optionalNumber(value: PaneCommandValue): number | undefined {
+  try {
+    return decodeBoundary(value, boundary.number);
+  } catch {
+    return undefined;
+  }
+}
+
+function optionalAgentId(value: PaneCommandValue): RunpaneAgentId | undefined {
+  try {
+    return decodeBoundary(value, boundary.enumeration(...RUNPANE_CONTRACT.enums.agents));
+  } catch {
+    return undefined;
+  }
 }

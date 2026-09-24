@@ -1,18 +1,24 @@
 import { isDaemonOwnedChannel } from '../daemon/daemonChannels';
-import type { PaneCommandRegistry } from '../daemon/commandRegistry';
+import type { PaneCommandRegistry, PaneCommandValue } from '../daemon/commandRegistry';
 import { remotePaneClientController } from '../daemon/client/remotePaneClient';
+import { boundary, decodeBoundary } from '../../../shared/validation/boundaryDecoder';
 
 interface IpcMainHandleLike {
-  handle(channel: string, listener: (_event: unknown, ...args: unknown[]) => Promise<unknown>): void;
+  // Keep the daemon boundary independent from Electron while retaining the
+  // structural portion of IpcMainInvokeEvent needed for handler compatibility.
+  handle(
+    channel: string,
+    listener: (_event: { readonly sender: object }, channel: PaneCommandValue, ...args: PaneCommandValue[]) => Promise<PaneCommandValue>,
+  ): void;
 }
 
 interface PaneDaemonBridgeRouter {
-  invoke(channel: string, args: unknown[]): Promise<unknown>;
+  invoke(channel: string, args: PaneCommandValue[]): Promise<PaneCommandValue>;
 }
 
 export function createDaemonBridgeRouter(commandRegistry: PaneCommandRegistry): PaneDaemonBridgeRouter {
   return {
-    async invoke(channel: string, args: unknown[]): Promise<unknown> {
+    async invoke(channel: string, args: PaneCommandValue[]): Promise<PaneCommandValue> {
       return remotePaneClientController.invoke(channel, args, () => commandRegistry.invoke(channel, args));
     },
   };
@@ -22,15 +28,18 @@ export function registerDaemonBridgeHandlers(
   ipcMain: IpcMainHandleLike,
   bridgeRouter: PaneDaemonBridgeRouter,
 ): void {
-  ipcMain.handle('daemon:invoke', async (_event, channel: unknown, ...args: unknown[]) => {
-    if (typeof channel !== 'string') {
+  ipcMain.handle('daemon:invoke', async (_event, channel, ...args) => {
+    let decodedChannel: string;
+    try {
+      decodedChannel = decodeBoundary(channel, boundary.string);
+    } catch {
       throw new Error('Pane daemon bridge requires a string channel');
     }
 
-    if (!isDaemonOwnedChannel(channel)) {
-      throw new Error(`Channel "${channel}" is not daemon-owned`);
+    if (!isDaemonOwnedChannel(decodedChannel)) {
+      throw new Error(`Channel "${decodedChannel}" is not daemon-owned`);
     }
 
-    return bridgeRouter.invoke(channel, args);
+    return bridgeRouter.invoke(decodedChannel, args);
   });
 }

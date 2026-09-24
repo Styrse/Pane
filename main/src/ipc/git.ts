@@ -6,31 +6,14 @@ import type { PaneCommandRegistry } from '../daemon/commandRegistry';
 import { buildGitCommitCommand } from '../utils/shellEscape';
 import { getPaneEventSink } from '../core/runtime';
 import { panelEventBus } from '../services/panelEventBus';
-import { PanelEventType, ToolPanelType, PanelEvent } from '../../../shared/types/panels';
+import { PanelEventType, PanelEvent } from '../../../shared/types/panels';
 import type { Session } from '../types/session';
 import type { GitCommit, GitGraphCommit } from '../services/gitDiffManager';
 import { CommandRunner } from '../utils/commandRunner';
 import { getShellPath } from '../utils/shellPath';
 import { parseWSLPath, validateWSLAvailable } from '../utils/wslUtils';
-
-// Extended type for git system virtual panels
-type SystemPanelType = ToolPanelType | 'git';
-
-// Interface for custom git errors that contain additional context
-interface GitError extends Error {
-  gitCommands?: string[];
-  gitOutput?: string;
-  workingDirectory?: string;
-  projectPath?: string;
-  originalError?: Error;
-}
-
-// Interface for process errors that have stdout/stderr properties
-interface ProcessError {
-  stdout?: string;
-  stderr?: string;
-  message?: string;
-}
+import { boundary, decodeBoundary, type JsonObject } from '../../../shared/validation/boundaryDecoder';
+import { registerGitDiffRequestHandlers } from './gitDiffRequests';
 
 // Interface for generic error objects with git-related properties
 interface ErrorWithGitContext {
@@ -38,8 +21,25 @@ interface ErrorWithGitContext {
   gitCommands?: string[];
   gitOutput?: string;
   workingDirectory?: string;
-  originalError?: Error;
-  [key: string]: unknown;
+  projectPath?: string;
+  originalError?: { message?: string };
+}
+
+function decodeGitError(cause: unknown): ErrorWithGitContext {
+  try {
+    return decodeBoundary(cause, boundary.object({
+      gitCommand: boundary.optional(boundary.string),
+      gitCommands: boundary.optional(boundary.array(boundary.string)),
+      gitOutput: boundary.optional(boundary.string),
+      workingDirectory: boundary.optional(boundary.string),
+      projectPath: boundary.optional(boundary.string),
+      originalError: boundary.optional(boundary.object({
+        message: boundary.optional(boundary.string),
+      })),
+    }));
+  } catch {
+    return {};
+  }
 }
 
 // Interface for raw commit data from worktreeManager
@@ -56,7 +56,7 @@ interface RawCommitData {
 
 function isValidGitUrl(url: string): boolean {
   // Accept https://, ssh://, and scp-style git@host:path formats
-  return /^(https?:\/\/[\w.\-\/:@]+|ssh:\/\/[\w.\-\/:@]+|git@[\w.\-]+:[\w.\-\/]+)(\.git)?$/.test(url);
+  return /^(https?:\/\/[\w./:@-]+|ssh:\/\/[\w./:@-]+|git@[\w.-]+:[\w./-]+)(\.git)?$/.test(url);
 }
 
 function extractRepoName(url: string): string {
@@ -71,8 +71,8 @@ const DAEMON_GIT_STATUS_CHANNELS = [
   'sessions:get-git-graph',
   'git:file-status',
   'sessions:git-diff',
-  'sessions:get-commit-diff-by-hash',
-  'sessions:get-combined-diff',
+  'sessions:get-diff-manifest',
+  'sessions:get-file-diff',
   'sessions:check-rebase-conflicts',
   'sessions:has-stash',
   'sessions:get-upstream',
@@ -112,10 +112,11 @@ export function registerGitHandlers(
   services: AppServices,
   commandRegistry: PaneCommandRegistry,
 ): void {
-  const { sessionManager, gitDiffManager, worktreeManager, claudeCodeManager, gitStatusManager, databaseService } = services;
+  const { sessionManager, gitDiffManager, worktreeManager, claudeCodeManager, gitStatusManager } = services;
+  registerGitDiffRequestHandlers(commandRegistry, services);
 
   // Helper function to emit git operation events to all sessions in a project
-  const emitGitOperationToProject = (sessionId: string, eventType: PanelEventType, message: string, details?: Record<string, unknown>) => {
+  const emitGitOperationToProject = (sessionId: string, eventType: PanelEventType, message: string, details?: JsonObject) => {
     try {
       const session = sessionManager.getSession(sessionId);
       if (!session) return;
@@ -124,11 +125,11 @@ export function registerGitHandlers(
       if (!project) return;
       
       // Create a virtual event as if it came from the git system
-      const event = {
+      const event: PanelEvent = {
         type: eventType,
         source: {
           panelId: 'git-system', // Special panel ID for git operations
-          panelType: 'git' as SystemPanelType, // Virtual panel type
+          panelType: 'git', // Virtual panel type
           sessionId: sessionId // The session that triggered the operation
         },
         data: {
@@ -143,7 +144,7 @@ export function registerGitHandlers(
       
       // Emit the event once to the panel event bus
       // All Claude panels that have subscribed will receive it
-      panelEventBus.emitPanelEvent(event as PanelEvent);
+      panelEventBus.emitPanelEvent(event);
 
       // Also forward to renderer so UI components listening for window 'panel:event' receive it
       try {
@@ -206,7 +207,7 @@ export function registerGitHandlers(
     let useFallback = false;
 
     try {
-      commits = gitDiffManager.getCommitHistory(session.worktreePath, limit, comparisonBranch, ctx.commandRunner);
+      commits = await gitDiffManager.getCommitHistory(session.worktreePath, limit, comparisonBranch, ctx.commandRunner);
     } catch (error) {
       // Only isMainRepo sessions have a fallback path (raw last-N commits);
       // worktree sessions should propagate the error.
@@ -278,10 +279,12 @@ export function registerGitHandlers(
       const ctx = sessionManager.getProjectContext(sessionId);
       if (!ctx) throw new Error('Project context not found for session');
 
-      const hasUncommittedChanges = gitDiffManager.hasChanges(session.worktreePath, ctx.commandRunner);
+      const hasUncommittedChanges = await gitDiffManager.hasChanges(session.worktreePath, ctx.commandRunner);
       if (hasUncommittedChanges) {
         // Get stats for uncommitted changes
-        const uncommittedDiff = await gitDiffManager.captureWorkingDirectoryDiff(session.worktreePath, ctx.commandRunner);
+        const uncommittedDiff = await gitDiffManager.getDiffManifest(session.worktreePath, { kind: 'working-tree' }, ctx.commandRunner, {
+          comparisonBase: () => worktreeManager.getSessionComparisonBranch(session, ctx),
+        });
         
         // Add uncommitted changes as execution with id 0
         executions.unshift({
@@ -328,7 +331,7 @@ export function registerGitHandlers(
       const ctx = sessionManager.getProjectContext(sessionId);
       if (!ctx) throw new Error('Project context not found for session');
 
-      const diff = gitDiffManager.getCommitDiff(session.worktreePath, commit.hash, ctx.commandRunner);
+      const diff = await gitDiffManager.getCommitDiff(session.worktreePath, commit.hash, ctx.commandRunner);
       return { success: true, data: diff };
     } catch (error) {
       console.error('Failed to get execution diff:', error);
@@ -355,7 +358,7 @@ export function registerGitHandlers(
       const comparisonBranch = await worktreeManager.getSessionComparisonBranch(session, ctx);
       let branch: string;
       try {
-        branch = ctx.commandRunner.exec('git rev-parse --abbrev-ref HEAD', session.worktreePath).trim() || session.baseBranch || 'unknown';
+        branch = (await ctx.commandRunner.execAsync('git rev-parse --abbrev-ref HEAD', session.worktreePath)).stdout.trim() || session.baseBranch || 'unknown';
       } catch {
         branch = session.baseBranch || 'unknown';
       }
@@ -364,7 +367,7 @@ export function registerGitHandlers(
       let useFallback = false;
 
       try {
-        entries = gitDiffManager.getGraphCommitHistory(session.worktreePath, branch, 50, comparisonBranch, ctx.commandRunner);
+        entries = await gitDiffManager.getGraphCommitHistory(session.worktreePath, branch, 50, comparisonBranch, ctx.commandRunner);
         if (entries.length === 0 && session.isMainRepo) {
           useFallback = true;
         }
@@ -389,14 +392,14 @@ export function registerGitHandlers(
       }
 
       // Prepend uncommitted changes if any
-      const hasUncommittedChanges = gitDiffManager.hasChanges(session.worktreePath, ctx.commandRunner);
+      const hasUncommittedChanges = await gitDiffManager.hasChanges(session.worktreePath, ctx.commandRunner);
       if (hasUncommittedChanges) {
         // Get diff stats for uncommitted changes
         let filesChanged = 0;
         let additions = 0;
         let deletions = 0;
         try {
-          const combinedStat = ctx.commandRunner.exec('git diff HEAD --shortstat', session.worktreePath).trim();
+          const combinedStat = (await ctx.commandRunner.execAsync('git diff HEAD --shortstat', session.worktreePath)).stdout.trim();
           if (combinedStat) {
             const fileMatch = combinedStat.match(/(\d+) files? changed/);
             const addMatch = combinedStat.match(/(\d+) insertions?\(\+\)/);
@@ -441,20 +444,20 @@ export function registerGitHandlers(
       if (!ctx) throw new Error('Project context not found for session');
 
       // Check if there are any changes to commit
-      const status = ctx.commandRunner.exec('git status --porcelain', session.worktreePath).trim();
+      const status = (await ctx.commandRunner.execAsync('git status --porcelain', session.worktreePath)).stdout.trim();
 
       if (!status) {
         return { success: false, error: 'No changes to commit' };
       }
 
       // Stage all changes
-      ctx.commandRunner.exec('git add -A', session.worktreePath);
+      await ctx.commandRunner.execAsync('git add -A', session.worktreePath);
 
       // Create the commit with Pane's signature using safe escaping
       const commitCommand = buildGitCommitCommand(message);
 
       try {
-        ctx.commandRunner.exec(commitCommand, session.worktreePath);
+        await ctx.commandRunner.execAsync(commitCommand, session.worktreePath);
 
         // Refresh git status for this session after commit
         await refreshGitStatusForSession(sessionId);
@@ -462,14 +465,24 @@ export function registerGitHandlers(
         return { success: true };
       } catch (commitError: unknown) {
         // Check if it's a pre-commit hook failure
-        if ((commitError && typeof commitError === 'object' && 'stdout' in commitError && (commitError as ProcessError).stdout?.includes('pre-commit')) || (commitError && typeof commitError === 'object' && 'stderr' in commitError && (commitError as ProcessError).stderr?.includes('pre-commit'))) {
+        const processError = decodeBoundary(commitError, boundary.object({
+          stdout: boundary.optional(boundary.string),
+          stderr: boundary.optional(boundary.string),
+        }));
+        if (processError.stdout?.includes('pre-commit') || processError.stderr?.includes('pre-commit')) {
           return { success: false, error: 'Pre-commit hooks failed. Please fix the issues and try again.' };
         }
         throw commitError;
       }
     } catch (error: unknown) {
       console.error('Failed to commit changes:', error);
-      const errorMessage = (error instanceof Error ? error.message : '') || (error && typeof error === 'object' && 'stderr' in error ? (error as ProcessError).stderr : '') || 'Failed to commit changes';
+      let stderr = '';
+      try {
+        stderr = decodeBoundary(error, boundary.object({ stderr: boundary.optional(boundary.string) })).stderr ?? '';
+      } catch {
+        // Preserve the standard error fallback below.
+      }
+      const errorMessage = (error instanceof Error ? error.message : '') || stderr || 'Failed to commit changes';
       return { success: false, error: errorMessage };
     }
   });
@@ -484,16 +497,16 @@ export function registerGitHandlers(
       if (!ctx) return { success: false, error: 'No project context' };
 
       // Check working tree + staged changes for this specific file
-      const modified = ctx.commandRunner.exec(
+      const modified = (await ctx.commandRunner.execAsync(
         `git diff --name-only HEAD -- "${filePath}"`,
         session.worktreePath
-      ).trim();
+      )).stdout.trim();
 
       // Check if file is untracked
-      const untracked = ctx.commandRunner.exec(
+      const untracked = (await ctx.commandRunner.execAsync(
         `git ls-files --others --exclude-standard -- "${filePath}"`,
         session.worktreePath
-      ).trim();
+      )).stdout.trim();
 
       const status = untracked.length > 0 ? 'untracked' : modified.length > 0 ? 'modified' : 'clean';
       return { success: true, data: { status } };
@@ -529,301 +542,6 @@ export function registerGitHandlers(
     }
   });
 
-  commandRegistry.register('sessions:get-commit-diff-by-hash', async (sessionId: string, commitHash: string) => {
-    try {
-      const session = await sessionManager.getSession(sessionId);
-      if (!session || !session.worktreePath) {
-        return { success: false, error: 'Session or worktree path not found' };
-      }
-
-      if (session.archived) {
-        return { success: false, error: 'Cannot access git diff for archived session' };
-      }
-
-      const ctx = sessionManager.getProjectContext(sessionId);
-      if (!ctx) throw new Error('Project context not found for session');
-
-      if (commitHash === 'index') {
-        const data = await gitDiffManager.captureWorkingDirectoryDiff(session.worktreePath, ctx.commandRunner);
-        return { success: true, data };
-      }
-
-      const data = gitDiffManager.getCommitDiff(session.worktreePath, commitHash, ctx.commandRunner);
-      return { success: true, data };
-    } catch (error) {
-      console.error('Failed to get commit diff by hash:', error);
-      const errorMessage = error instanceof Error ? error.message : 'Failed to get commit diff';
-      return { success: false, error: errorMessage };
-    }
-  });
-
-  commandRegistry.register('sessions:get-combined-diff', async (sessionId: string, executionIds?: number[]) => {
-    try {
-      // Get session to find worktree path
-      const session = await sessionManager.getSession(sessionId);
-      if (!session || !session.worktreePath) {
-        return { success: false, error: 'Session or worktree path not found' };
-      }
-
-      // Handle uncommitted changes request
-      if (executionIds && executionIds.length === 1 && executionIds[0] === 0) {
-        const ctx = sessionManager.getProjectContext(sessionId);
-        if (!ctx) throw new Error('Project context not found for session');
-
-        // Verify the worktree exists and has uncommitted changes
-        try {
-          ctx.commandRunner.exec('git status --porcelain', session.worktreePath);
-        } catch (statusError) {
-          console.error('Error checking git status:', statusError);
-        }
-
-        const uncommittedDiff = await gitDiffManager.captureWorkingDirectoryDiff(session.worktreePath, ctx.commandRunner);
-        return { success: true, data: uncommittedDiff };
-      }
-
-      const { commits } = await getSessionCommitHistory(session, 50);
-
-      if (!commits.length) {
-        return {
-          success: true,
-          data: {
-            diff: '',
-            stats: { additions: 0, deletions: 0, filesChanged: 0 },
-            changedFiles: []
-          }
-        };
-      }
-
-      // If we have a range selection (2 IDs), use git diff between them
-      if (executionIds && executionIds.length === 2) {
-        const sortedIds = [...executionIds].sort((a, b) => a - b);
-
-        // Handle range that includes uncommitted changes
-        if (sortedIds[0] === 0 || sortedIds[1] === 0) {
-          const ctx = sessionManager.getProjectContext(sessionId);
-          if (!ctx) throw new Error('Project context not found for session');
-
-          // If uncommitted is in the range, get diff from the other commit to working directory
-          const commitId = sortedIds[0] === 0 ? sortedIds[1] : sortedIds[0];
-          const commitIndex = commitId - 1;
-
-          if (commitIndex >= 0 && commitIndex < commits.length) {
-            const fromCommit = commits[commitIndex];
-            // Get diff from commit to working directory (includes uncommitted changes)
-            const maxBuffer = 10 * 1024 * 1024;
-            const diff = ctx.commandRunner.exec(
-              `git diff ${fromCommit.hash}`,
-              session.worktreePath,
-              { maxBuffer }
-            );
-
-            const stats = gitDiffManager.parseDiffStats(
-              ctx.commandRunner.exec(`git diff --stat ${fromCommit.hash}`, session.worktreePath, { maxBuffer })
-            );
-
-            const changedFiles = ctx.commandRunner.exec(
-              `git diff --name-only ${fromCommit.hash}`,
-              session.worktreePath,
-              { maxBuffer }
-            ).trim().split('\n').filter(Boolean);
-
-            return {
-              success: true,
-              data: {
-                diff,
-                stats,
-                changedFiles,
-                beforeHash: fromCommit.hash,
-                afterHash: 'UNCOMMITTED'
-              }
-            };
-          }
-        }
-
-        // For regular commit ranges, we want to show all changes introduced by the selected commits
-        // - Commits are stored newest first (index 0 = newest)
-        // - User selects from older to newer visually
-        // - We need to go back one commit before the older selection to show all changes
-        const newerIndex = sortedIds[0] - 1;   // Lower ID = newer commit
-        const olderIndex = sortedIds[1] - 1;   // Higher ID = older commit
-
-        if (newerIndex >= 0 && newerIndex < commits.length && olderIndex >= 0 && olderIndex < commits.length) {
-          const newerCommit = commits[newerIndex]; // Newer commit
-          const olderCommit = commits[olderIndex]; // Older commit
-
-          // To show all changes introduced by the selected commits, we diff from
-          // the parent of the older commit to the newer commit
-          let fromCommitHash: string;
-
-          const ctx = sessionManager.getProjectContext(sessionId);
-          if (!ctx) throw new Error('Project context not found for session');
-
-          try {
-            // Try to get the parent of the older commit
-            const parentHash = ctx.commandRunner.exec(`git rev-parse ${olderCommit.hash}^`, session.worktreePath).trim();
-            fromCommitHash = parentHash;
-          } catch {
-            // If there's no parent (initial commit), use git's empty tree hash
-            fromCommitHash = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
-          }
-
-          // Use git diff to show all changes from before the range to the newest selected commit
-          const diff = await gitDiffManager.captureCommitDiff(
-            session.worktreePath,
-            fromCommitHash,
-            newerCommit.hash,
-            ctx.commandRunner
-          );
-          return { success: true, data: diff };
-        }
-      }
-
-      // If no specific execution IDs are provided, get all diffs including uncommitted changes
-      if (!executionIds || executionIds.length === 0) {
-        const ctx = sessionManager.getProjectContext(sessionId);
-        if (!ctx) throw new Error('Project context not found for session');
-
-        if (commits.length === 0) {
-          // No commits, but there might be uncommitted changes
-          const uncommittedDiff = await gitDiffManager.captureWorkingDirectoryDiff(session.worktreePath, ctx.commandRunner);
-          return { success: true, data: uncommittedDiff };
-        }
-
-        // For a single commit, show changes from before the commit to working directory
-        if (commits.length === 1) {
-          let fromCommitHash: string;
-          try {
-            // Try to get the parent of the commit
-            fromCommitHash = ctx.commandRunner.exec(`git rev-parse ${commits[0].hash}^`, session.worktreePath).trim();
-          } catch {
-            // If there's no parent (initial commit), use git's empty tree hash
-            fromCommitHash = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
-          }
-
-          // Get diff from parent to working directory (includes the commit and any uncommitted changes)
-          const maxBuffer = 10 * 1024 * 1024;
-          const diff = ctx.commandRunner.exec(
-            `git diff ${fromCommitHash}`,
-            session.worktreePath,
-            { maxBuffer }
-          );
-
-          const stats = gitDiffManager.parseDiffStats(
-            ctx.commandRunner.exec(`git diff --stat ${fromCommitHash}`, session.worktreePath, { maxBuffer })
-          );
-
-          const changedFiles = ctx.commandRunner.exec(
-            `git diff --name-only ${fromCommitHash}`,
-            session.worktreePath,
-            { maxBuffer }
-          ).trim().split('\n').filter(f => f);
-
-          return {
-            success: true,
-            data: {
-              diff,
-              stats,
-              changedFiles
-            }
-          };
-        }
-
-        // For multiple commits, get diff from parent of first commit to working directory (all changes including uncommitted)
-        const firstCommit = commits[commits.length - 1]; // Oldest commit
-        let fromCommitHash: string;
-
-        try {
-          // Try to get the parent of the first commit
-          fromCommitHash = ctx.commandRunner.exec(`git rev-parse ${firstCommit.hash}^`, session.worktreePath).trim();
-        } catch {
-          // If there's no parent (initial commit), use git's empty tree hash
-          fromCommitHash = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
-        }
-
-        // Get diff from the parent of first commit to working directory (includes uncommitted changes)
-        const maxBuffer = 10 * 1024 * 1024;
-        const diff = ctx.commandRunner.exec(
-          `git diff ${fromCommitHash}`,
-          session.worktreePath,
-          { maxBuffer }
-        );
-
-        const stats = gitDiffManager.parseDiffStats(
-          ctx.commandRunner.exec(`git diff --stat ${fromCommitHash}`, session.worktreePath, { maxBuffer })
-        );
-
-        const changedFiles = ctx.commandRunner.exec(
-          `git diff --name-only ${fromCommitHash}`,
-          session.worktreePath,
-          { maxBuffer }
-        ).trim().split('\n').filter(f => f);
-
-        return {
-          success: true,
-          data: {
-            diff,
-            stats,
-            changedFiles
-          }
-        };
-      }
-
-      // For multiple individual selections, we need to create a range from first to last
-      if (executionIds.length > 2) {
-        const sortedIds = [...executionIds].sort((a, b) => a - b);
-        const firstId = sortedIds[sortedIds.length - 1]; // Highest ID = oldest commit
-        const lastId = sortedIds[0]; // Lowest ID = newest commit
-
-        const fromIndex = firstId - 1;
-        const toIndex = lastId - 1;
-
-        if (fromIndex >= 0 && fromIndex < commits.length && toIndex >= 0 && toIndex < commits.length) {
-          const fromCommit = commits[fromIndex]; // Oldest selected
-          const toCommit = commits[toIndex]; // Newest selected
-
-          const ctx = sessionManager.getProjectContext(sessionId);
-          if (!ctx) throw new Error('Project context not found for session');
-
-          const diff = await gitDiffManager.captureCommitDiff(
-            session.worktreePath,
-            fromCommit.hash,
-            toCommit.hash,
-            ctx.commandRunner
-          );
-          return { success: true, data: diff };
-        }
-      }
-
-      // Single commit selection (but not uncommitted changes)
-      if (executionIds.length === 1 && executionIds[0] !== 0) {
-        const commitIndex = executionIds[0] - 1;
-        if (commitIndex >= 0 && commitIndex < commits.length) {
-          const commit = commits[commitIndex];
-          const ctx = sessionManager.getProjectContext(sessionId);
-          if (!ctx) throw new Error('Project context not found for session');
-
-          const diff = gitDiffManager.getCommitDiff(session.worktreePath, commit.hash, ctx.commandRunner);
-          return { success: true, data: diff };
-        }
-      }
-
-      // Fallback to empty diff
-      return {
-        success: true,
-        data: {
-          diff: '',
-          stats: { additions: 0, deletions: 0, filesChanged: 0 },
-          changedFiles: []
-        }
-      };
-    } catch (error) {
-      console.error('Failed to get combined diff:', error);
-      const errorMessage = error instanceof Error ? error.message : 'Failed to get combined diff';
-      return { success: false, error: errorMessage };
-    }
-  });
-
-  // Git rebase operations
   commandRegistry.register('sessions:check-rebase-conflicts', async (sessionId: string) => {
     try {
       const session = await sessionManager.getSession(sessionId);
@@ -884,8 +602,8 @@ export function registerGitHandlers(
 
       const comparisonBranch = await Promise.race([
         worktreeManager.getSessionComparisonBranch(session, ctx),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('getSessionComparisonBranch timeout')), 30000))
-      ]) as string;
+        new Promise<string>((_, reject) => setTimeout(() => reject(new Error('getSessionComparisonBranch timeout')), 30000))
+      ]);
 
       // Check for conflicts before attempting rebase
       const conflictCheck = await worktreeManager.checkForRebaseConflicts(session.worktreePath, comparisonBranch, ctx.commandRunner);
@@ -932,7 +650,7 @@ export function registerGitHandlers(
           operation: 'rebase_from_main',
           comparisonBranch,
           hasConflicts: true,
-          conflictingFiles: conflictCheck.conflictingFiles
+          conflictingFiles: conflictCheck.conflictingFiles ?? null
         });
 
         // Return detailed conflict information
@@ -978,17 +696,18 @@ export function registerGitHandlers(
       return { success: true, data: { message: `Successfully rebased ${comparisonBranch} into worktree` } };
     } catch (error: unknown) {
       console.error(`[IPC:git] Failed to rebase main into worktree for session ${sessionId}:`, error);
+      const gitError = decodeGitError(error);
 
       // Emit git operation failed event
       const errorMessage = `✗ Rebase failed: ${error instanceof Error ? error.message : 'Unknown error'}` +
-                          (error && typeof error === 'object' && 'gitOutput' in error && (error as GitError).gitOutput ? `\n\nGit output:\n${(error as GitError).gitOutput}` : '');
+                          (gitError.gitOutput ? `\n\nGit output:\n${gitError.gitOutput}` : '');
       
       // Don't let this block the error response either
       try {
         emitGitOperationToProject(sessionId, 'git:operation_failed', errorMessage, {
           operation: 'rebase_from_main',
           error: error instanceof Error ? error.message : String(error),
-          gitOutput: error && typeof error === 'object' && 'gitOutput' in error ? (error as GitError).gitOutput : undefined
+          gitOutput: gitError.gitOutput ?? null
         });
       } catch (outputError) {
         console.error(`[IPC:git] Failed to emit git error event for session ${sessionId}:`, outputError);
@@ -999,10 +718,10 @@ export function registerGitHandlers(
         success: false,
         error: error instanceof Error ? error.message : 'Failed to rebase main into worktree',
         gitError: {
-          command: error && typeof error === 'object' && 'gitCommand' in error ? (error as ErrorWithGitContext).gitCommand : undefined,
-          output: error && typeof error === 'object' && 'gitOutput' in error ? (error as ErrorWithGitContext).gitOutput : (error instanceof Error ? error.message : String(error)),
-          workingDirectory: error && typeof error === 'object' && 'workingDirectory' in error ? (error as ErrorWithGitContext).workingDirectory : undefined,
-          originalError: error && typeof error === 'object' && 'originalError' in error ? (error as ErrorWithGitContext).originalError?.message : undefined
+          command: gitError.gitCommand,
+          output: gitError.gitOutput || (error instanceof Error ? error.message : String(error)),
+          workingDirectory: gitError.workingDirectory,
+          originalError: gitError.originalError?.message
         }
       };
     }
@@ -1033,7 +752,7 @@ export function registerGitHandlers(
       // Check if we're actually in a rebase state (could have been pre-detected conflicts)
       // Try to abort any existing rebase, but don't fail if there isn't one
       try {
-        const statusOutput = ctx.commandRunner.exec('git status --porcelain=v1', session.worktreePath);
+        const statusOutput = (await ctx.commandRunner.execAsync('git status --porcelain=v1', session.worktreePath)).stdout;
         if (statusOutput.includes('rebase')) {
           await worktreeManager.abortRebase(session.worktreePath, ctx.commandRunner);
 
@@ -1119,8 +838,8 @@ export function registerGitHandlers(
       // and silently fast-forwards detached HEAD instead of the local target.
       const localBaseBranch = await Promise.race([
         worktreeManager.getSessionLocalBaseBranch(session, ctx),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('getSessionLocalBaseBranch timeout')), 30000))
-      ]) as string;
+        new Promise<string>((_, reject) => setTimeout(() => reject(new Error('getSessionLocalBaseBranch timeout')), 30000))
+      ]);
 
       // Emit git operation started event to all sessions in project
       const startMessage = `🔄 GIT OPERATION\nSquashing commits and merging to ${localBaseBranch}...\nCommit message: ${commitMessage.split('\n')[0]}${commitMessage.includes('\n') ? '...' : ''}`;
@@ -1156,24 +875,24 @@ export function registerGitHandlers(
       return { success: true, data: { message: `Successfully squashed and merged worktree to ${localBaseBranch}` } };
     } catch (error: unknown) {
       console.error(`[IPC:git] Failed to squash and merge worktree to main for session ${sessionId}:`, error);
+      const gitError = decodeGitError(error);
 
       // Emit git operation failed event
       const errorMessage = `✗ Merge failed: ${error instanceof Error ? error.message : 'Unknown error'}` +
-                          (error && typeof error === 'object' && 'gitOutput' in error && (error as GitError).gitOutput ? `\n\nGit output:\n${(error as GitError).gitOutput}` : '');
+                          (gitError.gitOutput ? `\n\nGit output:\n${gitError.gitOutput}` : '');
 
       // Don't let this block the error response either
       try {
         emitGitOperationToProject(sessionId, 'git:operation_failed', errorMessage, {
           operation: 'squash_and_merge',
           error: error instanceof Error ? error.message : String(error),
-          gitOutput: error && typeof error === 'object' && 'gitOutput' in error ? (error as GitError).gitOutput : undefined
+          gitOutput: gitError.gitOutput ?? null
         });
       } catch (outputError) {
         console.error(`[IPC:git] Failed to emit git error event for session ${sessionId}:`, outputError);
       }
 
       // Pass detailed git error information to frontend
-      const gitError = error as GitError;
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to squash and merge worktree to main',
@@ -1249,7 +968,7 @@ export function registerGitHandlers(
     } catch (error: unknown) {
       console.error('Failed to merge worktree to main:', error);
 
-      const gitError = error as GitError;
+      const gitError = decodeGitError(error);
 
       // Add error message to session output
       const errorMessage = `✗ Merge failed: ${error instanceof Error ? error.message : 'Unknown error'}` +
@@ -1320,14 +1039,14 @@ export function registerGitHandlers(
       console.error('Failed to pull from remote:', error);
 
       // Emit git operation failed event
-      const gitError = error as GitError;
+      const gitError = decodeGitError(error);
       
       const errorMessage = `✗ Pull failed: ${error instanceof Error ? error.message : 'Unknown error'}` +
                           (gitError.gitOutput ? `\n\nGit output:\n${gitError.gitOutput}` : '');
       emitGitOperationToProject(sessionId, 'git:operation_failed', errorMessage, {
         operation: 'pull',
         error: error instanceof Error ? error.message : String(error),
-        gitOutput: gitError.gitOutput
+        gitOutput: gitError.gitOutput ?? null
       });
 
       // Check if it's a merge conflict
@@ -1409,7 +1128,7 @@ export function registerGitHandlers(
     } catch (error: unknown) {
       console.error('Failed to push to remote:', error);
 
-      const gitError = error as GitError;
+      const gitError = decodeGitError(error);
       
       // Emit git operation failed event
       const errorMessage = `✗ Push failed: ${error instanceof Error ? error.message : 'Unknown error'}` +
@@ -1417,7 +1136,7 @@ export function registerGitHandlers(
       emitGitOperationToProject(sessionId, 'git:operation_failed', errorMessage, {
         operation: 'push',
         error: error instanceof Error ? error.message : String(error),
-        gitOutput: gitError.gitOutput
+        gitOutput: gitError.gitOutput ?? null
       });
 
       return {
@@ -1480,14 +1199,14 @@ export function registerGitHandlers(
     } catch (error: unknown) {
       console.error('Failed to soft reset:', error);
 
-      const gitError = error as GitError;
+      const gitError = decodeGitError(error);
 
       const errorMessage = `✗ Undo commit failed: ${error instanceof Error ? error.message : 'Unknown error'}` +
                           (gitError.gitOutput ? `\n\nGit output:\n${gitError.gitOutput}` : '');
       emitGitOperationToProject(sessionId, 'git:operation_failed', errorMessage, {
         operation: 'soft-reset',
         error: error instanceof Error ? error.message : String(error),
-        gitOutput: gitError.gitOutput
+        gitOutput: gitError.gitOutput ?? null
       });
 
       return {
@@ -1539,7 +1258,7 @@ export function registerGitHandlers(
     } catch (error: unknown) {
       console.error('Failed to fetch from remote:', error);
 
-      const gitError = error as GitError;
+      const gitError = decodeGitError(error);
 
       // Emit git operation failed event
       const errorMessage = `✗ Fetch failed: ${error instanceof Error ? error.message : 'Unknown error'}` +
@@ -1547,7 +1266,7 @@ export function registerGitHandlers(
       emitGitOperationToProject(sessionId, 'git:operation_failed', errorMessage, {
         operation: 'fetch',
         error: error instanceof Error ? error.message : String(error),
-        gitOutput: gitError.gitOutput
+        gitOutput: gitError.gitOutput ?? null
       });
 
       return {
@@ -1599,7 +1318,7 @@ export function registerGitHandlers(
     } catch (error: unknown) {
       console.error('Failed to stash changes:', error);
 
-      const gitError = error as GitError;
+      const gitError = decodeGitError(error);
 
       // Emit git operation failed event
       const errorMessage = `✗ Stash failed: ${error instanceof Error ? error.message : 'Unknown error'}` +
@@ -1607,7 +1326,7 @@ export function registerGitHandlers(
       emitGitOperationToProject(sessionId, 'git:operation_failed', errorMessage, {
         operation: 'stash',
         error: error instanceof Error ? error.message : String(error),
-        gitOutput: gitError.gitOutput
+        gitOutput: gitError.gitOutput ?? null
       });
 
       return {
@@ -1659,7 +1378,7 @@ export function registerGitHandlers(
     } catch (error: unknown) {
       console.error('Failed to pop stash:', error);
 
-      const gitError = error as GitError;
+      const gitError = decodeGitError(error);
 
       // Emit git operation failed event
       const errorMessage = `✗ Stash pop failed: ${error instanceof Error ? error.message : 'Unknown error'}` +
@@ -1667,7 +1386,7 @@ export function registerGitHandlers(
       emitGitOperationToProject(sessionId, 'git:operation_failed', errorMessage, {
         operation: 'stash_pop',
         error: error instanceof Error ? error.message : String(error),
-        gitOutput: gitError.gitOutput
+        gitOutput: gitError.gitOutput ?? null
       });
 
       return {
@@ -1728,7 +1447,7 @@ export function registerGitHandlers(
       return { success: true, data: result };
     } catch (error: unknown) {
       console.error('Failed to set upstream:', error);
-      const gitError = error as GitError;
+      const gitError = decodeGitError(error);
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to set upstream',
@@ -1829,7 +1548,7 @@ export function registerGitHandlers(
     } catch (error: unknown) {
       console.error('Failed to commit changes:', error);
 
-      const gitError = error as GitError;
+      const gitError = decodeGitError(error);
 
       // Emit git operation failed event
       const errorMessage = `✗ Commit failed: ${error instanceof Error ? error.message : 'Unknown error'}` +
@@ -1837,7 +1556,7 @@ export function registerGitHandlers(
       emitGitOperationToProject(sessionId, 'git:operation_failed', errorMessage, {
         operation: 'commit',
         error: error instanceof Error ? error.message : String(error),
-        gitOutput: gitError.gitOutput
+        gitOutput: gitError.gitOutput ?? null
       });
 
       return {
@@ -1943,7 +1662,7 @@ export function registerGitHandlers(
       const comparisonBranch = await worktreeManager.getSessionComparisonBranch(session, ctx);
 
       // Get current branch name
-      const currentBranch = ctx.commandRunner.exec('git branch --show-current', session.worktreePath).trim();
+      const currentBranch = (await ctx.commandRunner.execAsync('git branch --show-current', session.worktreePath)).stdout.trim();
 
       // Only call getOriginBranch for legacy isMainRepo sessions where baseBranch is not set.
       // When baseBranch is set it already includes the origin/ prefix if applicable — calling
@@ -2022,7 +1741,7 @@ export function registerGitHandlers(
       }
     } catch (error) {
       console.error('Error getting git status:', error);
-      return { success: false, error: (error as Error).message };
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
   });
 
@@ -2039,7 +1758,7 @@ export function registerGitHandlers(
       return { success: true };
     } catch (error) {
       console.error('Error cancelling git status:', error);
-      return { success: false, error: (error as Error).message };
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
   });
 
@@ -2053,7 +1772,7 @@ export function registerGitHandlers(
       const ctx = sessionManager.getProjectContext(sessionId);
       if (!ctx) return { success: true, data: null };
 
-      const stdout = ctx.commandRunner.exec('git remote -v', session.worktreePath);
+      const stdout = (await ctx.commandRunner.execAsync('git remote -v', session.worktreePath)).stdout;
 
       // Parse remote output for github.com
       const lines = stdout.split('\n');
@@ -2120,7 +1839,7 @@ export function registerGitHandlers(
       await commandRunner.execAsync(
         `git clone "${escapedUrl}" "${escapedPath}"`,
         actualDestDir,
-        { timeout: 300000, env: { ...process.env, PATH: getShellPath() } as Record<string, string> }
+        { timeout: 300000, env: { ...process.env, PATH: getShellPath() } }
       );
 
       // Return the original (non-WSL-translated) path so the frontend can use it directly

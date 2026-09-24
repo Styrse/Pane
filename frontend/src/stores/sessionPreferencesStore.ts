@@ -71,13 +71,14 @@ export const useSessionPreferencesStore = create<SessionPreferencesStore>((set, 
       } else {
         set({ error: response.error || 'Failed to load session preferences', isLoading: false });
       }
-    } catch (error) {
+    } catch {
       set({ error: 'Failed to load session preferences', isLoading: false });
     }
   },
 
   updatePreferences: async (updates: Partial<SessionCreationPreferences>) => {
-    const { sessionCount: _ignoredSessionCount, ...allowedUpdates } = updates;
+    const allowedUpdates = { ...updates };
+    delete allowedUpdates.sessionCount;
     const currentPreferences = get().preferences;
     
     // Deep merge the updates while keeping session count at its default
@@ -105,7 +106,7 @@ export const useSessionPreferencesStore = create<SessionPreferencesStore>((set, 
         // Revert on failure
         set({ preferences: currentPreferences, error: response.error || 'Failed to save preferences' });
       }
-    } catch (error) {
+    } catch {
       // Revert on failure
       set({ preferences: currentPreferences, error: 'Failed to save preferences' });
     }

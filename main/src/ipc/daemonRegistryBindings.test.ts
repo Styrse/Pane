@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
+import * as path from 'path';
+import { pathToFileURL } from 'url';
 import { PaneCommandRegistry } from '../daemon/commandRegistry';
 import { remotePaneClientController } from '../daemon/client/remotePaneClient';
 import { registerFileHandlers } from './file';
@@ -6,38 +8,21 @@ import { registerConfigHandlers } from './config';
 import { registerGitHandlers } from './git';
 import { registerPanelHandlers } from './panels';
 import { registerPaneChatHandlers } from './paneChat';
+import { registerOrchestrationSessionHandlers } from './orchestrationSessions';
 import { registerPermissionHandlers } from './permissions';
 import { registerProjectHandlers } from './project';
 import { registerPromptHandlers } from './prompt';
 import { registerScriptHandlers } from './script';
 import { registerSessionHandlers } from './session';
 import { registerVoiceHandlers } from './voice';
+import { registerUsageHandlers } from './usage';
 import type { AppServices } from './types';
 
-vi.mock('../index', () => ({
-  webviewContextMap: new Map<number, { panelId: string; sessionId: string }>(),
-}));
-
-vi.mock('../services/panelManager', () => ({
-  panelManager: {},
-}));
-
-vi.mock('../services/terminalPanelManager', () => ({
-  terminalPanelManager: {},
-}));
-
-vi.mock('../services/database', () => ({
-  databaseService: {},
-}));
-
-vi.mock('../services/panels/logPanel/logsManager', () => ({
-  logsManager: {},
-}));
-
-vi.mock('../services/scriptExecutionTracker', () => ({
-  scriptExecutionTracker: {},
-}));
-
+const USAGE_CHANNELS = [
+  'usage:get-report',
+  'usage:get-status',
+  'usage:rescan',
+] as const;
 const PROJECT_CHANNELS = [
   'projects:get-all',
   'projects:get-active',
@@ -75,6 +60,17 @@ const PROMPT_CHANNELS = [
 const PANE_CHAT_CHANNELS = [
   'pane-chat:get-or-create',
   'pane-chat:set-agent',
+] as const;
+const ORCHESTRATION_SESSION_CHANNELS = [
+  'orchestration-sessions:list',
+  'orchestration-sessions:select',
+  'orchestration-sessions:create',
+  'orchestration-sessions:get',
+  'orchestration-sessions:update',
+  'orchestration-sessions:set-agent',
+  'orchestration-sessions:associate',
+  'orchestration-sessions:detach',
+  'orchestration-sessions:overview',
 ] as const;
 
 const PERMISSION_CHANNELS = [
@@ -196,8 +192,8 @@ const GIT_STATUS_CHANNELS = [
   'sessions:get-git-graph',
   'git:file-status',
   'sessions:git-diff',
-  'sessions:get-commit-diff-by-hash',
-  'sessions:get-combined-diff',
+  'sessions:get-diff-manifest',
+  'sessions:get-file-diff',
   'sessions:check-rebase-conflicts',
   'sessions:has-stash',
   'sessions:get-upstream',
@@ -232,20 +228,23 @@ const GIT_CHANNELS = [
   ...GIT_MUTATION_CHANNELS,
 ] as const;
 
+interface TestIpcEvent { readonly sender?: { readonly id?: number } }
+type TestIpcHandler = (_event: TestIpcEvent, ...args: PaneCommandValue[]) => PaneCommandValue | Promise<PaneCommandValue>;
+
 interface IpcMainStub {
   boundChannels: string[];
-  listeners: Map<string, (_event: unknown, ...args: unknown[]) => unknown>;
-  handle(channel: string, listener: (_event: unknown, ...args: unknown[]) => unknown): void;
+  listeners: Map<string, TestIpcHandler>;
+  handle(channel: string, listener: TestIpcHandler): void;
 }
 
 function createIpcMainStub(): IpcMainStub {
   const boundChannels: string[] = [];
-  const listeners = new Map<string, (_event: unknown, ...args: unknown[]) => unknown>();
+  const listeners = new Map<string, TestIpcHandler>();
 
   return {
     boundChannels,
     listeners,
-    handle(channel: string, listener: (_event: unknown, ...args: unknown[]) => unknown) {
+    handle(channel: string, listener: TestIpcHandler) {
       boundChannels.push(channel);
       listeners.set(channel, listener);
     },
@@ -253,6 +252,7 @@ function createIpcMainStub(): IpcMainStub {
 }
 
 function createServicesStub(overrides: Partial<AppServices> = {}): AppServices {
+  // SAFETY: This test fixture intentionally supplies the minimal structural substitute exercised by the unit.
   return {
     sessionManager: {},
     gitStatusManager: {},
@@ -287,6 +287,7 @@ describe('daemon registry IPC bindings', () => {
     const registry = new PaneCommandRegistry();
     const ipcMain = createIpcMainStub();
 
+    // SAFETY: This test fixture intentionally supplies the minimal structural substitute exercised by the unit.
     registerConfigHandlers(ipcMain, createServicesStub({
       configManager: {
         getConfig: () => ({
@@ -350,6 +351,7 @@ describe('daemon registry IPC bindings', () => {
     const registry = new PaneCommandRegistry();
     const ipcMain = createIpcMainStub();
 
+    // SAFETY: This test fixture intentionally supplies the minimal structural substitute exercised by the unit.
     registerVoiceHandlers(ipcMain, createServicesStub({
       configManager: {
         getConfig: () => ({}),
@@ -358,6 +360,16 @@ describe('daemon registry IPC bindings', () => {
 
     expect(registry.listChannels()).toEqual([...VOICE_CHANNELS].sort());
     expect(ipcMain.boundChannels.sort()).toEqual([...VOICE_CHANNELS].sort());
+  });
+
+  it('binds daemon-owned usage channels through the shared registry', () => {
+    const registry = new PaneCommandRegistry();
+    const ipcMain = createIpcMainStub();
+
+    registerUsageHandlers(ipcMain, registry);
+
+    expect(registry.listChannels()).toEqual([...USAGE_CHANNELS].sort());
+    expect(ipcMain.boundChannels.sort()).toEqual([...USAGE_CHANNELS].sort());
   });
 
   it('binds daemon-owned prompt channels through the shared registry', () => {
@@ -378,6 +390,16 @@ describe('daemon registry IPC bindings', () => {
 
     expect(registry.listChannels()).toEqual([...PANE_CHAT_CHANNELS].sort());
     expect(ipcMain.boundChannels.sort()).toEqual([...PANE_CHAT_CHANNELS].sort());
+  });
+
+  it('binds daemon-owned orchestration Session channels through the shared registry', () => {
+    const registry = new PaneCommandRegistry();
+    const ipcMain = createIpcMainStub();
+
+    registerOrchestrationSessionHandlers(ipcMain, createServicesStub(), registry);
+
+    expect(registry.listChannels()).toEqual([...ORCHESTRATION_SESSION_CHANNELS].sort());
+    expect(ipcMain.boundChannels.sort()).toEqual([...ORCHESTRATION_SESSION_CHANNELS].sort());
   });
 
   it('binds daemon-owned permission channels through the shared registry', () => {
@@ -402,6 +424,35 @@ describe('daemon registry IPC bindings', () => {
       [...FILE_CHANNELS].sort(),
     );
     expect(registry.has('file:showInFolder')).toBe(false);
+  });
+
+  it('returns a file URL for a path inside the session worktree', async () => {
+    const registry = new PaneCommandRegistry();
+    const ipcMain = createIpcMainStub();
+    const worktreePath = path.join(process.cwd(), 'Pane Preview');
+    const filePath = path.join(worktreePath, 'index.html');
+
+    // SAFETY: This test fixture supplies the session and path resolver used by file:getPath.
+    registerFileHandlers(ipcMain, createServicesStub({
+      sessionManager: {
+        getSession: () => ({ worktreePath }),
+        getProjectContext: () => ({
+          pathResolver: {
+            toFileSystem: (value: string) => value,
+            isWithin: async () => true,
+          },
+        }),
+      },
+    } as Partial<AppServices>), registry);
+
+    await expect(registry.invoke('file:getPath', [{
+      sessionId: 'session-1',
+      filePath: 'index.html',
+    }])).resolves.toEqual({
+      success: true,
+      path: filePath,
+      url: pathToFileURL(filePath).href,
+    });
   });
 
   it('keeps browser and clipboard panel adapters outside the daemon registry surface', () => {
@@ -445,6 +496,7 @@ describe('daemon registry IPC bindings', () => {
 
     registerSessionHandlers(
       ipcMain,
+      // SAFETY: This test fixture intentionally supplies the minimal structural substitute exercised by the unit.
       createServicesStub({ gitStatusManager: { setActiveSession } } as Partial<AppServices>),
       registry,
     );

@@ -15,11 +15,12 @@ import { IntegrationsSettings } from './settings/categories/IntegrationsSettings
 import { ShortcutsSettings } from './settings/categories/ShortcutsSettings';
 import { PrivacySettings } from './settings/categories/PrivacySettings';
 import { AdvancedSettings } from './settings/categories/AdvancedSettings';
+import { UsageSettings } from './settings/categories/UsageSettings';
 import { RemoteAccessWorkflows } from './settings/RemoteAccessWorkflows';
 import { useSettingsPersistence } from './settings/useSettingsPersistence';
 import { useDirtySettingsForms } from './settings/useDirtySettingsForms';
 import { useRemoteAccessSettings } from './settings/useRemoteAccessSettings';
-import { settingDomId } from './settings/catalog';
+import { SETTINGS_CATEGORIES, SETTINGS_CATEGORIES_WITHOUT_USAGE, settingDomId } from './settings/catalog';
 import type {
   RemoteAccessSubviewId,
   SettingsCategoryId,
@@ -27,6 +28,7 @@ import type {
   SettingsSettingId,
 } from '../types/settings';
 import type { PreferredShell } from '../types/config';
+import type { VersionInfo } from '../types/session';
 import { API } from '../utils/api';
 
 interface AvailableShell {
@@ -34,6 +36,9 @@ interface AvailableShell {
   name: string;
   path: string;
 }
+
+/** Whether the host probe found a Codex login; the Usage tab is rendered only when 'available'. */
+type CodexUsageDetection = 'unknown' | 'available' | 'unavailable';
 
 interface SettingsProps {
   isOpen: boolean;
@@ -43,9 +48,11 @@ interface SettingsProps {
   openRequest?: SettingsOpenRequest;
   onOpenRequestHandled: () => void;
   onShowKeyboardShortcuts: () => void;
+  onUpdate: (versionInfo: VersionInfo) => void;
+  onSendFeedback: () => void;
 }
 
-export function Settings({ isOpen, onClose, category, onCategoryChange, openRequest, onOpenRequestHandled, onShowKeyboardShortcuts }: SettingsProps) {
+export function Settings({ isOpen, onClose, category, onCategoryChange, openRequest, onOpenRequestHandled, onShowKeyboardShortcuts, onUpdate, onSendFeedback }: SettingsProps) {
   const persistence = useSettingsPersistence(isOpen);
   const dirtyForms = useDirtySettingsForms();
   const {
@@ -59,6 +66,7 @@ export function Settings({ isOpen, onClose, category, onCategoryChange, openRequ
   const [availableShells, setAvailableShells] = useState<AvailableShell[]>([]);
   const [systemMonoFonts, setSystemMonoFonts] = useState<string[]>([]);
   const [remoteSubview, setRemoteSubview] = useState<RemoteAccessSubviewId | undefined>();
+  const [codexUsageDetection, setCodexUsageDetection] = useState<CodexUsageDetection>('unknown');
   const handledRequestRef = useRef<number | null>(null);
   const fontsLoadedRef = useRef(false);
   const remote = useRemoteAccessSettings(isOpen, onClose);
@@ -69,16 +77,47 @@ export function Settings({ isOpen, onClose, category, onCategoryChange, openRequ
       setPlatform(currentPlatform);
       if (currentPlatform === 'win32') {
         const response = await API.config.getAvailableShells();
-        if (response.success && Array.isArray(response.data)) setAvailableShells(response.data as AvailableShell[]);
+        if (response.success && Array.isArray(response.data)) {
+          // SAFETY: The named IPC/API channel contract establishes this response payload type.
+          setAvailableShells(response.data as AvailableShell[]);
+        }
       }
     });
     if (!fontsLoadedRef.current) {
       fontsLoadedRef.current = true;
       void window.electronAPI.config.getMonospaceFonts().then((response) => {
-        if (response.success && Array.isArray(response.data)) setSystemMonoFonts(response.data as string[]);
+        if (response.success && Array.isArray(response.data)) {
+          // SAFETY: The named IPC/API channel contract establishes this response payload type.
+          setSystemMonoFonts(response.data as string[]);
+        }
       }).catch(() => undefined);
     }
   }, [isOpen]);
+
+  // Show the Usage tab when Codex transcripts have been indexed (rate limits exist).
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    void API.usage.getReport({ providers: ['codex'] }).then((response) => {
+      if (cancelled) return;
+      const hasLimits = response.success && (response.data?.rateLimits.length ?? 0) > 0;
+      setCodexUsageDetection(hasLimits ? 'available' : 'unavailable');
+    }).catch(() => {
+      if (!cancelled) setCodexUsageDetection('unavailable');
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen]);
+
+  const visibleCategories = codexUsageDetection === 'available'
+    ? SETTINGS_CATEGORIES
+    : SETTINGS_CATEGORIES_WITHOUT_USAGE;
+
+  // A remembered Usage category with no Codex login falls back to General.
+  useEffect(() => {
+    if (isOpen && category === 'usage' && codexUsageDetection === 'unavailable') onCategoryChange('general');
+  }, [category, codexUsageDetection, isOpen, onCategoryChange]);
 
   const focusSetting = useCallback((setting?: SettingsSettingId) => {
     if (!setting) return;
@@ -119,6 +158,14 @@ export function Settings({ isOpen, onClose, category, onCategoryChange, openRequ
     requestTransition(onShowKeyboardShortcuts);
   }, [onShowKeyboardShortcuts, requestTransition]);
 
+  const showUpdate = useCallback((versionInfo: VersionInfo) => {
+    requestTransition(() => {
+      setRemoteSubview(undefined);
+      onClose();
+      onUpdate(versionInfo);
+    });
+  }, [onClose, onUpdate, requestTransition]);
+
   const openRemoteSubview = useCallback((subview: RemoteAccessSubviewId) => {
     requestTransition(() => setRemoteSubview(subview));
   }, [requestTransition]);
@@ -128,13 +175,18 @@ export function Settings({ isOpen, onClose, category, onCategoryChange, openRequ
     const sharedDirtyProps = { onDirtyChange: setDirty };
     switch (category) {
       case 'general':
-        return <GeneralSettings persistence={persistence} />;
+        // onSendFeedback is passed straight through, unlike showUpdate/showKeyboardShortcuts:
+        // the feedback dialog stacks on top of Settings instead of replacing it, so there is
+        // no transition to guard and closing Settings would strand focus on an unmounted button.
+        return <GeneralSettings persistence={persistence} onUpdate={showUpdate} onSendFeedback={onSendFeedback} />;
       case 'appearance':
         return <AppearanceSettings persistence={persistence} />;
       case 'terminal':
         return <TerminalSettings persistence={persistence} platform={platform} availableShells={availableShells} systemMonoFonts={systemMonoFonts} />;
       case 'ai-agents':
         return <AIAgentsSettings persistence={persistence} {...sharedDirtyProps} />;
+      case 'usage':
+        return <UsageSettings />;
       case 'worktrees-git':
         return <WorktreesGitSettings persistence={persistence} {...sharedDirtyProps} />;
       case 'notifications':
@@ -142,7 +194,7 @@ export function Settings({ isOpen, onClose, category, onCategoryChange, openRequ
       case 'remote-access':
         return remoteSubview
           ? <RemoteAccessWorkflows subview={remoteSubview} controller={remote} onBack={() => requestTransition(() => setRemoteSubview(undefined))} {...sharedDirtyProps} />
-          : <RemoteAccessSettings controller={remote} onOpenSubview={openRemoteSubview} closeSettings={onClose} />;
+          : <RemoteAccessSettings controller={remote} onOpenSubview={openRemoteSubview} />;
       case 'integrations':
         return <IntegrationsSettings persistence={persistence} {...sharedDirtyProps} />;
       case 'shortcuts':
@@ -161,7 +213,7 @@ export function Settings({ isOpen, onClose, category, onCategoryChange, openRequ
         onClose={requestClose}
         size="full"
         showCloseButton={false}
-        className="h-[calc(100vh-4rem)] min-h-[560px] max-h-[760px] max-w-6xl"
+        className="mx-auto h-[calc(100vh-4rem)] min-h-[560px] max-h-[760px] max-w-6xl"
       >
         <ModalHeader title="Pane Settings" icon={<SettingsIcon className="h-5 w-5" />} onClose={requestClose} />
         {persistence.isLoading && !persistence.config ? (
@@ -175,7 +227,7 @@ export function Settings({ isOpen, onClose, category, onCategoryChange, openRequ
             <Button type="button" variant="secondary" size="sm" onClick={() => void persistence.fetchConfig()}>Retry</Button>
           </div>
         ) : (
-          <SettingsLayout category={category} onCategoryChange={changeCategory}>
+          <SettingsLayout category={category} categories={visibleCategories} onCategoryChange={changeCategory}>
             {content()}
           </SettingsLayout>
         )}

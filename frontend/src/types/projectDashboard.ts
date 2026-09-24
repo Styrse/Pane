@@ -47,7 +47,11 @@ export interface ProjectDashboardData {
   lastRefreshed: string;
 }
 
-export interface ProjectDashboardError {
-  message: string;
-  details?: string;
+export type ProjectDashboardUpdateEvent =
+  | { projectId: number; isPartial: true; data: Partial<ProjectDashboardData> }
+  | { projectId: number; isPartial: false; data: ProjectDashboardData };
+
+export interface ProjectDashboardSessionUpdateEvent {
+  projectId: number;
+  session: SessionBranchInfo;
 }

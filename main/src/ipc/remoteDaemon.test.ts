@@ -9,24 +9,38 @@ import {
 import { authenticateRemoteDaemonBearerToken } from '../daemon/auth';
 import { remotePaneClientController } from '../daemon/client/remotePaneClient';
 import { remoteHostRuntimeStateStore } from '../daemon/remoteHostRuntimeState';
-import { disconnectActiveRemoteHostClients } from '../daemon/remoteTransportController';
-import { readConfiguredTailscaleServeAccess, setupRemoteHost } from '../daemon/setupRemoteHost';
-import { registerRemoteDaemonHandlers } from './remoteDaemon';
+import { disconnectActiveRemoteHostClients as disconnectActiveRemoteHostClientsImpl } from '../daemon/remoteTransportController';
+import {
+  readConfiguredTailscaleServeAccess as readConfiguredTailscaleServeAccessImpl,
+  setupRemoteHost as setupRemoteHostImpl,
+} from '../daemon/setupRemoteHost';
+import { registerRemoteDaemonHandlers as registerRemoteDaemonHandlersImpl } from './remoteDaemon';
+import type { PaneCommandValue } from '../daemon/commandRegistry';
 
-vi.mock('../daemon/setupRemoteHost', () => ({
-  readConfiguredTailscaleServeAccess: vi.fn(),
-  setupRemoteHost: vi.fn(),
-}));
+const readConfiguredTailscaleServeAccess = vi.fn<typeof readConfiguredTailscaleServeAccessImpl>();
+const setupRemoteHost = vi.fn<typeof setupRemoteHostImpl>();
+const disconnectActiveRemoteHostClients = vi.fn<typeof disconnectActiveRemoteHostClientsImpl>()
+  .mockReturnValue(0);
 
-vi.mock('../daemon/remoteTransportController', () => ({
-  disconnectActiveRemoteHostClients: vi.fn(() => 0),
-}));
+function registerTestRemoteDaemonHandlers(
+  ipcMain: Parameters<typeof registerRemoteDaemonHandlersImpl>[0],
+  services: Omit<Parameters<typeof registerRemoteDaemonHandlersImpl>[1], 'dependencies'>,
+): void {
+  registerRemoteDaemonHandlersImpl(ipcMain, {
+    ...services,
+    dependencies: {
+      disconnectActiveRemoteHostClients,
+      readConfiguredTailscaleServeAccess,
+      setupRemoteHost,
+    },
+  });
+}
 
 const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
 
 interface IpcMainStub {
-  handlers: Map<string, (_event: unknown, ...args: unknown[]) => Promise<unknown>>;
-  handle(channel: string, listener: (_event: unknown, ...args: unknown[]) => Promise<unknown>): void;
+  handlers: Map<string, (_event: { readonly sender: object }, ...args: PaneCommandValue[]) => Promise<PaneCommandValue>>;
+  handle(channel: string, listener: (_event: { readonly sender: object }, ...args: PaneCommandValue[]) => Promise<PaneCommandValue>): void;
 }
 
 interface ConfigManagerStub {
@@ -35,7 +49,7 @@ interface ConfigManagerStub {
 }
 
 function createIpcMainStub(): IpcMainStub {
-  const handlers = new Map<string, (_event: unknown, ...args: unknown[]) => Promise<unknown>>();
+  const handlers = new Map<string, (_event: { readonly sender: object }, ...args: PaneCommandValue[]) => Promise<PaneCommandValue>>();
 
   return {
     handlers,
@@ -143,7 +157,7 @@ describe('remote daemon IPC', () => {
     const ipcMain = createIpcMainStub();
     const configManager = createConfigManagerStub();
 
-    registerRemoteDaemonHandlers(ipcMain, { configManager });
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager });
 
     await expect(ipcMain.handlers.get('remote-daemon:get-config')?.({})).resolves.toEqual({
       success: true,
@@ -156,8 +170,9 @@ describe('remote daemon IPC', () => {
     const configManager = createConfigManagerStub();
     const send = vi.fn();
 
-    registerRemoteDaemonHandlers(ipcMain, {
+    registerTestRemoteDaemonHandlers(ipcMain, {
       configManager,
+      // SAFETY: This test fixture intentionally supplies the minimal structural substitute exercised by the unit.
       getMainWindow: () => ({ isDestroyed: () => false, webContents: { send } }) as never,
     });
 
@@ -215,6 +230,7 @@ describe('remote daemon IPC', () => {
         host: {
           config: createDefaultRemoteDaemonConfig().host.config,
           clients: [],
+          mobilePush: { registrations: [], attentionSequence: 0, panelStates: {} },
         },
         client: {
           profiles: [{
@@ -243,7 +259,7 @@ describe('remote daemon IPC', () => {
       lastError: null,
     });
 
-    registerRemoteDaemonHandlers(ipcMain, { configManager });
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager });
 
     await expect(ipcMain.handlers.get('remote-daemon:get-connection-state')?.({})).resolves.toEqual({
       success: true,
@@ -271,7 +287,7 @@ describe('remote daemon IPC', () => {
       port: 42138,
     });
 
-    registerRemoteDaemonHandlers(ipcMain, { configManager });
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager });
 
     await expect(ipcMain.handlers.get('remote-daemon:get-host-state')?.({})).resolves.toMatchObject({
       success: true,
@@ -299,7 +315,7 @@ describe('remote daemon IPC', () => {
       });
     });
 
-    registerRemoteDaemonHandlers(ipcMain, { configManager });
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager });
 
     const setupHost = ipcMain.handlers.get('remote-daemon:setup-host');
     const response = await setupHost?.({}, {
@@ -333,9 +349,10 @@ describe('remote daemon IPC', () => {
     const ipcMain = createIpcMainStub();
     const configManager = createConfigManagerStub();
 
-    registerRemoteDaemonHandlers(ipcMain, { configManager, app: { isPackaged: false } });
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager, app: { isPackaged: false } });
 
     const getCommand = ipcMain.handlers.get('remote-daemon:get-interactive-setup-command');
+    // SAFETY: This test fixture intentionally supplies the minimal structural substitute exercised by the unit.
     const response = await getCommand?.({}, {
       label: 'Windows WSL Smoke',
       listenPort: 42139,
@@ -363,9 +380,10 @@ describe('remote daemon IPC', () => {
     const ipcMain = createIpcMainStub();
     const configManager = createConfigManagerStub();
 
-    registerRemoteDaemonHandlers(ipcMain, { configManager });
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager });
 
     const getCommand = ipcMain.handlers.get('remote-daemon:get-interactive-client-setup-command');
+    // SAFETY: This test fixture intentionally supplies the minimal structural substitute exercised by the unit.
     const response = await getCommand?.({}) as { success?: boolean; data?: { command?: string } };
 
     expect(response).toMatchObject({
@@ -383,9 +401,10 @@ describe('remote daemon IPC', () => {
     const ipcMain = createIpcMainStub();
     const configManager = createConfigManagerStub();
 
-    registerRemoteDaemonHandlers(ipcMain, { configManager });
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager });
 
     const getCommand = ipcMain.handlers.get('remote-daemon:get-interactive-client-setup-command');
+    // SAFETY: This test fixture intentionally supplies the minimal structural substitute exercised by the unit.
     const response = await getCommand?.({}) as { success?: boolean; data?: { command?: string } };
 
     expect(response).toMatchObject({
@@ -418,7 +437,7 @@ describe('remote daemon IPC', () => {
       },
     });
 
-    registerRemoteDaemonHandlers(ipcMain, { configManager });
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager });
 
     const importCode = ipcMain.handlers.get('remote-daemon:import-connection-code');
     const response = await importCode?.({}, {
@@ -470,8 +489,9 @@ describe('remote daemon IPC', () => {
     });
     vi.spyOn(remotePaneClientController, 'activateProfile').mockRejectedValue(new Error('Remote daemon not ready yet'));
 
-    registerRemoteDaemonHandlers(ipcMain, {
+    registerTestRemoteDaemonHandlers(ipcMain, {
       configManager,
+      // SAFETY: This test fixture intentionally supplies the minimal structural substitute exercised by the unit.
       getMainWindow: () => ({ isDestroyed: () => false, webContents: { send } }) as never,
     });
 
@@ -520,13 +540,15 @@ describe('remote daemon IPC', () => {
       },
     });
 
-    registerRemoteDaemonHandlers(ipcMain, { configManager });
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager });
 
     const importCode = ipcMain.handlers.get('remote-daemon:import-connection-code');
+    // SAFETY: This test fixture intentionally supplies the minimal structural substitute exercised by the unit.
     const firstResponse = await importCode?.({}, {
       code: connectionCode,
       connect: false,
     }) as { success?: boolean; data?: { profile?: { id?: string } } };
+    // SAFETY: This test fixture intentionally supplies the minimal structural substitute exercised by the unit.
     const secondResponse = await importCode?.({}, {
       code: connectionCode,
       connect: false,
@@ -562,7 +584,7 @@ describe('remote daemon IPC', () => {
       },
     }));
 
-    registerRemoteDaemonHandlers(ipcMain, { configManager });
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager });
 
     const setupHost = ipcMain.handlers.get('remote-daemon:setup-host');
     const response = await setupHost?.({}, {
@@ -591,11 +613,32 @@ describe('remote daemon IPC', () => {
     }));
   });
 
+  it('accepts explicitly undefined optional setup fields from the Remote Access UI', async () => {
+    const ipcMain = createIpcMainStub();
+    const configManager = createConfigManagerStub();
+    vi.mocked(setupRemoteHost).mockResolvedValue(createSetupResult());
+
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager });
+
+    const setupHost = ipcMain.handlers.get('remote-daemon:setup-host');
+    const response = await setupHost?.({}, {
+      dataDirectoryMode: 'current',
+      paneDir: undefined,
+      preferTunnel: 'auto',
+      baseUrl: undefined,
+    });
+
+    expect(response).toMatchObject({ success: true });
+    expect(setupRemoteHost).toHaveBeenCalledWith(expect.objectContaining({
+      preferTunnel: 'auto',
+    }));
+  });
+
   it('rejects non-loopback HTTP manual setup URLs', async () => {
     const ipcMain = createIpcMainStub();
     const configManager = createConfigManagerStub();
 
-    registerRemoteDaemonHandlers(ipcMain, { configManager });
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager });
 
     const setupHost = ipcMain.handlers.get('remote-daemon:setup-host');
 
@@ -635,8 +678,9 @@ describe('remote daemon IPC', () => {
       lastError: null,
     });
 
-    registerRemoteDaemonHandlers(ipcMain, {
+    registerTestRemoteDaemonHandlers(ipcMain, {
       configManager,
+      // SAFETY: This test fixture intentionally supplies the minimal structural substitute exercised by the unit.
       getMainWindow: () => ({ isDestroyed: () => false, webContents: { send } }) as never,
     });
 
@@ -685,8 +729,9 @@ describe('remote daemon IPC', () => {
       lastError: null,
     });
 
-    registerRemoteDaemonHandlers(ipcMain, {
+    registerTestRemoteDaemonHandlers(ipcMain, {
       configManager,
+      // SAFETY: This test fixture intentionally supplies the minimal structural substitute exercised by the unit.
       getMainWindow: () => ({ isDestroyed: () => false, webContents: { send } }) as never,
     });
 
@@ -736,8 +781,9 @@ describe('remote daemon IPC', () => {
       lastError: null,
     });
 
-    registerRemoteDaemonHandlers(ipcMain, {
+    registerTestRemoteDaemonHandlers(ipcMain, {
       configManager,
+      // SAFETY: This test fixture intentionally supplies the minimal structural substitute exercised by the unit.
       getMainWindow: () => ({ isDestroyed: () => false, webContents: { send } }) as never,
     });
 
@@ -772,7 +818,7 @@ describe('remote daemon IPC', () => {
     const ipcMain = createIpcMainStub();
     const configManager = createConfigManagerStub();
 
-    registerRemoteDaemonHandlers(ipcMain, { configManager });
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager });
 
     const createPair = ipcMain.handlers.get('remote-daemon:create-connection-pair');
     const response = await createPair?.({}, {
@@ -803,9 +849,10 @@ describe('remote daemon IPC', () => {
     const ipcMain = createIpcMainStub();
     const configManager = createConfigManagerStub(initialConfig);
 
-    registerRemoteDaemonHandlers(ipcMain, { configManager });
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager });
 
     const createCode = ipcMain.handlers.get('remote-daemon:create-host-connection-code');
+    // SAFETY: This test fixture intentionally supplies the minimal structural substitute exercised by the unit.
     const response = await createCode?.({}, { label: 'Office Mac mini' }) as {
       success?: boolean;
       data?: { connectionCode?: string };
@@ -847,9 +894,10 @@ describe('remote daemon IPC', () => {
     const ipcMain = createIpcMainStub();
     const configManager = createConfigManagerStub(initialConfig);
 
-    registerRemoteDaemonHandlers(ipcMain, { configManager });
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager });
 
     const createCode = ipcMain.handlers.get('remote-daemon:create-host-connection-code');
+    // SAFETY: This test fixture intentionally supplies the minimal structural substitute exercised by the unit.
     const response = await createCode?.({}, {}) as {
       success?: boolean;
       data?: { connectionCode?: string };
@@ -879,9 +927,10 @@ describe('remote daemon IPC', () => {
     const ipcMain = createIpcMainStub();
     const configManager = createConfigManagerStub(initialConfig);
 
-    registerRemoteDaemonHandlers(ipcMain, { configManager });
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager });
 
     const createCode = ipcMain.handlers.get('remote-daemon:create-host-connection-code');
+    // SAFETY: This test fixture intentionally supplies the minimal structural substitute exercised by the unit.
     const firstResponse = await createCode?.({}, { label: 'Office Mac mini' }) as {
       success?: boolean;
       data?: { connectionCode?: string };
@@ -900,6 +949,7 @@ describe('remote daemon IPC', () => {
     });
     expectConnectionCodeForbidden(configManager, firstResponse.data?.connectionCode);
 
+    // SAFETY: This test fixture intentionally supplies the minimal structural substitute exercised by the unit.
     const secondResponse = await createCode?.({}, { label: 'Office Mac mini' }) as {
       success?: boolean;
       data?: { connectionCode?: string };
@@ -931,7 +981,7 @@ describe('remote daemon IPC', () => {
     const ipcMain = createIpcMainStub();
     const configManager = createClientDroppingConfigManagerStub(initialConfig);
 
-    registerRemoteDaemonHandlers(ipcMain, { configManager });
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager });
 
     const createCode = ipcMain.handlers.get('remote-daemon:create-host-connection-code');
     await expect(createCode?.({}, { label: 'Office Mac mini' })).resolves.toEqual({
@@ -952,7 +1002,7 @@ describe('remote daemon IPC', () => {
     const ipcMain = createIpcMainStub();
     const configManager = createConfigManagerStub(initialConfig);
 
-    registerRemoteDaemonHandlers(ipcMain, { configManager });
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager });
 
     await expect(ipcMain.handlers.get('remote-daemon:get-config')?.({})).resolves.toEqual({
       success: true,
@@ -964,7 +1014,7 @@ describe('remote daemon IPC', () => {
     const ipcMain = createIpcMainStub();
     const configManager = createConfigManagerStub();
 
-    registerRemoteDaemonHandlers(ipcMain, { configManager });
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager });
 
     const upsertProfile = ipcMain.handlers.get('remote-daemon:upsert-connection-profile');
 
@@ -984,7 +1034,7 @@ describe('remote daemon IPC', () => {
     const ipcMain = createIpcMainStub();
     const configManager = createConfigManagerStub();
 
-    registerRemoteDaemonHandlers(ipcMain, { configManager });
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager });
 
     const upsertProfile = ipcMain.handlers.get('remote-daemon:upsert-connection-profile');
     const updateClientState = ipcMain.handlers.get('remote-daemon:update-client-state');
@@ -1014,6 +1064,7 @@ describe('remote daemon IPC', () => {
         host: {
           config: createDefaultRemoteDaemonConfig().host.config,
           clients: [],
+          mobilePush: { registrations: [], attentionSequence: 0, panelStates: {} },
         },
         client: {
           profiles: [{
@@ -1034,7 +1085,7 @@ describe('remote daemon IPC', () => {
     const ipcMain = createIpcMainStub();
     const configManager = createConfigManagerStub();
 
-    registerRemoteDaemonHandlers(ipcMain, { configManager });
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager });
 
     const updateHostConfig = ipcMain.handlers.get('remote-daemon:update-host-config');
 
@@ -1058,7 +1109,7 @@ describe('remote daemon IPC', () => {
     const ipcMain = createIpcMainStub();
     const configManager = createConfigManagerStub(initialConfig);
 
-    registerRemoteDaemonHandlers(ipcMain, { configManager });
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager });
 
     const updateHostConfig = ipcMain.handlers.get('remote-daemon:update-host-config');
 
@@ -1105,13 +1156,14 @@ describe('remote daemon IPC', () => {
     const ipcMain = createIpcMainStub();
     const configManager = createConfigManagerStub(initialConfig);
 
-    registerRemoteDaemonHandlers(ipcMain, { configManager });
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager });
 
     await expect(ipcMain.handlers.get('remote-daemon:clear-host-access')?.({})).resolves.toEqual({
       success: true,
       data: {
         config: initialConfig.host.config,
         clients: [],
+        mobilePush: { registrations: [], attentionSequence: 0, panelStates: {} },
       },
     });
     expect(configManager.getConfig().remoteDaemon?.host.access).toBeUndefined();
@@ -1128,7 +1180,7 @@ describe('remote daemon IPC', () => {
     const configManager = createConfigManagerStub();
     vi.mocked(disconnectActiveRemoteHostClients).mockReturnValue(2);
 
-    registerRemoteDaemonHandlers(ipcMain, { configManager });
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager });
 
     await expect(ipcMain.handlers.get('remote-daemon:disconnect-host-clients')?.({}, ['client-1'])).resolves.toEqual({
       success: true,
@@ -1148,7 +1200,7 @@ describe('remote daemon IPC', () => {
     const ipcMain = createIpcMainStub();
     const configManager = createConfigManagerStub(config);
 
-    registerRemoteDaemonHandlers(ipcMain, { configManager });
+    registerTestRemoteDaemonHandlers(ipcMain, { configManager });
 
     await expect(ipcMain.handlers.get('remote-daemon:delete-client-record')?.({}, 'client-1')).resolves.toEqual({
       success: true,

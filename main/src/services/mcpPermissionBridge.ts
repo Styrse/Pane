@@ -10,10 +10,9 @@ import {
   ListToolsRequestSchema 
 } from '@modelcontextprotocol/sdk/types.js';
 import net from 'net';
-import fs from 'fs';
-import path from 'path';
-import os from 'os';
 import type { PermissionResponse } from './permissionManager';
+import type { PanePermissionInput } from '../../../shared/types/daemon';
+import { boundary, decodeBoundary } from '../../../shared/validation/boundaryDecoder';
 
 const sessionId = process.argv[2];
 const ipcPath = process.argv[3];
@@ -27,7 +26,7 @@ if (!sessionId || !ipcPath) {
 
 // Create IPC client to communicate with main process
 let ipcClient: net.Socket | null = null;
-let pendingRequests = new Map<string, (response: PermissionResponse) => void>();
+const pendingRequests = new Map<string, (response: PermissionResponse) => void>();
 
 function connectToMainProcess() {
   ipcClient = net.createConnection(ipcPath);
@@ -60,7 +59,7 @@ function connectToMainProcess() {
   });
 }
 
-async function requestPermission(toolName: string, input: Record<string, unknown>): Promise<PermissionResponse> {
+async function requestPermission(toolName: string, input: PanePermissionInput): Promise<PermissionResponse> {
   return new Promise((resolve, reject) => {
     const requestId = `${Date.now()}-${Math.random()}`;
     
@@ -126,7 +125,10 @@ async function main() {
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (request.params.name === 'approve_permission') {
-      const { tool_name, input } = request.params.arguments as { tool_name: string; input: Record<string, unknown> };
+      const { tool_name, input } = decodeBoundary(request.params.arguments, boundary.object({
+        tool_name: boundary.string,
+        input: boundary.jsonObject,
+      }));
       
       try {
         const response = await requestPermission(tool_name, input);

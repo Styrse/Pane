@@ -16,12 +16,84 @@
   --vscode-editorWidget-foreground: #DFE1E5 !important;
 }
 
+/* Synthwave theme overrides — violet-black editor */
+:root.synthwave {
+  --vscode-editor-background: #0b0714 !important;
+  --vscode-editor-foreground: #f1eafc !important;
+  --vscode-editorWidget-background: #0b0714 !important;
+  --vscode-editorWidget-foreground: #f1eafc !important;
+}
+
+/* Acid Terminal theme overrides — charcoal-black editor */
+:root.acid {
+  --vscode-editor-background: #0a0b0a !important;
+  --vscode-editor-foreground: #eaf2ea !important;
+  --vscode-editorWidget-background: #0a0b0a !important;
+  --vscode-editorWidget-foreground: #eaf2ea !important;
+}
+
+/* Tokyo Rain theme overrides — blue-black editor */
+:root.tokyo-rain {
+  --vscode-editor-background: #080b16 !important;
+  --vscode-editor-foreground: #e6ebf4 !important;
+  --vscode-editorWidget-background: #080b16 !important;
+  --vscode-editorWidget-foreground: #e6ebf4 !important;
+}
+
 /* Light theme overrides */
 :root.light {
   --vscode-editor-background: #ffffff !important; /* white */
   --vscode-editor-foreground: #1e2026 !important; /* gray-900 */
   --vscode-editorWidget-background: #ffffff !important;
   --vscode-editorWidget-foreground: #1e2026 !important;
+}
+
+/* Folio theme overrides — ink on the sheet */
+:root.folio {
+  --vscode-editor-background: #fbf7ee !important;
+  --vscode-editor-foreground: #1f1b17 !important;
+  --vscode-editorWidget-background: #fbf7ee !important;
+  --vscode-editorWidget-foreground: #1f1b17 !important;
+}
+
+/* Newsprint theme overrides — graphite on cool stock */
+:root.newsprint {
+  --vscode-editor-background: #f8f8f6 !important;
+  --vscode-editor-foreground: #24272b !important;
+  --vscode-editorWidget-background: #f8f8f6 !important;
+  --vscode-editorWidget-foreground: #24272b !important;
+}
+
+/* Walnut theme overrides — parchment on walnut */
+:root.walnut {
+  --vscode-editor-background: #120e0b !important;
+  --vscode-editor-foreground: #ede1cd !important;
+  --vscode-editorWidget-background: #120e0b !important;
+  --vscode-editorWidget-foreground: #ede1cd !important;
+}
+
+/* Abyss theme overrides — trench editor colors */
+:root.abyss {
+  --vscode-editor-background: #04090f !important;
+  --vscode-editor-foreground: #dbeaf1 !important;
+  --vscode-editorWidget-background: #04090f !important;
+  --vscode-editorWidget-foreground: #dbeaf1 !important;
+}
+
+/* Understory theme overrides — moss floor editor colors */
+:root.understory {
+  --vscode-editor-background: #0d110c !important;
+  --vscode-editor-foreground: #e4e9d9 !important;
+  --vscode-editorWidget-background: #0d110c !important;
+  --vscode-editorWidget-foreground: #e4e9d9 !important;
+}
+
+/* Haar theme overrides — fog editor colors (after .light so the theme wins) */
+:root.haar {
+  --vscode-editor-background: #f5f7f9 !important;
+  --vscode-editor-foreground: #252d36 !important;
+  --vscode-editorWidget-background: #f5f7f9 !important;
+  --vscode-editorWidget-foreground: #252d36 !important;
 }
 
 /* Additional Monaco editor style overrides */

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 import { ArrowLeft, Copy, ExternalLink, Plus, Terminal, Trash2 } from 'lucide-react';
 import { Button, IconButton } from '../ui/Button';
 import { Checkbox, Input, Textarea } from '../ui/Input';
@@ -9,6 +9,8 @@ import { SecretField } from './SecretField';
 import type { RemoteAccessSubviewId } from '../../types/settings';
 import type { RemoteAccessController } from './useRemoteAccessSettings';
 import type { RemoteSetupTunnelPreference } from '../../../../shared/types/remoteDaemon';
+import { getRemoteExecutableHealthPresentation } from '../../utils/remoteRuntimePresentation';
+import { useCommittedRef } from '../../hooks/useCommittedRef';
 
 interface RemoteAccessWorkflowsProps {
   subview: RemoteAccessSubviewId;
@@ -18,8 +20,7 @@ interface RemoteAccessWorkflowsProps {
 }
 
 export function RemoteAccessWorkflows({ subview, controller, onBack, onDirtyChange }: RemoteAccessWorkflowsProps) {
-  const resetDraftRef = useRef(controller.resetSubviewDraft);
-  resetDraftRef.current = controller.resetSubviewDraft;
+  const resetDraftRef = useCommittedRef(controller.resetSubviewDraft);
   const configuredBaseUrl = formatRemoteBaseUrl(
     controller.config.host.config.listenHost,
     controller.config.host.config.listenPort,
@@ -37,7 +38,7 @@ export function RemoteAccessWorkflows({ subview, controller, onBack, onDirtyChan
   useEffect(() => () => {
     onDirtyChange(false);
     resetDraftRef.current(subview);
-  }, [onDirtyChange, subview]);
+  }, [onDirtyChange, resetDraftRef, subview]);
 
   return (
     <div className="mx-auto w-full max-w-3xl pb-8">
@@ -63,9 +64,20 @@ function formatRemoteBaseUrl(host: string, port: number): string {
 
 function HostSetup({ controller }: { controller: RemoteAccessController }) {
   const activeCode = controller.setupResult?.connectionCode;
+  const executableHealth = getRemoteExecutableHealthPresentation(controller.hostState.executableHealth);
   return (
     <SettingsPage title="Set Up This Machine" description="Configure this Pane install as a remote host and create a cross-device connection code.">
       <SettingsSection title="Host status">
+        {executableHealth && (
+          <div
+            className={`mb-3 rounded-md border p-3 text-sm ${executableHealth.severity === 'error' ? 'border-status-error/30 bg-status-error/10 text-status-error' : 'border-status-warning/30 bg-status-warning/10 text-text-primary'}`}
+            role="alert"
+          >
+            <p className="font-medium">{executableHealth.code}</p>
+            <p className="mt-1">{executableHealth.message}</p>
+            {executableHealth.recoveryCommand && <code className="mt-2 block select-all text-xs">{executableHealth.recoveryCommand}</code>}
+          </div>
+        )}
         <SettingRow
           settingId="remote-host-setup"
           label={controller.hostState.status === 'live' ? 'Remote host is live' : 'Remote host is not running'}

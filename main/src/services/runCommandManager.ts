@@ -7,9 +7,10 @@ import type { ProjectRunCommand } from '../database/models';
 import { getShellPath } from '../utils/shellPath';
 import { ShellDetector } from '../utils/shellDetector';
 import * as os from 'os';
-import { exec } from 'child_process';
+import { exec, execSync } from 'child_process';
 import { promisify } from 'util';
 import { getGitAttributionEnv } from '../utils/attribution';
+import { inheritedProcessEnv } from '../utils/inheritedProcessEnv';
 
 /**
  * IPty-compatible shim over a ptyHost `PtyHandle`.
@@ -58,7 +59,7 @@ class RunCommandPtyShim implements pty.IPty {
   resize(columns: number, rows: number): void {
     this.cols = columns;
     this.rows = rows;
-    this.handle.resize(columns, rows).catch((err: unknown) => {
+    this.handle.resize(columns, rows).catch((err) => {
       console.warn('[ptyHost] run-command resize failed', err);
     });
   }
@@ -68,26 +69,28 @@ class RunCommandPtyShim implements pty.IPty {
   }
 
   write(data: string | Buffer): void {
-    const str = typeof data === 'string' ? data : data.toString();
-    this.handle.write(str).catch((err: unknown) => {
+    const str = Buffer.isBuffer(data) ? data.toString() : data;
+    this.handle.write(str).catch((err) => {
       console.warn('[ptyHost] run-command write failed', err);
     });
   }
 
   kill(signal?: string): void {
-    this.handle.kill(signal as NodeJS.Signals | undefined).catch((err: unknown) => {
+    // SAFETY: IPty callers provide Node signal names; the ptyHost handle uses
+    // the narrower NodeJS.Signals contract.
+    this.handle.kill(signal as NodeJS.Signals | undefined).catch((err) => {
       console.warn('[ptyHost] run-command kill failed', err);
     });
   }
 
   pause(): void {
-    this.handle.pause().catch((err: unknown) => {
+    this.handle.pause().catch((err) => {
       console.warn('[ptyHost] run-command pause failed', err);
     });
   }
 
   resume(): void {
-    this.handle.resume().catch((err: unknown) => {
+    this.handle.resume().catch((err) => {
       console.warn('[ptyHost] run-command resume failed', err);
     });
   }
@@ -131,8 +134,6 @@ export class RunCommandManager extends EventEmitter {
 
       this.logger?.info(`Starting ${runCommands.length} RUN commands sequentially for session ${sessionId}`);
       
-      const processes: RunProcess[] = [];
-
       // Execute commands sequentially
       for (let i = 0; i < runCommands.length; i++) {
         const command = runCommands[i];
@@ -154,11 +155,11 @@ export class RunCommandManager extends EventEmitter {
             const isLinux = process.platform === 'linux';
             const shellPath = isLinux ? (process.env.PATH || '') : getShellPath();
             const env = {
-              ...process.env,
+              ...inheritedProcessEnv(),
               ...getGitAttributionEnv(getRuntimeConfigManager().getConfig()),
               WORKTREE_PATH: worktreePath,
               PATH: shellPath
-            } as { [key: string]: string };
+            } satisfies Record<string, string>;
             
             // Log environment details for debugging
             if (j === 0) {
@@ -221,7 +222,7 @@ export class RunCommandManager extends EventEmitter {
               // stays well-formed. `process.env` keys can legally be undefined.
               const envStr: Record<string, string> = {};
               for (const [key, value] of Object.entries(env)) {
-                if (typeof value === 'string') {
+                if (value !== undefined) {
                   envStr[key] = value;
                 }
               }
@@ -267,8 +268,6 @@ export class RunCommandManager extends EventEmitter {
 
             // Wait for this command line to complete before starting the next one
             await new Promise<void>((resolve, reject) => {
-              let hasExited = false;
-
               // Handle output from the run command
               ptyProcess.onData((data: string) => {
                 this.emit('output', {
@@ -282,7 +281,6 @@ export class RunCommandManager extends EventEmitter {
               });
 
               ptyProcess.onExit(({ exitCode, signal }) => {
-                hasExited = true;
                 this.logger?.info(`Command line exited: ${commandLine}, exitCode: ${exitCode}, signal: ${signal}`);
                 
                 // Only emit exit event for the last line of a command
@@ -319,7 +317,7 @@ export class RunCommandManager extends EventEmitter {
 
           this.logger?.info(`Completed run command successfully: ${command.display_name || command.command}`);
         } catch (error) {
-          this.logger?.error(`Failed to run command: ${command.display_name || command.command}`, error as Error);
+          this.logger?.error(`Failed to run command: ${command.display_name || command.command}`, error instanceof Error ? error : new Error(String(error)));
           this.emit('error', {
             sessionId,
             commandId: command.id,
@@ -334,7 +332,7 @@ export class RunCommandManager extends EventEmitter {
 
       this.logger?.info(`Finished running commands for session ${sessionId}`);
     } catch (error) {
-      this.logger?.error(`Failed to start run commands for session ${sessionId}`, error as Error);
+      this.logger?.error(`Failed to start run commands for session ${sessionId}`, error instanceof Error ? error : new Error(String(error)));
       throw error;
     }
   }
@@ -367,11 +365,11 @@ export class RunCommandManager extends EventEmitter {
         // Also try to kill via pty interface as fallback
         try {
           runProcess.process.kill();
-        } catch (error) {
+        } catch {
           // Process might already be dead
         }
       } catch (error) {
-        this.logger?.error(`Failed to stop run command: ${runProcess.command.display_name || runProcess.command.command}`, error as Error);
+        this.logger?.error(`Failed to stop run command: ${runProcess.command.display_name || runProcess.command.command}`, error instanceof Error ? error : new Error(String(error)));
       }
     }
 
@@ -386,7 +384,7 @@ export class RunCommandManager extends EventEmitter {
 
   async stopAllRunCommands(): Promise<void> {
     const stopPromises = [];
-    for (const [sessionId, processes] of this.processes) {
+    for (const sessionId of this.processes.keys()) {
       stopPromises.push(this.stopRunCommands(sessionId));
     }
     await Promise.all(stopPromises);
@@ -403,7 +401,7 @@ export class RunCommandManager extends EventEmitter {
     try {
       if (platform === 'win32') {
         // Windows: Use WMIC to get child processes
-        const result = require('child_process').execSync(
+        const result = execSync(
           `wmic process where (ParentProcessId=${parentPid}) get ProcessId`,
           { encoding: 'utf8' }
         );
@@ -419,7 +417,7 @@ export class RunCommandManager extends EventEmitter {
         }
       } else {
         // Unix/Linux/macOS: Use ps command
-        const result = require('child_process').execSync(
+        const result = execSync(
           `ps -o pid= --ppid ${parentPid} 2>/dev/null || true`,
           { encoding: 'utf8' }
         );
@@ -435,7 +433,7 @@ export class RunCommandManager extends EventEmitter {
         }
       }
     } catch (error) {
-      this.logger?.warn(`Error getting descendant PIDs for ${parentPid}:`, error as Error);
+      this.logger?.warn(`Error getting descendant PIDs for ${parentPid}:`, error instanceof Error ? error : new Error(String(error)));
     }
     
     // Remove duplicates
@@ -486,12 +484,12 @@ export class RunCommandManager extends EventEmitter {
           await execAsync(`taskkill /F /T /PID ${pid}`);
           this.logger?.verbose(`Successfully killed Windows process tree ${pid}`);
         } catch (error) {
-          this.logger?.warn(`Error killing Windows process tree: ${error as Error}`);
+          this.logger?.warn(`Error killing Windows process tree: ${error instanceof Error ? error : new Error(String(error))}`);
           // Fallback: kill descendants individually
           for (const childPid of descendantPids) {
             try {
               await execAsync(`taskkill /F /PID ${childPid}`);
-            } catch (e) {
+            } catch {
               // Process might already be dead
             }
           }
@@ -502,7 +500,7 @@ export class RunCommandManager extends EventEmitter {
         try {
           process.kill(pid, 'SIGTERM');
         } catch (error) {
-          this.logger?.warn('SIGTERM failed:', error as Error);
+          this.logger?.warn('SIGTERM failed:', error instanceof Error ? error : new Error(String(error)));
         }
         
         // Kill the entire process group using negative PID
@@ -522,7 +520,7 @@ export class RunCommandManager extends EventEmitter {
         // Now forcefully kill the main process
         try {
           process.kill(pid, 'SIGKILL');
-        } catch (error) {
+        } catch {
           // Process might already be dead
         }
         
@@ -539,7 +537,7 @@ export class RunCommandManager extends EventEmitter {
           try {
             await execAsync(`kill -9 ${childPid}`);
             this.logger?.verbose(`Killed descendant process ${childPid}`);
-          } catch (error) {
+          } catch {
             this.logger?.verbose(`Process ${childPid} already terminated`);
           }
         }
@@ -547,7 +545,7 @@ export class RunCommandManager extends EventEmitter {
         // Final cleanup attempt using pkill
         try {
           await execAsync(`pkill -9 -P ${pid}`);
-        } catch (error) {
+        } catch {
           // Ignore errors - processes might already be dead
         }
       }
@@ -568,7 +566,7 @@ export class RunCommandManager extends EventEmitter {
         });
       }
     } catch (error) {
-      this.logger?.error('Error in killProcessTree:', error as Error);
+      this.logger?.error('Error in killProcessTree:', error instanceof Error ? error : new Error(String(error)));
       success = false;
     }
     
@@ -610,7 +608,7 @@ export class RunCommandManager extends EventEmitter {
               allDescendants.push(...pgPids);
             }
           }
-        } catch (error) {
+        } catch {
           // Process might be gone already
         }
       }
@@ -624,7 +622,7 @@ export class RunCommandManager extends EventEmitter {
           try {
             await execAsync(`kill -9 ${pid}`);
             this.logger?.info(`Killed escaped process ${pid}`);
-          } catch (error) {
+          } catch {
             // Process might already be dead
           }
         }
@@ -637,7 +635,7 @@ export class RunCommandManager extends EventEmitter {
         });
       }
     } catch (error) {
-      this.logger?.error('Error killing escaped processes:', error as Error);
+      this.logger?.error('Error killing escaped processes:', error instanceof Error ? error : new Error(String(error)));
     }
   }
 

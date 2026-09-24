@@ -1,24 +1,44 @@
 import type { Page } from '@playwright/test';
+import type { PaneChatAgent } from '../shared/types/paneChat';
+import type { PanePermissionRequest, PanePermissionResponse } from '../shared/types/permissions';
+import type {
+  RemoteDaemonClientRecord,
+  RemoteDaemonConfig,
+  RemoteDaemonHostConfig,
+  RemotePaneConnectionProfile,
+  RemotePaneConnectionState,
+} from '../shared/types/remoteDaemon';
+import type { SubmitFeedbackRequest } from '../shared/types/feedback';
+import type { JsonObject, JsonValue } from '../shared/validation/boundaryDecoder';
+import { DEFAULT_APPEARANCE, LIGHT_THEMES, normalizeAppearance, type AppearanceConfig } from '../shared/types/appearance';
+import type { DiffManifest, DiffScope, FileDiffResult } from '../shared/types/gitDiff';
+
+type MockEventValue = JsonValue | object | undefined;
+type MockEventCallback = (...args: MockEventValue[]) => void;
 
 type AnalyticsMainEvent = {
   eventName: string;
-  properties?: Record<string, unknown>;
+  properties?: JsonObject;
 };
 
 type ElectronApiMockOptions = {
   analyticsConsentShown?: boolean;
-  analyticsIdentity?: Record<string, unknown>;
-  initialConfig?: Record<string, unknown>;
+  analyticsIdentity?: JsonObject;
+  initialConfig?: JsonObject;
+  initialWindowFocused?: boolean;
   initialPreferences?: Record<string, string>;
   platform?: 'darwin' | 'linux' | 'win32';
+  /** Whether main handed the title bar to the page (Window Controls Overlay). */
+  windowControlsOverlayEnabled?: boolean;
+  appearanceSnapshot?: boolean;
   availableShells?: Array<Record<string, string>>;
   configReadDelayMs?: number;
   configGetFailures?: number;
   notificationsSupported?: boolean;
   mainAnalyticsEvents?: AnalyticsMainEvent[];
-  initialProjects?: Array<Record<string, unknown>>;
-  initialSessions?: Array<Record<string, unknown>>;
-  initialPanels?: Array<Record<string, unknown>>;
+  initialProjects?: JsonObject[];
+  initialSessions?: JsonObject[];
+  initialPanels?: JsonObject[];
   initialUiState?: Partial<{
     expandedProjects: number[];
     expandedFolders: string[];
@@ -26,24 +46,66 @@ type ElectronApiMockOptions = {
     pinnedSectionExpanded: boolean;
     repositoriesSectionExpanded: boolean;
   }>;
-  initialExecutions?: Array<Record<string, unknown>>;
-  initialCombinedDiff?: Record<string, unknown> | null;
-  initialTerminalStates?: Record<string, Record<string, unknown>>;
+  initialExecutions?: JsonObject[];
+  diffManifests?: Record<string, DiffManifest>;
+  fileDiffs?: Record<string, FileDiffResult>;
+  diffManifestDelayMs?: Record<string, number>;
+  fileDiffDelayMs?: Record<string, number>;
+  diffManifestErrors?: Record<string, string>;
+  fileDiffErrors?: Record<string, string>;
+  testPerf?: boolean;
+  gitCommands?: JsonObject;
+  /** Seeded split layout for the session under test (panels:get-layout). */
+  initialLayout?: JsonObject | null;
+  initialTerminalStates?: Record<string, JsonObject>;
+  initialAgentUsage?: JsonObject;
+  initialUsageReport?: JsonObject;
+  initialLeaderboardStatus?: JsonObject;
+  initialLeaderboard?: JsonObject;
+  forcedAgentUsageError?: string;
+  detectedBranch?: string | null;
+  detectedBranchByPath?: Record<string, string | null>;
+  mainRepoSessionDelayByProjectId?: Record<number, number>;
+  mainRepoSessionErrorByProjectId?: Record<number, string>;
   activeProjectId?: number | null;
   paneChatAgentChangeDelayMs?: number;
+  feedbackOutcome?: 'success' | 'failure';
+  openExternalOutcome?: 'success' | 'failure';
 };
 
 export async function installElectronApiMock(page: Page, options: ElectronApiMockOptions = {}) {
-  await page.addInitScript((mockOptions: ElectronApiMockOptions) => {
+  type SerializedOptions = ElectronApiMockOptions & {
+    appearance: { defaults: AppearanceConfig; lightThemes: string[]; seeded: AppearanceConfig };
+  };
+  await page.addInitScript((mockOptions: SerializedOptions) => {
     if (mockOptions.notificationsSupported === false) {
       Reflect.deleteProperty(window, 'Notification');
     }
-    const success = (data: unknown = null) => Promise.resolve({ success: true, data });
+    function success(): Promise<{ success: true; data: null }>;
+    function success<Value>(data: Value): Promise<{ success: true; data: Value }>;
+    function success<Value>(data?: Value) {
+      return Promise.resolve({ success: true, data: data ?? null });
+    }
     const unsubscribe = () => undefined;
-    const listeners = new Map<string, Set<(...args: unknown[]) => void>>();
-    const pendingPermissions: Array<Record<string, unknown>> = [];
-    const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
-    const preferences: Record<string, string> = {
+    const listeners = new Map<string, Set<MockEventCallback>>();
+    const pendingPermissions: PanePermissionRequest[] = [];
+    const feedbackSubmissions: SubmitFeedbackRequest[] = [];
+    const openedExternalUrls: string[] = [];
+    const diffManifestCalls: Array<{ sessionId: string; scope: DiffScope }> = [];
+    const fileDiffCalls: Array<{ sessionId: string; scope: DiffScope; path: string }> = [];
+    const clone = <T>(value: T): T => structuredClone(value);
+    const scopeMockKey = (scope: DiffScope): string => {
+      if (scope.kind === 'commit') return `commit:${scope.hash}`;
+      if (scope.kind === 'commit-range') return `range:${scope.olderHash}:${scope.newerHash}`;
+      if (scope.kind === 'working-tree-range') return `working-range:${scope.baseHash}`;
+      return scope.kind;
+    };
+    const requestOption = <Value>(values: Record<string, Value> | undefined, sessionId: string, key: string): Value | undefined =>
+      values?.[`${sessionId}:${key}`] ?? values?.[key];
+    interface MockPreferences {
+      [key: string]: string;
+    }
+    const preferences: MockPreferences = {
       analytics_consent_shown: mockOptions.analyticsConsentShown === false ? 'false' : 'true',
       ...clone(mockOptions.initialPreferences ?? {}),
     };
@@ -59,7 +121,7 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
       previousVersion: 'test',
     };
     let nextRemoteConnectionId = 1;
-    const remoteDaemonConfig = {
+    const remoteDaemonConfig: RemoteDaemonConfig = {
       host: {
         config: {
           enabled: false,
@@ -68,52 +130,43 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
           pairingRequired: true,
           allowInsecureHttpOnLoopback: true,
         },
-        clients: [] as Array<Record<string, unknown>>,
+        clients: [],
       },
       client: {
-        profiles: [] as Array<Record<string, unknown>>,
-        activeProfileId: null as string | null,
-        mode: 'local' as 'local' | 'remote',
+        profiles: [],
+        activeProfileId: null,
+        mode: 'local',
       },
     };
-    const remoteConnectionState = {
-      mode: 'local' as 'local' | 'remote',
-      status: 'local' as 'local' | 'connecting' | 'connected' | 'reconnecting' | 'error',
-      activeProfileId: null as string | null,
-      activeProfileLabel: null as string | null,
-      activeBaseUrl: null as string | null,
-      lastError: null as string | null,
+    const remoteConnectionState: RemotePaneConnectionState = {
+      mode: 'local',
+      status: 'local',
+      activeProfileId: null,
+      activeProfileLabel: null,
+      activeBaseUrl: null,
+      lastError: null,
+      lastSeenAt: null,
     };
     const remoteHostState = {
       enabled: false,
-      status: 'inactive' as 'inactive' | 'live' | 'error',
-      listenHost: null as string | null,
-      listenPort: null as number | null,
-      lastError: null as string | null,
-      connectedClients: [] as Array<Record<string, unknown>>,
+      status: 'inactive' as const,
+      listenHost: null,
+      listenPort: null,
+      lastError: null,
+      connectedClients: [],
+      executableHealth: {
+        processImage: { status: 'unknown' as const, runtimePath: null, installedPath: null, evidence: 'Executable identity has not been checked yet.' },
+        restart: { status: 'unknown' as const, evidence: 'Remote daemon launcher readiness has not been checked yet.' },
+        checkedAt: '1970-01-01T00:00:00.000Z',
+      },
       updatedAt: '1970-01-01T00:00:00.000Z',
     };
-    const cloudState = {
-      status: 'not_provisioned' as const,
-      ip: null as string | null,
-      noVncUrl: null as string | null,
-      provider: null as 'gcp' | null,
-      serverId: null as string | null,
-      lastChecked: null as string | null,
-      error: null as string | null,
-      tunnelStatus: 'off' as const,
-      daemonStatus: 'unknown' as const,
-      daemonBaseUrl: null as string | null,
-      linkedRemoteProfileId: null as string | null,
-      linkedRemoteProfileLabel: null as string | null,
-      remoteConnectionStatus: 'unlinked' as const,
-      preferredAccess: 'daemon' as const,
-      allowNoVncFallback: true,
-    };
-    const configState: Record<string, unknown> = {
+    const configState: JsonObject = {
       remoteDaemon: clone(remoteDaemonConfig),
       defaultOrchestratorAgent: 'claude',
+      ...clone(mockOptions.appearance.defaults),
       ...clone(mockOptions.initialConfig ?? {}),
+      ...clone(mockOptions.appearance.seeded),
     };
     const paneChatSession = {
       id: '__pane_chat_session__',
@@ -133,17 +186,21 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
       archived: false,
       isHidden: true,
     };
-    const createPaneChatPanel = (agent: 'claude' | 'codex') => ({
-      id: agent === 'codex' ? '__pane_chat_terminal_codex__' : '__pane_chat_terminal__',
+    const createPaneChatPanel = (agent: PaneChatAgent) => ({
+      id: agent === 'claude' ? '__pane_chat_terminal__' : `__pane_chat_terminal_${agent}__`,
       sessionId: '__pane_chat_session__',
       type: 'terminal',
-      title: agent === 'codex' ? 'Pane Chat - Codex' : 'Pane Chat',
+      title: agent === 'claude' ? 'Pane Chat' : `Pane Chat - ${agent === 'codex' ? 'Codex' : 'Cursor'}`,
       state: {
         isActive: true,
         hasBeenViewed: false,
         customState: {
-          initialCommand: agent === 'codex' ? 'codex' : 'claude --dangerously-skip-permissions',
-          initialInput: 'Use the pane-orchestrator skill and initialize yourself as Pane Chat.',
+          initialCommand: agent === 'claude'
+            ? 'claude --dangerously-skip-permissions'
+            : agent === 'codex' ? 'codex --yolo' : 'cursor-agent --force --trust',
+          initialInput: agent === 'cursor'
+            ? 'Read /tmp/.pane/skills/pane-chat/runpane-orchestrator.md and initialize yourself as Pane Chat.'
+            : 'Use the pane-orchestrator skill and initialize yourself as Pane Chat.',
           initialInputMode: 'argument',
           initialInputSubmitStrategy: 'enter',
           agentType: agent,
@@ -154,12 +211,14 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
       metadata: {
         createdAt: new Date(0).toISOString(),
         lastActiveAt: new Date(0).toISOString(),
-        position: agent === 'codex' ? 1 : 0,
+        position: agent === 'claude' ? 0 : agent === 'codex' ? 1 : 2,
         permanent: true,
       },
     });
     const createPaneChatState = () => {
-      const agent = configState.defaultOrchestratorAgent === 'codex' ? 'codex' : 'claude';
+      const agent = configState.defaultOrchestratorAgent === 'codex' || configState.defaultOrchestratorAgent === 'cursor'
+        ? configState.defaultOrchestratorAgent
+        : 'claude';
       return {
         session: clone(paneChatSession),
         panel: clone(createPaneChatPanel(agent)),
@@ -173,29 +232,38 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
     let mockSessions = clone(mockOptions.initialSessions ?? []);
     let mockPanels = clone(mockOptions.initialPanels ?? []);
     const uiState = {
-      expandedProjects: [] as number[],
-      expandedFolders: [] as string[],
+      expandedProjects: [] satisfies number[],
+      expandedFolders: [] satisfies string[],
       sessionSortAscending: true,
       pinnedSectionExpanded: true,
       repositoriesSectionExpanded: true,
       ...clone(mockOptions.initialUiState ?? {}),
     };
     let mockActiveProjectId = mockOptions.activeProjectId === undefined
-      ? (mockProjects.find((project) => project.active === true)?.id as number | undefined) ?? null
+      ? Number(mockProjects.find((project) => project.active === true)?.id ?? null) || null
       : mockOptions.activeProjectId;
-    let cloudDisconnectError: string | null = null;
+    let lastProjectUpdate: { projectId: string; updates: JsonObject } | null = null;
     let configGetCount = 0;
     let nextConfigUpdateError: string | null = null;
     let nextPreferenceSetError: string | null = null;
+    let nextBackgroundColorWriteError: string | null = null;
     let remainingConfigGetFailures = mockOptions.configGetFailures ?? 0;
-    const configUpdates: Array<Record<string, unknown>> = [];
+    const configUpdates: JsonObject[] = [];
+    const backgroundColorWrites: Array<{ theme: string; color: string }> = [];
+    const titleBarOverlayWrites: JsonObject[] = [];
     const preferenceWrites: Array<{ key: string; value: string }> = [];
     const sessionDeleteCalls: string[] = [];
     const sessionFavoriteToggleCalls: string[] = [];
+    const invokeCalls = new Map<string, Array<{ channel: string; args: unknown[] }>>();
     let sessionsGetCount = 0;
 
-    const subscribe = (channel: string, callback: (...args: unknown[]) => void) => {
-      const callbacks = listeners.get(channel) ?? new Set<(...args: unknown[]) => void>();
+    Object.defineProperty(window, '__paneTestPerf', {
+      configurable: true,
+      value: mockOptions.testPerf === true,
+    });
+
+    const subscribe = (channel: string, callback: MockEventCallback) => {
+      const callbacks = listeners.get(channel) ?? new Set<MockEventCallback>();
       callbacks.add(callback);
       listeners.set(channel, callbacks);
       return () => {
@@ -206,7 +274,7 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
       };
     };
 
-    const emit = (channel: string, ...args: unknown[]) => {
+    const emit = (channel: string, ...args: MockEventValue[]) => {
       const callbacks = listeners.get(channel);
       if (!callbacks) {
         return;
@@ -231,11 +299,11 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
       emit('remote-daemon:host-state-changed', clone(remoteHostState));
     };
 
-    const namespace = (overrides: Record<string, unknown> = {}) =>
+    const namespace = <Overrides extends object>(overrides: Overrides) =>
       new Proxy(overrides, {
         get(target, prop: string | symbol) {
           if (prop in target) {
-            return target[prop as keyof typeof target];
+            return Object.getOwnPropertyDescriptor(target, prop)?.value;
           }
           return () => success();
         },
@@ -244,22 +312,70 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
     const events = new Proxy({}, {
       get: (_target, prop: string | symbol) => {
         if (prop === 'onPermissionRequest') {
-          return (callback: (request: unknown) => void) => subscribe('permission:request', callback);
+          return (callback: MockEventCallback) => subscribe('permission:request', callback);
         }
         if (prop === 'onPermissionResolved') {
-          return (callback: (event: unknown) => void) => subscribe('permission:resolved', callback);
+          return (callback: MockEventCallback) => subscribe('permission:resolved', callback);
         }
         if (prop === 'onRemoteDaemonResyncRequested') {
           return (callback: () => void) => subscribe('remote-daemon:resync-required', callback);
         }
         if (prop === 'onGitStatusUpdated') {
-          return (callback: (data: unknown) => void) => subscribe('git-status-updated', callback);
+          return (callback: MockEventCallback) => subscribe('git-status-updated', callback);
+        }
+        if (prop === 'onGitStatusUpdatedBatch') {
+          return (callback: MockEventCallback) => subscribe('git-status-updated-batch', callback);
+        }
+        if (prop === 'onTerminalOutput') {
+          return (callback: MockEventCallback) => subscribe('terminal-output', callback);
+        }
+        if (prop === 'onTerminalFontUpdated') {
+          return (callback: MockEventCallback) => subscribe('config:terminal-font-updated', callback);
+        }
+        if (prop === 'onNativeAppearanceUpdated') {
+          return (callback: MockEventCallback) => subscribe('window:appearance-native-updated', callback);
+        }
+        if (prop === 'onWindowFocusChanged') {
+          return (callback: MockEventCallback) => subscribe('window:focus-changed', callback);
+        }
+        if (prop === 'onSessionUpdated') {
+          return (callback: MockEventCallback) => subscribe('session:updated', callback);
+        }
+        if (prop === 'onSessionDeleted') {
+          return (callback: MockEventCallback) => subscribe('session:deleted', callback);
+        }
+        if (prop === 'onSessionCreationFailed') {
+          return (callback: MockEventCallback) => subscribe('session:creation-failed', callback);
+        }
+        if (prop === 'onPanelCreated') {
+          return (callback: MockEventCallback) => subscribe('panel:created', callback);
+        }
+        if (prop === 'onPanelUpdated') {
+          return (callback: MockEventCallback) => subscribe('panel:updated', callback);
+        }
+        if (prop === 'onPanelDeleted') {
+          return (callback: MockEventCallback) => subscribe('panel:deleted', callback);
         }
         return () => unsubscribe;
       },
     });
 
-    const invoke = (channel: string, key?: string, value?: string) => {
+    const invoke = (channel: string, ...args: unknown[]) => {
+      const calls = invokeCalls.get(channel) ?? [];
+      calls.push({ channel, args });
+      if (calls.length > 500) calls.shift();
+      invokeCalls.set(channel, calls);
+
+      const key = args[0] === undefined ? undefined : String(args[0]);
+      const value = args[1] === undefined ? undefined : String(args[1]);
+      if (channel === 'panels:get-layout') {
+        return success(clone(mockOptions.initialLayout ?? null));
+      }
+      if (channel === 'panels:shouldAutoCreate') {
+        // Fixtures seed their own panels; the app must not grow a terminal.
+        // The caller reads the bare boolean, not an IPC envelope.
+        return Promise.resolve(false);
+      }
       if (channel === 'panels:checkInitialized') {
         return Promise.resolve(Boolean(key && mockOptions.initialTerminalStates?.[key]));
       }
@@ -294,9 +410,24 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
       invoke,
       events,
       window: {
-        isFocused: () => Promise.resolve(true),
+        isFocused: () => Promise.resolve(mockOptions.initialWindowFocused !== false),
       },
       getPlatform: () => Promise.resolve(mockOptions.platform ?? 'linux'),
+      windowControlsOverlayEnabled: mockOptions.windowControlsOverlayEnabled === true,
+      appearanceSnapshot: mockOptions.appearanceSnapshot === false ? undefined : clone(mockOptions.appearance.seeded),
+      setTitleBarOverlay: (colors: JsonObject) => {
+        titleBarOverlayWrites.push(clone(colors));
+        return success();
+      },
+      setBackgroundColor: (payload: { theme: string; color: string }) => {
+        backgroundColorWrites.push(clone(payload));
+        if (nextBackgroundColorWriteError) {
+          const error = nextBackgroundColorWriteError;
+          nextBackgroundColorWriteError = null;
+          return Promise.resolve({ success: false, error });
+        }
+        return success();
+      },
       getVersionInfo: () => success({
         version: 'test',
         current: 'test',
@@ -305,11 +436,31 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
       }),
       isPackaged: () => Promise.resolve(false),
       checkForUpdates: () => success({ hasUpdate: false }),
-      openExternal: () => undefined,
+      openExternal: (url: string) => {
+        openedExternalUrls.push(url);
+        if (mockOptions.openExternalOutcome === 'failure') {
+          return Promise.resolve({ success: false, error: 'No browser is available.' });
+        }
+        // Matches preload's Promise<IPCResponse> contract; callers await this result.
+        return success();
+      },
+      feedback: namespace({
+        submit: (request: SubmitFeedbackRequest) => {
+          feedbackSubmissions.push(clone(request));
+          if (mockOptions.feedbackOutcome === 'failure') {
+            return Promise.resolve({
+              success: false,
+              error: 'GitHub CLI is not authenticated.',
+              data: { fallbackUrl: 'https://github.com/greenfield-inc/Pane/issues/new?title=Prefilled' },
+            });
+          }
+          return success({ issueUrl: 'https://github.com/greenfield-inc/Pane/issues/9001' });
+        },
+      }),
       analytics: namespace({
         getIdentity: () => success(clone(mockOptions.analyticsIdentity ?? defaultAnalyticsIdentity)),
-        onMainEvent: (callback: (event: AnalyticsMainEvent) => void) => {
-          const remove = subscribe('analytics:main-event', callback as (...args: unknown[]) => void);
+        onMainEvent: (callback: MockEventCallback) => {
+          const remove = subscribe('analytics:main-event', callback);
           for (const event of mockOptions.mainAnalyticsEvents ?? []) {
             callback(clone(event));
           }
@@ -318,57 +469,118 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
         syncDistinctId: () => undefined,
         redeemAttribution: () => success(undefined),
       }),
-      cloud: namespace({
-        getState: () => success(clone(cloudState)),
-        onStateChanged: (callback: (state: unknown) => void) => subscribe('cloud:state-changed', callback),
-        connectWorkspace: () => {
-          if (!cloudState.linkedRemoteProfileId) {
-            return Promise.resolve({ success: false, error: 'Hosted cloud workspace does not have a linked remote profile' });
+      agentUsage: namespace({
+        get: async (force = false) => {
+          if (force && mockOptions.forcedAgentUsageError) {
+            return { success: false, error: mockOptions.forcedAgentUsageError };
           }
-          const profile = remoteDaemonConfig.client.profiles.find(
-            (candidate) => candidate.id === cloudState.linkedRemoteProfileId,
-          );
-          if (!profile) {
-            return Promise.resolve({ success: false, error: `Hosted cloud workspace linked profile "${cloudState.linkedRemoteProfileId}" does not exist` });
-          }
-          remoteDaemonConfig.client.activeProfileId = profile.id;
-          remoteDaemonConfig.client.mode = 'remote';
-          syncRemoteDaemonConfig();
-          cloudState.linkedRemoteProfileLabel = String(profile.label);
-          cloudState.remoteConnectionStatus = 'connected';
-          setRemoteConnectionState({
-            mode: 'remote',
-            status: 'connected',
-            activeProfileId: String(profile.id),
-            activeProfileLabel: String(profile.label),
-            activeBaseUrl: String(profile.baseUrl),
-            lastError: null,
-          });
-          emit('cloud:state-changed', clone(cloudState));
-          return success(clone(cloudState));
+          return success(clone(mockOptions.initialAgentUsage
+            ?? {
+            providers: [{
+              id: 'codex',
+              name: 'Codex',
+              status: 'unavailable',
+              plan: null,
+              limits: [],
+              fetchedAt: new Date(0).toISOString(),
+              error: 'Codex usage is unavailable in this test',
+            }],
+            fetchedAt: new Date(0).toISOString(),
+          }));
         },
-        disconnectWorkspace: () => {
-          if (cloudDisconnectError) {
-            return Promise.resolve({ success: false, error: cloudDisconnectError });
-          }
-
-          remoteDaemonConfig.client.activeProfileId = null;
-          remoteDaemonConfig.client.mode = 'local';
-          syncRemoteDaemonConfig();
-          cloudState.remoteConnectionStatus = cloudState.linkedRemoteProfileId ? 'available' : 'unlinked';
-          setRemoteConnectionState({
-            mode: 'local',
-            status: 'local',
-            activeProfileId: null,
-            activeProfileLabel: null,
-            activeBaseUrl: null,
+      }),
+      export: namespace({
+        saveImage: () => success(null),
+        shareImage: () => success({ method: 'clipboard' }),
+      }),
+      usage: namespace({
+        getReport: () => success(clone(mockOptions.initialUsageReport ?? {
+          totals: {
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheCreationTokens: 0,
+            totalTokens: 0,
+            messageCount: 0,
+            estimatedCostUsd: 0,
+            costIncomplete: false,
+            cacheSavingsUsd: 0,
+          },
+          series: [],
+          byModel: [],
+          byProject: [],
+          byPane: {
+            panes: [],
+            unattributed: {
+              inputTokens: 0,
+              outputTokens: 0,
+              cacheReadTokens: 0,
+              cacheCreationTokens: 0,
+              totalTokens: 0,
+              messageCount: 0,
+              estimatedCostUsd: 0,
+              costIncomplete: false,
+              cacheSavingsUsd: 0,
+              uncachedCostUsd: 0,
+              uncachedInputTokens: 0,
+              cacheHitRate: 0,
+              byModel: [],
+            },
+          },
+          rateLimits: [],
+          index: {
+            lastScanStartedMs: null,
+            lastScanFinishedMs: null,
+            filesTracked: 0,
+            eventsIndexed: 0,
+            missingRoots: [],
+            scanning: false,
+            filesScanned: 0,
+            filesTotal: 0,
             lastError: null,
-          });
-          emit('cloud:state-changed', clone(cloudState));
-          return success(clone(cloudState));
-        },
-        startPolling: () => success(),
-        stopPolling: () => success(),
+          },
+          pricingAsOf: '2026-08-10',
+        })),
+        getStatus: () => success({
+          lastScanStartedMs: null,
+          lastScanFinishedMs: null,
+          filesTracked: 0,
+          eventsIndexed: 0,
+          missingRoots: [],
+          scanning: false,
+          filesScanned: 0,
+          filesTotal: 0,
+          lastError: null,
+        }),
+        rescan: () => success({
+          lastScanStartedMs: null,
+          lastScanFinishedMs: null,
+          filesTracked: 0,
+          eventsIndexed: 0,
+          missingRoots: [],
+          scanning: false,
+          filesScanned: 0,
+          filesTotal: 0,
+          lastError: null,
+        }),
+      }),
+      leaderboard: namespace({
+        getStatus: () => success(clone(mockOptions.initialLeaderboardStatus ?? {
+          optIn: false,
+          lastRank: null,
+          lastDisplayName: null,
+          lastSubmittedAtMs: null,
+          doNotTrack: false,
+        })),
+        join: () => success({ rank: 1, displayName: '@testuser', verified: true, total: 1, installs: 1 }),
+        leave: () => success(undefined),
+        sendNow: () => success({ rank: 1, displayName: '@testuser', verified: true, total: 1, installs: 1 }),
+        fetch: () => success(clone(mockOptions.initialLeaderboard ?? {
+          windowDays: 30,
+          total: 0,
+          entries: [],
+          generatedAtMs: Date.now(),
+        })),
       }),
       config: namespace({
         get: async () => {
@@ -382,15 +594,28 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
           }
           return success(clone(configState));
         },
-        update: (updates: Record<string, unknown>) => {
+        update: (updates: JsonObject) => {
           if (nextConfigUpdateError) {
             const error = nextConfigUpdateError;
             nextConfigUpdateError = null;
             return Promise.resolve({ success: false, error });
           }
+          if ('systemLightTheme' in updates && !mockOptions.appearance.lightThemes.includes(String(updates.systemLightTheme))) {
+            return Promise.resolve({ success: false, error: 'systemLightTheme must be a light palette' });
+          }
+          if ('systemDarkTheme' in updates && mockOptions.appearance.lightThemes.includes(String(updates.systemDarkTheme))) {
+            return Promise.resolve({ success: false, error: 'systemDarkTheme must be a dark palette' });
+          }
           Object.assign(configState, updates);
           configUpdates.push(clone(updates));
-          return success(clone(configState));
+          const response = success(clone(configState));
+          if ('terminalFontFamily' in updates || 'terminalFontSize' in updates) {
+            queueMicrotask(() => emit('config:terminal-font-updated', {
+              terminalFontFamily: configState.terminalFontFamily,
+              terminalFontSize: configState.terminalFontSize,
+            }));
+          }
+          return response;
         },
         getAvailableShells: () => success(clone(mockOptions.availableShells ?? [])),
         getMonospaceFonts: () => success([]),
@@ -398,6 +623,12 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
       }),
       folders: namespace({
         getByProject: () => success([]),
+      }),
+      git: namespace({
+        detectBranch: () => success('main'),
+      }),
+      dialog: namespace({
+        openDirectory: () => success('/tmp/pane-worktrees'),
       }),
       onboarding: namespace({
         detectEnvironment: () => success({}),
@@ -407,18 +638,18 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
         writeGitHubAuthTerminal: () => success(),
         resizeGitHubAuthTerminal: () => success(),
         killGitHubAuthTerminal: () => success(),
-        onGitHubAuthTerminalOutput: (callback: (...args: unknown[]) => void) => subscribe('onboarding:github-auth-pty-output', callback),
-        onGitHubAuthTerminalExit: (callback: (...args: unknown[]) => void) => subscribe('onboarding:github-auth-pty-exit', callback),
+        onGitHubAuthTerminalOutput: (callback: MockEventCallback) => subscribe('onboarding:github-auth-pty-output', callback),
+        onGitHubAuthTerminalExit: (callback: MockEventCallback) => subscribe('onboarding:github-auth-pty-exit', callback),
         setupDefaultRepo: () => success({}),
         supportProject: () => success({}),
       }),
       paneChat: namespace({
         getOrCreate: () => success(createPaneChatState()),
-        setAgent: async (agent: 'claude' | 'codex') => {
+        setAgent: async (agent: 'claude' | 'codex' | 'cursor') => {
           if (mockOptions.paneChatAgentChangeDelayMs) {
             await new Promise((resolve) => setTimeout(resolve, mockOptions.paneChatAgentChangeDelayMs));
           }
-          configState.defaultOrchestratorAgent = agent === 'codex' ? 'codex' : 'claude';
+          configState.defaultOrchestratorAgent = agent === 'codex' || agent === 'cursor' ? agent : 'claude';
           return success(createPaneChatState());
         },
       }),
@@ -426,11 +657,24 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
         getSessionPanels: (sessionId: string) => success(
           clone(mockPanels.filter((panel) => panel.sessionId === sessionId)),
         ),
+        createPanel: (sessionId: string, type: string, title: string, initialState?: JsonObject) => {
+          const now = new Date().toISOString();
+          const panel = {
+            id: `mock-panel-${mockPanels.length + 1}`,
+            sessionId,
+            type,
+            title,
+            state: { isActive: false, customState: initialState?.customState ?? initialState ?? {} },
+            metadata: { createdAt: now, lastActiveAt: now, position: mockPanels.length },
+          };
+          mockPanels.push(panel);
+          return success(clone(panel));
+        },
         shouldAutoCreate: () => success(false),
       }),
       permissions: namespace({
         getPending: () => success([...pendingPermissions]),
-        respond: (requestId: string, response: Record<string, unknown>) => {
+        respond: (requestId: string, response: PanePermissionResponse) => {
           const index = pendingPermissions.findIndex((request) => request.id === requestId);
           if (index >= 0) {
             const [request] = pendingPermissions.splice(index, 1);
@@ -453,11 +697,26 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
           mockActiveProjectId = Number(projectId);
           return success();
         },
-        detectBranch: () => success('main'),
+        detectBranch: (path: string) => success(
+          mockOptions.detectedBranchByPath
+            && Object.prototype.hasOwnProperty.call(mockOptions.detectedBranchByPath, path)
+            ? mockOptions.detectedBranchByPath[path]
+            : (mockOptions.detectedBranch === undefined ? 'main' : mockOptions.detectedBranch),
+        ),
         listBranches: () => success([
           { name: 'origin/main', isCurrent: false, hasWorktree: false, isRemote: true },
           { name: 'main', isCurrent: true, hasWorktree: false, isRemote: false },
         ]),
+        update: (projectId: string, updates: JsonObject) => {
+          lastProjectUpdate = { projectId, updates: clone(updates) };
+          mockProjects = mockProjects.map((project) => (
+            String(project.id) === projectId
+              ? { ...project, ...clone(updates), updated_at: new Date().toISOString() }
+              : project
+          ));
+          return success(mockProjects.find((project) => String(project.id) === projectId) ?? null);
+        },
+        detectConfig: () => success(null),
         refreshGitStatus: () => success(),
       }),
       prompts: namespace({
@@ -465,7 +724,6 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
       }),
       ptyHost: namespace({
         ack: () => Promise.resolve(),
-        onData: subscribe,
         onExit: subscribe,
       }),
       resourceMonitor: namespace({
@@ -474,6 +732,15 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
         stopActive: () => success(),
       }),
       sessions: namespace({
+        getOrCreateMainRepoSession: async (projectId: number) => {
+          const delayMs = mockOptions.mainRepoSessionDelayByProjectId?.[projectId] ?? 0;
+          if (delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs));
+          const error = mockOptions.mainRepoSessionErrorByProjectId?.[projectId];
+          if (error) throw new Error(error);
+          return success(clone(
+            mockSessions.find((session) => session.projectId === projectId && session.isMainRepo === true) ?? null,
+          ));
+        },
         delete: (sessionId: string) => {
           sessionDeleteCalls.push(sessionId);
           return success();
@@ -492,7 +759,36 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
         getArchivedWithProjects: () => success([]),
         getResumable: () => success([]),
         getExecutions: () => success(clone(mockOptions.initialExecutions ?? [])),
-        getCombinedDiff: () => success(clone(mockOptions.initialCombinedDiff ?? null)),
+        getGitCommands: () => success(clone(mockOptions.gitCommands ?? null)),
+        getDiffManifest: async (sessionId: string, scope: DiffScope) => {
+          const key = scopeMockKey(scope);
+          diffManifestCalls.push({ sessionId, scope: clone(scope) });
+          const delay = requestOption(mockOptions.diffManifestDelayMs, sessionId, key) ?? 0;
+          if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
+          if (mockOptions.testPerf === true) performance.mark('pane-diff-manifest-received');
+          const failure = requestOption(mockOptions.diffManifestErrors, sessionId, key);
+          if (failure) return { success: false as const, error: failure };
+          const explicit = requestOption(mockOptions.diffManifests, sessionId, key);
+          if (explicit) return success(clone(explicit));
+          return success({
+            scope,
+            files: [],
+            resolvedBase: { kind: 'comparison-base' as const, ref: 'main', hash: '1111111111111111111111111111111111111111' },
+            resolvedTarget: { kind: 'working-tree' as const },
+            stats: { additions: 0, deletions: 0, filesChanged: 0 },
+          });
+        },
+        getFileDiff: async (sessionId: string, scope: DiffScope, request: { path: string }) => {
+          const key = `${scopeMockKey(scope)}:${request.path}`;
+          fileDiffCalls.push({ sessionId, scope: clone(scope), path: request.path });
+          const delay = requestOption(mockOptions.fileDiffDelayMs, sessionId, key) ?? 0;
+          if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
+          const failure = requestOption(mockOptions.fileDiffErrors, sessionId, key);
+          if (failure) return { success: false as const, error: failure };
+          const explicit = requestOption(mockOptions.fileDiffs, sessionId, key);
+          if (explicit) return success(clone(explicit));
+          return success({ file: { path: request.path, kind: 'modified' as const, additions: null, deletions: null, isBinary: false }, patch: '', status: 'no-longer-changed' as const });
+        },
       }),
       remoteDaemon: namespace({
         getConfig: () => success(clone(remoteDaemonConfig)),
@@ -582,7 +878,7 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
           syncRemoteDaemonConfig();
           return success({ client, profile, token });
         },
-        updateHostConfig: (updates: Record<string, unknown>) => {
+        updateHostConfig: (updates: Partial<RemoteDaemonHostConfig>) => {
           remoteDaemonConfig.host.config = {
             ...remoteDaemonConfig.host.config,
             ...updates,
@@ -598,7 +894,7 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
           });
           return success(clone(remoteDaemonConfig.host.config));
         },
-        upsertClientRecord: (record: Record<string, unknown>) => {
+        upsertClientRecord: (record: RemoteDaemonClientRecord) => {
           const existingIndex = remoteDaemonConfig.host.clients.findIndex((client) => client.id === record.id);
           if (existingIndex >= 0) {
             remoteDaemonConfig.host.clients[existingIndex] = record;
@@ -613,7 +909,7 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
           syncRemoteDaemonConfig();
           return success(clone(remoteDaemonConfig.host.clients));
         },
-        upsertConnectionProfile: (profile: Record<string, unknown>) => {
+        upsertConnectionProfile: (profile: RemotePaneConnectionProfile) => {
           const existingIndex = remoteDaemonConfig.client.profiles.findIndex((existing) => existing.id === profile.id);
           if (existingIndex >= 0) {
             remoteDaemonConfig.client.profiles[existingIndex] = profile;
@@ -674,9 +970,9 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
           syncRemoteDaemonConfig();
           return success(clone(remoteDaemonConfig.client));
         },
-        onConnectionStateChanged: (callback: (state: unknown) => void) =>
+        onConnectionStateChanged: (callback: MockEventCallback) =>
           subscribe('remote-daemon:connection-state-changed', callback),
-        onHostStateChanged: (callback: (state: unknown) => void) =>
+        onHostStateChanged: (callback: MockEventCallback) =>
           subscribe('remote-daemon:host-state-changed', callback),
       }),
       uiState: namespace({
@@ -708,7 +1004,7 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
       configurable: true,
       value: {
         invoke,
-        on: (channel: string, callback: (...args: unknown[]) => void) => {
+        on: (channel: string, callback: MockEventCallback) => {
           subscribe(channel, callback);
         },
         off: () => undefined,
@@ -727,6 +1023,36 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
         getConfigUpdates() {
           return clone(configUpdates);
         },
+        getBackgroundColorWrites() {
+          return clone(backgroundColorWrites);
+        },
+        getTitleBarOverlayWrites() {
+          return clone(titleBarOverlayWrites);
+        },
+        getInvokeCalls(channel: string) {
+          return clone(invokeCalls.get(channel) ?? []);
+        },
+        getConsoleLogCalls() {
+          return clone((invokeCalls.get('console:log') ?? []).map((call) => call.args[0]));
+        },
+        emitNativeAppearanceUpdated(prefersDark: boolean) {
+          emit('window:appearance-native-updated', { prefersDark });
+        },
+        emitWindowFocusChanged(focused: boolean) {
+          emit('window:focus-changed', focused);
+        },
+        emitSessionCreationFailed(name: string, error: string) {
+          emit('session:creation-failed', { name, error });
+        },
+        getListenerCount(channel: string) {
+          return listeners.get(channel)?.size ?? 0;
+        },
+        getFeedbackSubmissions() {
+          return clone(feedbackSubmissions);
+        },
+        getOpenedExternalUrls() {
+          return clone(openedExternalUrls);
+        },
         getPreferenceWrites() {
           return clone(preferenceWrites);
         },
@@ -736,19 +1062,15 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
         failNextPreferenceSet(error: string) {
           nextPreferenceSetError = error;
         },
+        failNextBackgroundColorWrite(error: string) {
+          nextBackgroundColorWriteError = error;
+        },
         setConfigGetFailures(count: number) {
           remainingConfigGetFailures = count;
         },
-        emitPermissionRequest(request: Record<string, unknown>) {
+        emitPermissionRequest(request: PanePermissionRequest) {
           pendingPermissions.push(request);
           emit('permission:request', request);
-        },
-        setCloudState(updates: Record<string, unknown>) {
-          Object.assign(cloudState, updates);
-          emit('cloud:state-changed', clone(cloudState));
-        },
-        setCloudDisconnectError(error: string | null) {
-          cloudDisconnectError = error;
         },
         emitRemoteDaemonResyncRequested() {
           emit('remote-daemon:resync-required');
@@ -756,18 +1078,42 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
         getConfigReadCount() {
           return configGetCount;
         },
-        setSessions(sessions: Array<Record<string, unknown>>) {
+        setSessions(sessions: JsonObject[]) {
           mockSessions = clone(sessions);
         },
-        setProjects(projects: Array<Record<string, unknown>>, activeProjectId: number | null = null) {
+        setProjects(projects: JsonObject[], activeProjectId: number | null = null) {
           mockProjects = clone(projects);
           mockActiveProjectId = activeProjectId;
         },
-        setPanels(panels: Array<Record<string, unknown>>) {
+        setPanels(panels: JsonObject[]) {
           mockPanels = clone(panels);
         },
-        emitGitStatusUpdated(sessionId: string, gitStatus: Record<string, unknown>) {
+        emitPanelCreated(panel: JsonObject) {
+          if (!mockPanels.some(existing => existing.id === panel.id)) {
+            mockPanels.push(clone(panel));
+          }
+          emit('panel:created', clone(panel));
+        },
+        emitGitStatusUpdated(sessionId: string, gitStatus: JsonObject) {
           emit('git-status-updated', { sessionId, gitStatus: clone(gitStatus) });
+        },
+        emitGitStatusUpdatedBatch(updates: Array<{ sessionId: string; status: JsonObject }>) {
+          emit('git-status-updated-batch', clone(updates));
+        },
+        emitTerminalOutput(sessionId: string, data: string) {
+          emit('terminal-output', { sessionId, type: 'stdout', data });
+        },
+        emitSessionUpdated(session: JsonObject) {
+          emit('session:updated', clone(session));
+        },
+        emitSessionDeleted(sessionId: string) {
+          emit('session:deleted', { id: sessionId });
+        },
+        emitPanelUpdated(panel: JsonObject) {
+          emit('panel:updated', clone(panel));
+        },
+        emitPanelDeleted(panelId: string, sessionId: string) {
+          emit('panel:deleted', { panelId, sessionId });
         },
         getSessionsReadCount() {
           return sessionsGetCount;
@@ -778,7 +1124,23 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
         getSessionFavoriteToggleCalls() {
           return clone(sessionFavoriteToggleCalls);
         },
+        getDiffManifestCalls() {
+          return clone(diffManifestCalls);
+        },
+        getFileDiffCalls() {
+          return clone(fileDiffCalls);
+        },
+        getProjectUpdates() {
+          return lastProjectUpdate ? [clone(lastProjectUpdate)] : [];
+        },
       },
     });
-  }, options);
+  }, {
+    ...options,
+    appearance: {
+      defaults: DEFAULT_APPEARANCE,
+      lightThemes: [...LIGHT_THEMES],
+      seeded: normalizeAppearance(options.initialConfig ?? {}).appearance,
+    },
+  });
 }

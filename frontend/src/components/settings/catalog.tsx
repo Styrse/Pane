@@ -3,6 +3,7 @@ import {
   Bell,
   Bot,
   BrainCircuit,
+  Gauge,
   GitBranch,
   Keyboard,
   Link2,
@@ -28,17 +29,17 @@ export const SETTINGS_CATEGORIES: readonly SettingsCategoryDefinition[] = [
   {
     id: 'general',
     label: 'General',
-    description: 'Startup and application updates.',
+    description: 'Startup, application updates, and feedback.',
     icon: Settings,
-    settingIds: ['automatic-updates', 'check-updates-now', 'start-on-login', 'keep-awake'],
-    aliases: ['startup', 'updates', 'login', 'sleep', 'caffeinate', 'awake', 'power'],
+    settingIds: ['automatic-updates', 'check-updates-now', 'send-feedback', 'start-on-login', 'keep-awake'],
+    aliases: ['startup', 'updates', 'feedback', 'bug report', 'feature request', 'github issue', 'login', 'sleep', 'caffeinate', 'awake', 'power'],
   },
   {
     id: 'appearance',
     label: 'Appearance',
     description: 'Theme, scale, and sidebar presentation.',
     icon: Monitor,
-    settingIds: ['theme', 'high-contrast', 'ui-scale', 'sidebar-pane-rows'],
+    settingIds: ['appearance-mode', 'theme', 'system-light-theme', 'system-dark-theme', 'high-contrast', 'ui-scale', 'sidebar-pane-rows'],
     aliases: ['theme', 'display', 'sidebar', 'zoom', 'contrast', 'accessibility'],
   },
   {
@@ -55,7 +56,15 @@ export const SETTINGS_CATEGORIES: readonly SettingsCategoryDefinition[] = [
     description: 'Agent defaults, context, and CLI installations.',
     icon: Bot,
     settingIds: ['default-pane-chat-agent', 'agent-context', 'claude-executable'],
-    aliases: ['claude', 'codex', 'pane chat', 'agents.md'],
+    aliases: ['claude', 'codex', 'cursor', 'pane chat', 'agents.md'],
+  },
+  {
+    id: 'usage',
+    label: 'Usage',
+    description: 'Subscription usage and rate limits for detected agent logins.',
+    icon: Gauge,
+    settingIds: [],
+    aliases: ['codex', 'usage', 'limits', 'quota', 'plan', 'rate limit'],
   },
   {
     id: 'worktrees-git',
@@ -76,10 +85,10 @@ export const SETTINGS_CATEGORIES: readonly SettingsCategoryDefinition[] = [
   {
     id: 'remote-access',
     label: 'Remote Access',
-    description: 'Remote Pane hosts, saved connections, and cloud workspaces.',
+    description: 'Remote Pane hosts and saved connections.',
     icon: Link2,
-    settingIds: ['remote-pane', 'remote-host-setup', 'remote-connections', 'remote-advanced-host', 'cloud-workspace'],
-    aliases: ['remote pane', 'daemon', 'tailscale', 'cloud vm', 'host'],
+    settingIds: ['remote-pane', 'remote-host-setup', 'remote-connections', 'remote-advanced-host'],
+    aliases: ['remote pane', 'daemon', 'tailscale', 'cloud vm', 'vm', 'host'],
   },
   {
     id: 'integrations',
@@ -94,8 +103,8 @@ export const SETTINGS_CATEGORIES: readonly SettingsCategoryDefinition[] = [
     label: 'Shortcuts',
     description: 'Application and terminal snippet hotkeys.',
     icon: Keyboard,
-    settingIds: ['keyboard-shortcuts', 'command-palette-shortcut', 'terminal-shortcuts'],
-    aliases: ['hotkeys', 'keyboard', 'snippets'],
+    settingIds: ['keyboard-shortcuts', 'command-palette-shortcut', 'kitty-keyboard', 'terminal-shortcuts'],
+    aliases: ['hotkeys', 'keyboard', 'snippets', 'kitty', 'key reporting'],
   },
   {
     id: 'privacy',
@@ -115,9 +124,9 @@ export const SETTINGS_CATEGORIES: readonly SettingsCategoryDefinition[] = [
   },
 ] as const;
 
-export const SETTINGS_CATEGORY_BY_ID = Object.fromEntries(
-  SETTINGS_CATEGORIES.map((category) => [category.id, category]),
-) as Record<SettingsCategoryId, SettingsCategoryDefinition>;
+/** The catalog without the detection-gated Usage tab (shown only when a Codex login is detected). */
+export const SETTINGS_CATEGORIES_WITHOUT_USAGE: readonly SettingsCategoryDefinition[] =
+  SETTINGS_CATEGORIES.filter((category) => category.id !== 'usage');
 
 export function settingDomId(settingId: SettingsSettingId): string {
   return `settings-${settingId}`;

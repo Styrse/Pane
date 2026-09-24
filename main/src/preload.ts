@@ -1,4 +1,9 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import { isDaemonOwnedChannel } from '../../shared/types/daemon';
+import {
+  WINDOW_CONTROLS_OVERLAY_ARG,
+  type WindowControlsOverlayColors,
+} from './utils/windowControlsOverlay';
 import type { CreateSessionRequest, Session } from './types/session';
 import type { AppConfig, UpdateConfigRequest } from './types/config';
 import type { CreateProjectRequest, UpdateProjectRequest, Project } from '../../frontend/src/types/project';
@@ -18,7 +23,27 @@ import type {
   RemotePaneConnectionProfile,
 } from '../../shared/types/remoteDaemon';
 import type { ToolPanel } from '../../shared/types/panels';
+import type { DiffScope, FileDiffRequest } from '../../shared/types/gitDiff';
 import type { PanelAgentStatusEvent } from '../../shared/types/agentStatus';
+import type {
+  OrchestrationAssociationInput,
+  OrchestrationSessionCreateInput,
+  OrchestrationSessionSelector,
+  OrchestrationSessionUpdateInput,
+} from '../../shared/types/orchestrationSession';
+import type { AgentUsageSnapshot } from '../../shared/types/agentUsage';
+import type { ResourceSnapshot } from '../../shared/types/resourceMonitor';
+import type { SubmitFeedbackRequest } from '../../shared/types/feedback';
+import type { RunpanePaneFocusRequestedEvent } from '../../shared/types/runpaneOrchestration';
+import type {
+  PanePermissionRequest as PermissionRequest,
+  PanePermissionResponse as PermissionResponse,
+  PanePermissionResolvedEvent as PermissionResolvedEvent,
+} from '../../shared/types/permissions';
+// The main build bundles this runtime dependency into preload.js; the sandbox
+// verification step rejects any remaining require other than Electron itself.
+import { boundary, decodeBoundary, type JsonObject } from '../../shared/validation/boundaryDecoder';
+import { decodeAppearanceSnapshotArg, type Theme } from '../../shared/types/appearance';
 
 interface LogEntry {
   timestamp: string;
@@ -30,11 +55,11 @@ interface LogEntry {
 // Buffer analytics events that arrive before the renderer registers its callback.
 // This prevents race conditions where main-process events (e.g. app_opened) are
 // sent before the React useEffect listener is attached.
-type AnalyticsEvent = { eventName: string; properties: Record<string, unknown> };
+type AnalyticsEvent = { eventName: string; properties: JsonObject };
 const analyticsEventBuffer: AnalyticsEvent[] = [];
 let analyticsForwardCallback: ((event: AnalyticsEvent) => void) | null = null;
 
-ipcRenderer.on('analytics:main-event', (_event: unknown, data: AnalyticsEvent) => {
+ipcRenderer.on('analytics:main-event', (_event: Electron.IpcRendererEvent, data: AnalyticsEvent) => {
   if (analyticsForwardCallback) {
     analyticsForwardCallback(data);
   } else {
@@ -77,6 +102,8 @@ interface SessionOutputData {
   panelId?: string;
 }
 
+type TerminalOutputEvent = import('../../shared/types/panels').TerminalOutputEvent;
+
 interface Folder {
   id: string;
   name: string;
@@ -96,25 +123,6 @@ interface VersionInfo {
   releaseNotes?: string;
 }
 
-interface PermissionRequest {
-  id: string;
-  sessionId: string;
-  toolName: string;
-  input: Record<string, unknown>;
-  timestamp: number;
-}
-
-interface PermissionResponse {
-  behavior: 'allow' | 'deny';
-  updatedInput?: Record<string, unknown>;
-  message?: string;
-}
-
-interface PermissionResolvedEvent {
-  request: PermissionRequest;
-  response: PermissionResponse;
-}
-
 interface UpdaterInfo {
   version: string;
   releaseDate?: string;
@@ -124,76 +132,10 @@ interface UpdaterInfo {
   size?: number;
 }
 
-const DAEMON_OWNED_CHANNEL_PREFIXES = [
-  'folders:',
-  'logs:',
-  'pane-chat:',
-  'panels:',
-  'projects:',
-  'prompts:',
-  'resource-monitor:',
-  'runpane:',
-  'sessions:',
-  'terminal:',
-  'voice:',
-] as const;
-
-const DAEMON_OWNED_EXACT_CHANNELS = [
-  'git:cancel-status-for-project',
-  'git:clone-repo',
-  'git:commit',
-  'git:execute-project',
-  'git:file-status',
-  'git:get-github-remote',
-  'remote:pwa-affordances',
-  'git:restore',
-  'git:revert',
-  'permission:getPending',
-  'permission:respond',
-  'file:copy',
-  'file:delete',
-  'file:duplicate',
-  'file:exists',
-  'file:getPath',
-  'file:list',
-  'file:move',
-  'file:read',
-  'file:read-binary',
-  'file:read-project',
-  'file:readAtRevision',
-  'file:rename',
-  'file:resolveAbsolutePath',
-  'file:search',
-  'file:write',
-  'file:write-binary',
-  'file:write-project',
-] as const;
-
-const ELECTRON_ADAPTER_ONLY_CHANNELS = new Set<string>([
-  'file:showInFolder',
-  'sessions:open-ide',
-  'sessions:set-active-session',
-  'terminal:clipboard-paste-image',
-]);
-
-// Sandboxed Electron preload scripts cannot reliably require local runtime
-// modules, so the daemon-owned channel classifier stays inline here.
-function isDaemonOwnedChannel(channel: string): boolean {
-  if (ELECTRON_ADAPTER_ONLY_CHANNELS.has(channel)) {
-    return false;
-  }
-
-  if (DAEMON_OWNED_EXACT_CHANNELS.includes(channel as (typeof DAEMON_OWNED_EXACT_CHANNELS)[number])) {
-    return true;
-  }
-
-  return DAEMON_OWNED_CHANNEL_PREFIXES.some((prefix) => channel.startsWith(prefix));
-}
-
 // Increase max listeners for ipcRenderer to prevent warnings when many components listen to events
 ipcRenderer.setMaxListeners(50);
 
-// ptyHost data port wiring.
+// ptyHost renderer port wiring.
 //
 // Main posts `webContents.postMessage('ptyHost-port', null, [rendererPort])`
 // after `did-finish-load`. The renderer end is a DOM-style `MessagePort` —
@@ -201,32 +143,19 @@ ipcRenderer.setMaxListeners(50);
 // directly, so we keep it in this preload-scoped closure and expose a typed
 // function surface on `window.electronAPI.ptyHost` below.
 //
-// Chunk C: ptyHost does not yet tee bytes to this port; the RPC path on the
-// main side continues to deliver bytes via the existing `terminal:output`
-// channel. Subscribers are still wired so Chunk D can flip the byte path over
-// without further preload changes.
-type PtyHostDataFrame = { type: 'data'; ptyId: string; data: string };
-type PtyHostExitFrame = {
-  type: 'exit';
-  ptyId: string;
-  exitCode: number | null;
-  signal: number | null;
-};
-type PtyHostInboundFrame = PtyHostDataFrame | PtyHostExitFrame;
+// Terminal bytes do not use this port: they reach the renderer once, over the
+// `terminal:output` channel, for ptyHost and legacy PTYs alike.
+const ptyHostInboundSchema = boundary.object({
+  type: boundary.literal('exit'),
+  ptyId: boundary.string,
+  exitCode: boundary.nullable(boundary.number),
+  signal: boundary.nullable(boundary.number),
+});
 
-type PtyDataCallback = (data: string) => void;
 type PtyExitCallback = (exitCode: number | null, signal: number | null) => void;
 
 let ptyHostPort: MessagePort | null = null;
-const ptyDataSubscribers = new Map<string, Set<PtyDataCallback>>();
 const ptyExitSubscribers = new Map<string, Set<PtyExitCallback>>();
-
-function isPtyHostInboundFrame(frame: unknown): frame is PtyHostInboundFrame {
-  if (typeof frame !== 'object' || frame === null) return false;
-  const f = frame as { type?: unknown; ptyId?: unknown };
-  if (typeof f.ptyId !== 'string') return false;
-  return f.type === 'data' || f.type === 'exit';
-}
 
 ipcRenderer.on('ptyHost-port', (event) => {
   const [port] = event.ports;
@@ -237,35 +166,21 @@ ipcRenderer.on('ptyHost-port', (event) => {
   // Renderer-world MessagePort is DOM-style: use .start() + .onmessage.
   port.start();
   port.onmessage = (e: MessageEvent) => {
-    const frame = e.data as unknown;
-    if (!isPtyHostInboundFrame(frame)) {
+    let frame;
+    try {
+      frame = decodeBoundary(e.data, ptyHostInboundSchema);
+    } catch {
       return;
     }
-    if (frame.type === 'data') {
-      const subs = ptyDataSubscribers.get(frame.ptyId);
-      if (subs) {
-        for (const cb of subs) {
-          try {
-            cb(frame.data);
-          } catch (err) {
-            console.error('[ptyHost] data subscriber threw', err);
-          }
+    const subs = ptyExitSubscribers.get(frame.ptyId);
+    if (subs) {
+      for (const cb of subs) {
+        try {
+          cb(frame.exitCode, frame.signal);
+        } catch (err) {
+          console.error('[ptyHost] exit subscriber threw', err);
         }
       }
-      return;
-    }
-    if (frame.type === 'exit') {
-      const subs = ptyExitSubscribers.get(frame.ptyId);
-      if (subs) {
-        for (const cb of subs) {
-          try {
-            cb(frame.exitCode, frame.signal);
-          } catch (err) {
-            console.error('[ptyHost] exit subscriber threw', err);
-          }
-        }
-      }
-      return;
     }
   };
   ptyHostPort = port;
@@ -317,7 +232,7 @@ try {
     }
   });
 
-  ipcRenderer.on('resource-monitor:update', (_event: Electron.IpcRendererEvent, data: unknown) => {
+  ipcRenderer.on('resource-monitor:update', (_event: Electron.IpcRendererEvent, data: ResourceSnapshot) => {
     try {
       window.dispatchEvent(new CustomEvent('resource-monitor:update', { detail: data }));
     } catch (e) {
@@ -345,14 +260,14 @@ try {
       console.error('Failed to dispatch synthetic-keydown to window:', e);
     }
   });
-  ipcRenderer.on('browser-panel:popup-requested', (_event: unknown, data: { url: string; sourceSessionId: string; sourcePanelId: string }) => {
+  ipcRenderer.on('browser-panel:popup-requested', (_event: Electron.IpcRendererEvent, data: { url: string; sourceSessionId: string; sourcePanelId: string }) => {
     try {
       window.dispatchEvent(new CustomEvent('browser-panel:popup-requested', { detail: data }));
     } catch (e) {
       console.error('Failed to dispatch browser-panel:popup-requested to window:', e);
     }
   });
-} catch (e) {
+} catch {
   // Ignore if IPC is not available for some reason
 }
 
@@ -368,24 +283,15 @@ if (process.env.NODE_ENV !== 'production') {
 
   // Override console methods to capture frontend logs
   (['log', 'warn', 'error', 'info', 'debug'] as const).forEach(level => {
-    (console as unknown as Record<string, (...args: unknown[]) => void>)[level] = (...args: unknown[]) => {
+    console[level] = (...args: Parameters<typeof console.log>) => {
       // Call original console first so they still appear in DevTools
-      (originalConsole as unknown as Record<string, (...args: unknown[]) => void>)[level](...args);
+      originalConsole[level](...args);
       
       // Send to main process for file logging
       try {
         invokeIpc('console:log', {
           level,
-          args: args.map(arg => {
-            if (typeof arg === 'object') {
-              try {
-                return JSON.stringify(arg, null, 2);
-              } catch (e) {
-                return String(arg);
-              }
-            }
-            return String(arg);
-          }),
+          args: args.map(arg => serializeConsoleArg(arg)),
           timestamp: new Date().toISOString(),
           source: 'renderer'
         });
@@ -395,6 +301,18 @@ if (process.env.NODE_ENV !== 'production') {
       }
     };
   });
+}
+
+function serializeConsoleArg(arg: Parameters<typeof console.log>[number]): string {
+  try {
+    return decodeBoundary(arg, boundary.string);
+  } catch {
+    try {
+      return JSON.stringify(arg, null, 2);
+    } catch {
+      return String(arg);
+    }
+  }
 }
 
 // Response type for IPC calls
@@ -421,12 +339,24 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getPlatform: () => invokeIpc('get-platform'),
   isPackaged: () => invokeIpc('is-packaged'),
 
+  // Window Controls Overlay: whether this window handed its title bar to the
+  // page. Main decides (see shouldEnableWindowControlsOverlay) and passes the
+  // answer through additionalArguments, so the renderer can branch on it during
+  // its first render instead of awaiting IPC and flashing the wrong layout.
+  windowControlsOverlayEnabled: process.argv.includes(WINDOW_CONTROLS_OVERLAY_ARG),
+  appearanceSnapshot: decodeAppearanceSnapshotArg(process.argv),
+  setTitleBarOverlay: (colors: WindowControlsOverlayColors): Promise<IPCResponse> =>
+    invokeIpc('window:set-title-bar-overlay', colors),
+  setBackgroundColor: (payload: { theme: Theme; color: string }): Promise<IPCResponse> =>
+    invokeIpc('window:set-background-color', payload),
+
   // Version checking
   checkForUpdates: (): Promise<IPCResponse> => invokeIpc('version:check-for-updates'),
   getVersionInfo: (): Promise<IPCResponse> => invokeIpc('version:get-info'),
   
   // Auto-updater
   updater: {
+    getCapabilities: (): Promise<IPCResponse> => invokeIpc('updater:get-capabilities'),
     checkAndDownload: (): Promise<IPCResponse> => invokeIpc('updater:check-and-download'),
     downloadUpdate: (): Promise<IPCResponse> => invokeIpc('updater:download-update'),
     installUpdate: (): Promise<IPCResponse> => invokeIpc('updater:install-update'),
@@ -436,6 +366,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // System utilities
   openExternal: (url: string): Promise<IPCResponse> => invokeIpc('openExternal', url),
+
+  feedback: {
+    submit: (request: SubmitFeedbackRequest): Promise<IPCResponse> => invokeIpc('feedback:submit', request),
+  },
 
   diagnostics: {
     rendererFatal: (payload: {
@@ -451,7 +385,43 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   paneChat: {
     getOrCreate: (): Promise<IPCResponse> => invokeIpc('pane-chat:get-or-create'),
-    setAgent: (agent: 'claude' | 'codex'): Promise<IPCResponse> => invokeIpc('pane-chat:set-agent', agent),
+    setAgent: (agent: 'claude' | 'codex' | 'cursor'): Promise<IPCResponse> => invokeIpc('pane-chat:set-agent', agent),
+  },
+
+  orchestrationSessions: {
+    list: (): Promise<IPCResponse> => invokeIpc('orchestration-sessions:list'),
+    select: (selector: OrchestrationSessionSelector): Promise<IPCResponse> => invokeIpc('orchestration-sessions:select', selector),
+    create: (input: OrchestrationSessionCreateInput): Promise<IPCResponse> => invokeIpc('orchestration-sessions:create', input),
+    get: (selector: OrchestrationSessionSelector): Promise<IPCResponse> => invokeIpc('orchestration-sessions:get', selector),
+    update: (selector: OrchestrationSessionSelector, input: OrchestrationSessionUpdateInput): Promise<IPCResponse> => invokeIpc('orchestration-sessions:update', selector, input),
+    setAgent: (selector: OrchestrationSessionSelector, agent: 'claude' | 'codex' | 'cursor'): Promise<IPCResponse> => invokeIpc('orchestration-sessions:set-agent', selector, agent),
+    associate: (selector: OrchestrationSessionSelector, association: OrchestrationAssociationInput): Promise<IPCResponse> => invokeIpc('orchestration-sessions:associate', selector, association),
+    detach: (selector: OrchestrationSessionSelector, paneId?: string): Promise<IPCResponse> => invokeIpc('orchestration-sessions:detach', selector, paneId),
+    overview: (selector: OrchestrationSessionSelector): Promise<IPCResponse> => invokeIpc('orchestration-sessions:overview', selector),
+  },
+
+  // Token usage, cost and rate-limit reporting
+  usage: {
+    getReport: (request?: { fromMs?: number; toMs?: number; bucket?: 'hour' | 'day' }): Promise<IPCResponse> => invokeIpc('usage:get-report', request),
+    getStatus: (): Promise<IPCResponse> => invokeIpc('usage:get-status'),
+    rescan: (): Promise<IPCResponse> => invokeIpc('usage:rescan'),
+  },
+
+  // Leaderboard opt-in and submission
+  leaderboard: {
+    getStatus: (): Promise<IPCResponse> => invokeIpc('leaderboard:get-status'),
+    join: (): Promise<IPCResponse> => invokeIpc('leaderboard:join'),
+    leave: (): Promise<IPCResponse> => invokeIpc('leaderboard:leave'),
+    sendNow: (): Promise<IPCResponse> => invokeIpc('leaderboard:send-now'),
+    fetch: (): Promise<IPCResponse> => invokeIpc('leaderboard:fetch'),
+  },
+
+  // Image export (save-to-file / OS share sheet)
+  export: {
+    saveImage: (data: string, defaultFilename: string): Promise<IPCResponse> =>
+      invokeIpc('export:save-image', data, defaultFilename),
+    shareImage: (data: string, filename: string): Promise<IPCResponse> =>
+      invokeIpc('export:share-image', data, filename),
   },
 
   // Session management
@@ -482,8 +452,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getExecutionDiff: (sessionId: string, executionId: string): Promise<IPCResponse> => invokeIpc('sessions:get-execution-diff', sessionId, executionId),
     gitCommit: (sessionId: string, message: string): Promise<IPCResponse> => invokeIpc('sessions:git-commit', sessionId, message),
     gitDiff: (sessionId: string): Promise<IPCResponse> => invokeIpc('sessions:git-diff', sessionId),
-    getCombinedDiff: (sessionId: string, executionIds?: number[]): Promise<IPCResponse> => invokeIpc('sessions:get-combined-diff', sessionId, executionIds),
-    getCommitDiffByHash: (sessionId: string, commitHash: string): Promise<IPCResponse> => invokeIpc('sessions:get-commit-diff-by-hash', sessionId, commitHash),
+    getDiffManifest: (sessionId: string, scope: DiffScope): Promise<IPCResponse> => invokeIpc('sessions:get-diff-manifest', sessionId, scope),
+    getFileDiff: (sessionId: string, scope: DiffScope, request: FileDiffRequest): Promise<IPCResponse> => invokeIpc('sessions:get-file-diff', sessionId, scope, request),
 
     // Main repo session
     getOrCreateMainRepoSession: (projectId: number): Promise<IPCResponse> => invokeIpc('sessions:get-or-create-main-repo', projectId),
@@ -761,6 +731,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
       return () => ipcRenderer.removeListener('permission:resolved', wrappedCallback);
     },
     // Session events
+    onSessionCreationFailed: (callback: (failure: { name: string; error: string }) => void) => {
+      const wrappedCallback = (_event: Electron.IpcRendererEvent, failure: { name: string; error: string }) => callback(failure);
+      ipcRenderer.on('session:creation-failed', wrappedCallback);
+      return () => ipcRenderer.removeListener('session:creation-failed', wrappedCallback);
+    },
     onSessionCreated: (callback: (session: Session) => void) => {
       const wrappedCallback = (_event: Electron.IpcRendererEvent, session: Session) => callback(session);
       ipcRenderer.on('session:created', wrappedCallback);
@@ -771,8 +746,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.on('session:updated', wrappedCallback);
       return () => ipcRenderer.removeListener('session:updated', wrappedCallback);
     },
-    onSessionDeleted: (callback: (session: Session) => void) => {
-      const wrappedCallback = (_event: Electron.IpcRendererEvent, session: Session) => callback(session);
+    onPaneFocusRequested: (callback: (data: RunpanePaneFocusRequestedEvent) => void) => {
+      const wrappedCallback = (_event: Electron.IpcRendererEvent, data: RunpanePaneFocusRequestedEvent) => callback(data);
+      ipcRenderer.on('pane:focus-requested', wrappedCallback);
+      return () => ipcRenderer.removeListener('pane:focus-requested', wrappedCallback);
+    },
+    onSessionDeleted: (callback: (session: Pick<Session, 'id'>) => void) => {
+      const wrappedCallback = (_event: Electron.IpcRendererEvent, session: Pick<Session, 'id'>) => callback(session);
       ipcRenderer.on('session:deleted', wrappedCallback);
       return () => ipcRenderer.removeListener('session:deleted', wrappedCallback);
     },
@@ -810,6 +790,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
       const wrappedCallback = (_event: Electron.IpcRendererEvent, info: { sessionId: string; hasNewOutput: boolean }) => callback(info);
       ipcRenderer.on('session:output-available', wrappedCallback);
       return () => ipcRenderer.removeListener('session:output-available', wrappedCallback);
+    },
+    onOrchestrationSessionsChanged: (callback: (change: { sessionId: string; kind: string; selectionChanged?: boolean }) => void) => {
+      const wrappedCallback = (_event: Electron.IpcRendererEvent, change: { sessionId: string; kind: string; selectionChanged?: boolean }) => callback(change);
+      ipcRenderer.on('orchestration-sessions:changed', wrappedCallback);
+      return () => ipcRenderer.removeListener('orchestration-sessions:changed', wrappedCallback);
+    },
+    onOrchestrationSessionsOverviewUpdated: (callback: (change: { panelId: string; sessionId?: string; state: string }) => void) => {
+      const wrappedCallback = (_event: Electron.IpcRendererEvent, change: { panelId: string; sessionId?: string; state: string }) => callback(change);
+      ipcRenderer.on('orchestration-sessions:overview-updated', wrappedCallback);
+      return () => ipcRenderer.removeListener('orchestration-sessions:overview-updated', wrappedCallback);
     },
     
     // Project events
@@ -876,8 +866,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       return () => ipcRenderer.removeListener('panel:response-added', wrappedCallback);
     },
     
-    onTerminalOutput: (callback: (output: SessionOutputData) => void) => {
-      const wrappedCallback = (_event: Electron.IpcRendererEvent, output: SessionOutputData) => callback(output);
+    onTerminalOutput: (callback: (output: TerminalOutputEvent) => void) => {
+      const wrappedCallback = (_event: Electron.IpcRendererEvent, output: TerminalOutputEvent) => callback(output);
       ipcRenderer.on('terminal:output', wrappedCallback);
       return () => ipcRenderer.removeListener('terminal:output', wrappedCallback);
     },
@@ -902,9 +892,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
     // Fired once per terminal spawn when the `usePtyHost` setting is on and
     // the ptyHost supervisor is live. Carries the host-allocated `ptyId` so
-    // `TerminalPanel.tsx` can subscribe to `electronAPI.ptyHost.onData(ptyId, ...)`
-    // instead of the legacy `terminal:output` channel. Fires again on auto-reattach
-    // after a supervisor restart so the renderer re-subscribes to the new ptyId.
+    // `TerminalPanel.tsx` can ack flow-control bytes over the ptyHost port.
+    // Fires again on auto-reattach after a supervisor restart with the new ptyId.
     onTerminalPtyReady: (callback: (data: { sessionId: string; panelId: string; ptyId: string }) => void) => {
       const wrappedCallback = (_event: Electron.IpcRendererEvent, data: { sessionId: string; panelId: string; ptyId: string }) => callback(data);
       ipcRenderer.on('terminal:ptyReady', wrappedCallback);
@@ -991,6 +980,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.on('config:terminal-font-updated', wrappedCallback);
       return () => ipcRenderer.removeListener('config:terminal-font-updated', wrappedCallback);
     },
+    onNativeAppearanceUpdated: (callback: (data: { prefersDark: boolean }) => void) => {
+      const wrappedCallback = (_event: Electron.IpcRendererEvent, data: { prefersDark: boolean }) => callback(data);
+      ipcRenderer.on('window:appearance-native-updated', wrappedCallback);
+      return () => ipcRenderer.removeListener('window:appearance-native-updated', wrappedCallback);
+    },
 
     // Process management events
     onZombieProcessesDetected: (callback: (data: { count: number; processes: string[] }) => void) => {
@@ -1014,11 +1008,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Panels API for Claude panels and other panel types
   panels: {
-    createPanel: (sessionId: string, type: string, name: string, config?: Record<string, unknown>): Promise<IPCResponse> => 
+    createPanel: (sessionId: string, type: string, name: string, config?: JsonObject): Promise<IPCResponse> =>
       invokeIpc('panels:create', { sessionId, type, title: name, initialState: config }),
     getSessionPanels: (sessionId: string): Promise<IPCResponse> => invokeIpc('panels:list', sessionId),
     deletePanel: (panelId: string): Promise<IPCResponse> => invokeIpc('panels:delete', panelId),
-    renamePanel: (panelId: string, name: string): Promise<IPCResponse> => invokeIpc('panels:update', panelId, { name }),
+    renamePanel: (panelId: string, name: string): Promise<IPCResponse> => invokeIpc('panels:update', panelId, { title: name }),
     setActivePanel: (sessionId: string, panelId: string): Promise<IPCResponse> => invokeIpc('panels:set-active', sessionId, panelId),
     resizeTerminal: (panelId: string, cols: number, rows: number): Promise<IPCResponse> => invokeIpc('panels:resize-terminal', panelId, cols, rows),
     sendTerminalInput: (panelId: string, data: string): Promise<IPCResponse> => invokeIpc('panels:send-terminal-input', panelId, data),
@@ -1051,7 +1045,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Analytics tracking
   analytics: {
     getIdentity: () => invokeIpc('analytics:get-identity'),
-    onMainEvent: (callback: (event: { eventName: string; properties: Record<string, unknown> }) => void) => {
+    onMainEvent: (callback: (event: AnalyticsEvent) => void) => {
       // Replay any events that arrived before this callback was registered
       for (const buffered of analyticsEventBuffer) {
         callback(buffered);
@@ -1075,24 +1069,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getStatus: (projectId: number): Promise<IPCResponse> => invokeIpc('spotlight:get-status', projectId),
   },
 
-  // Cloud VM management
-  cloud: {
-    getState: (): Promise<IPCResponse> => invokeIpc('cloud:get-state'),
-    startVm: (): Promise<IPCResponse> => invokeIpc('cloud:start-vm'),
-    stopVm: (): Promise<IPCResponse> => invokeIpc('cloud:stop-vm'),
-    startTunnel: (): Promise<IPCResponse> => invokeIpc('cloud:start-tunnel'),
-    stopTunnel: (): Promise<IPCResponse> => invokeIpc('cloud:stop-tunnel'),
-    connectWorkspace: (): Promise<IPCResponse> => invokeIpc('cloud:connect-workspace'),
-    disconnectWorkspace: (): Promise<IPCResponse> => invokeIpc('cloud:disconnect-workspace'),
-    startPolling: (): Promise<IPCResponse> => invokeIpc('cloud:start-polling'),
-    stopPolling: (): Promise<IPCResponse> => invokeIpc('cloud:stop-polling'),
-    onStateChanged: (callback: (state: unknown) => void): (() => void) => {
-      const wrappedCallback = (_event: unknown, state: unknown) => callback(state);
-      ipcRenderer.on('cloud:state-changed', wrappedCallback);
-      return () => ipcRenderer.removeListener('cloud:state-changed', wrappedCallback);
-    },
-  },
-
   // Resource monitor
   resourceMonitor: {
     getSnapshot: (): Promise<IPCResponse> => invokeIpc('resource-monitor:get-snapshot'),
@@ -1100,37 +1076,26 @@ contextBridge.exposeInMainWorld('electronAPI', {
     stopActive: (): Promise<IPCResponse> => invokeIpc('resource-monitor:stop-active'),
   },
 
+  // Agent subscription usage
+  agentUsage: {
+    get: (force = false): Promise<IPCResponse<AgentUsageSnapshot>> =>
+      invokeIpc('agent-usage:get', force),
+  },
+
   // Window state queries (invoke, not event subscriptions)
   window: {
-    isFocused: (): Promise<boolean> => invokeIpc('window:is-focused') as Promise<boolean>,
+    isFocused: async (): Promise<boolean> => decodeBoundary(await invokeIpc('window:is-focused'), boundary.boolean),
   },
 
   // ptyHost: typed wrapper over the per-window MessagePort. The raw port is
   // kept in preload scope; only these functions cross the contextBridge.
   //
-  // `onData` / `onExit` return an unsubscribe function matching the existing
-  // event-subscription convention elsewhere on `electronAPI.events`. Chunks
-  // D/E switch `TerminalPanel.tsx` over to these.
+  // `onExit` returns an unsubscribe function matching the existing
+  // event-subscription convention elsewhere on `electronAPI.events`.
   //
-  // `write` / `ack` post frames back over the port; Chunk D wires these in
-  // main-side via `PtyHostSupervisor.onRendererMessage` when they land.
+  // `write` / `ack` post frames back over the port; main handles them in
+  // `PtyHostSupervisor.onRendererMessage`.
   ptyHost: {
-    onData: (ptyId: string, cb: PtyDataCallback): (() => void) => {
-      let set = ptyDataSubscribers.get(ptyId);
-      if (!set) {
-        set = new Set();
-        ptyDataSubscribers.set(ptyId, set);
-      }
-      set.add(cb);
-      return () => {
-        const current = ptyDataSubscribers.get(ptyId);
-        if (!current) return;
-        current.delete(cb);
-        if (current.size === 0) {
-          ptyDataSubscribers.delete(ptyId);
-        }
-      };
-    },
     onExit: (ptyId: string, cb: PtyExitCallback): (() => void) => {
       let set = ptyExitSubscribers.get(ptyId);
       if (!set) {

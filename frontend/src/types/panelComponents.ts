@@ -1,13 +1,14 @@
-import { ToolPanel, ToolPanelType } from '../../../shared/types/panels';
+import { ProjectEnvironment, ToolPanel, ToolPanelType } from '../../../shared/types/panels';
 
-export type PanelContext = 'project' | 'worktree';
+type PanelContext = 'project' | 'worktree';
 
 export interface PanelCreateOptions {
   initialCommand?: string;  // Command to run on terminal init
   title?: string;           // Custom panel title
+  initialState?: { customState?: unknown };
 }
 
-export interface PanelTabPresentation {
+interface PanelTabPresentation {
   title?: string;
   disabled?: boolean;
   disabledReason?: string;
@@ -21,6 +22,8 @@ export interface PanelTabBarProps {
   onPanelSelect: (panel: ToolPanel) => void;
   onPanelClose: (panel: ToolPanel) => void;
   onPanelCreate: (type: ToolPanelType, options?: PanelCreateOptions) => void;
+  onShowExplorer: () => void;
+  projectEnvironment?: ProjectEnvironment;
   context?: PanelContext;  // Optional context to filter available panels
   onToggleDetailPanel?: () => void;
   detailPanelVisible?: boolean;

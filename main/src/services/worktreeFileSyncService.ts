@@ -5,6 +5,7 @@ import { CommandRunner } from '../utils/commandRunner';
 import type { ProjectEnvironment } from '../utils/pathResolver';
 import { escapeForBash, posixJoin } from '../utils/wslUtils';
 import type { WorktreeFileSyncEntry } from '../../../shared/types/worktreeFileSync';
+import { boundary, decodeBoundary } from '../../../shared/validation/boundaryDecoder';
 
 export interface WorktreeFileSyncFailure {
   path: string;
@@ -392,9 +393,14 @@ async function execCopyCommand(
   try {
     await commandRunner.execAsync(cmd, cwd, { timeout: COPY_TIMEOUT_MS });
   } catch (err: unknown) {
-    if (environment === 'windows' && err !== null && typeof err === 'object' && 'code' in err) {
-      const code = (err as { code: unknown }).code;
-      if (typeof code === 'number' && code >= 0 && code <= 7) {
+    if (environment === 'windows') {
+      let code: number | undefined;
+      try {
+        code = decodeBoundary(err, boundary.object({ code: boundary.optional(boundary.number) })).code;
+      } catch {
+        code = undefined;
+      }
+      if (code !== undefined && code >= 0 && code <= 7) {
         // Robocopy: exit codes 0–7 are all success (0=no copy, 1=copied, 2-7=informational)
         return;
       }
@@ -474,10 +480,6 @@ async function copyRootEntry(
   await execCopyCommand(cmd, mainRepoPath, commandRunner, environment);
 }
 
-function describeError(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
-
 /**
  * Finds all recursive matches of `entry.path` in the main repo and copies any
  * that are missing from the worktree. Returns the failures encountered so the
@@ -518,7 +520,7 @@ async function copyRecursiveMatches(
       await execCopyCommand(cmd, mainRepoPath, commandRunner, environment);
     } catch (err) {
       console.error(`[WorktreeFileSync] Failed to copy match "${matchPath}":`, err);
-      failures.push({ path: relativePath, reason: describeError(err) });
+      failures.push({ path: relativePath, reason: err instanceof Error ? err.message : String(err) });
       // Continue with remaining matches, best effort
     }
   }
@@ -549,42 +551,6 @@ async function detectInstallCommand(
     const exists = await existsAt(lockPath, commandRunner, environment, mainRepoPath);
     if (exists) {
       return command;
-    }
-  }
-
-  return null;
-}
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
-/**
- * Lightweight lock file detection that works from any context.
- * Uses fs.existsSync for local paths. For WSL paths (which start with /
- * on a Windows host), falls back to checking common path patterns.
- *
- * This is used by terminalPanelManager to auto-detect the install command
- * when a terminal panel initializes — no CommandRunner needed.
- */
-export function detectInstallCommandSync(cwd: string): string | null {
-  const lockFiles: Array<{ file: string; command: string }> = [
-    { file: 'pnpm-lock.yaml', command: 'pnpm install' },
-    { file: 'package-lock.json', command: 'npm install' },
-    { file: 'yarn.lock', command: 'yarn install' },
-    { file: 'bun.lockb', command: 'bun install' },
-  ];
-
-  for (const { file, command } of lockFiles) {
-    try {
-      // path.join works for local paths; for WSL Linux paths on Windows host,
-      // fs.existsSync will fail gracefully (returns false)
-      const lockPath = path.join(cwd, file);
-      if (fs.existsSync(lockPath)) {
-        return command;
-      }
-    } catch {
-      // Skip on any error
     }
   }
 
@@ -653,7 +619,7 @@ export const worktreeFileSyncService = {
           }
         } catch (err) {
           console.error(`[WorktreeFileSync] Failed to sync entry "${entry.path}":`, err);
-          failures.push({ path: entry.path, reason: describeError(err) });
+          failures.push({ path: entry.path, reason: err instanceof Error ? err.message : String(err) });
           // Continue with next entry, best effort
         }
       }
@@ -662,7 +628,7 @@ export const worktreeFileSyncService = {
       return { installCommand, failures };
     } catch (err) {
       console.error('[WorktreeFileSync] syncWorktree failed:', err);
-      failures.push({ path: 'worktree files', reason: describeError(err) });
+      failures.push({ path: 'worktree files', reason: err instanceof Error ? err.message : String(err) });
       return { installCommand: null, failures };
     }
   },

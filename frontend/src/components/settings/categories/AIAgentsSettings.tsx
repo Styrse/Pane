@@ -8,6 +8,15 @@ import { ImmediateToggle, SegmentedControl } from '../SettingsControls';
 import type { SettingsPersistence } from '../useSettingsPersistence';
 import { API } from '../../../utils/api';
 import type { PaneChatAgent } from '../../../../../shared/types/paneChat';
+import { visibleAgentPresets } from '../../../utils/agentPresets';
+
+const PANE_CHAT_AGENT_LABELS = {
+  claude: 'Claude',
+  codex: 'Codex',
+  cursor: 'Cursor',
+} satisfies Record<PaneChatAgent, string>;
+
+const paneChatAgentOptions = visibleAgentPresets().map(({ id }) => ({ id, label: PANE_CHAT_AGENT_LABELS[id] }));
 
 interface AIAgentsSettingsProps {
   persistence: SettingsPersistence;
@@ -28,18 +37,19 @@ export function AIAgentsSettings({ persistence, onDirtyChange }: AIAgentsSetting
   };
 
   return (
-    <SettingsPage title="AI & Agents" description="Application-wide defaults for Pane Chat and coding-agent integrations.">
+    <SettingsPage title="AI & Agents" description="Application-wide defaults for Sessions and coding-agent integrations.">
       <SettingsSection title="Agent defaults">
         <SettingRow
           settingId="default-pane-chat-agent"
-          label="Default Pane Chat agent"
-          description="Choose the agent used when Pane Chat opens a new global terminal."
+          label="Default Sessions agent"
+          description="Choose the agent used when a Session opens a new orchestration terminal."
           saveState={persistence.saveStates['default-pane-chat-agent']}
         >
+          {/* The legacy accessible name remains stable for existing shortcuts and fixtures. */}
           <SegmentedControl<PaneChatAgent>
             label="Default Pane Chat agent"
             value={config.defaultOrchestratorAgent ?? 'claude'}
-            options={[{ id: 'claude', label: 'Claude' }, { id: 'codex', label: 'Codex' }]}
+            options={paneChatAgentOptions}
             onChange={(value) => void persistence.saveConfig('default-pane-chat-agent', { defaultOrchestratorAgent: value })}
           />
         </SettingRow>

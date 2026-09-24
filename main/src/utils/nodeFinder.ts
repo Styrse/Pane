@@ -72,7 +72,6 @@ export async function findNodeExecutable(): Promise<string> {
       const baseDir = path.dirname(nodePath.split('*')[0]);
       if (fs.existsSync(baseDir)) {
         try {
-          const pattern = path.basename(nodePath);
           const entries = fs.readdirSync(baseDir);
           for (const entry of entries) {
             const fullPath = path.join(baseDir, entry, 'bin', 'node');
@@ -81,7 +80,7 @@ export async function findNodeExecutable(): Promise<string> {
               return fullPath;
             }
           }
-        } catch (e) {
+        } catch {
           // Ignore errors reading directories
         }
       }
@@ -135,7 +134,7 @@ function parseShellBinStub(content: string, binDir: string): string | null {
   // Match patterns that reference a .js file with $basedir
   const patterns = [
     // Pattern: "$basedir/path/to/script.js" or "$basedir/../path/to/script.js"
-    /\$basedir['"\/]*([^"'\s]+\.js)/g,
+    /\$basedir['"/]*([^"'\s]+\.js)/g,
     // Pattern: node "path/to/script.js" (relative path)
     /node\s+["']?([^"'\s]+\.js)/g,
   ];
@@ -146,7 +145,7 @@ function parseShellBinStub(content: string, binDir: string): string | null {
       let jsPath = match[1];
 
       // Remove leading quotes or slashes
-      jsPath = jsPath.replace(/^["'\/]+/, '');
+      jsPath = jsPath.replace(/^["'/]+/, '');
 
       // Resolve the path relative to binDir
       // $basedir refers to the directory containing the bin stub
@@ -234,7 +233,11 @@ export function findCliNodeScript(cliExecutablePath: string): string | null {
       console.log(`[NodeFinder] Detected pnpm structure, searching for ${commandName} in ${pnpmDir}`);
 
       // Define known package mappings (command name -> package patterns)
-      const packageMappings: Record<string, { patterns: string[]; entryFiles: string[] }> = {
+      interface PackageMappingLookup {
+        [command: string]: { patterns: string[]; entryFiles: string[] };
+      }
+
+      const packageMappings: PackageMappingLookup = {
         'claude': {
           patterns: ['@anthropic-ai+claude-code@'],
           entryFiles: ['cli.js', 'dist/index.js', 'index.js']
@@ -363,9 +366,3 @@ export function findCliNodeScript(cliExecutablePath: string): string | null {
 
   return null;
 }
-
-/**
- * @deprecated Use findCliNodeScript instead
- * Kept for backward compatibility
- */
-export const findClaudeCodeScript = findCliNodeScript;

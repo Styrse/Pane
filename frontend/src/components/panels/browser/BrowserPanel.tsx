@@ -6,20 +6,11 @@ import { panelApi } from '../../../services/panelApi';
 import { usePanelStore } from '../../../stores/panelStore';
 import { useSessionStore } from '../../../stores/sessionStore';
 import { useResizable } from '../../../hooks/useResizable';
+import { normalizeUrl } from './browserUrl';
 
 interface BrowserPanelProps {
   panel: ToolPanel;
   isActive: boolean;
-}
-
-function normalizeUrl(input: string): string {
-  let url = input.trim();
-  if (!/^https?:\/\//i.test(url)) {
-    // Local hosts default to http, everything else to https
-    const isLocalHost = url.startsWith('localhost') || url.startsWith('127.0.0.1') || url.startsWith('[::1]');
-    url = (isLocalHost ? 'http://' : 'https://') + url;
-  }
-  return url;
 }
 
 const BrowserPanel: React.FC<BrowserPanelProps> = ({ panel, isActive }) => {
@@ -31,6 +22,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({ panel, isActive }) => {
   const [canGoBack, setCanGoBack] = useState(false);
   const [canGoForward, setCanGoForward] = useState(false);
   const [devToolsOpen, setDevToolsOpen] = useState(false);
+  // SAFETY: The panel type discriminator determines the corresponding custom-state shape.
   const currentUrlFromPanelState = (panel.state.customState as BrowserPanelState | undefined)?.currentUrl;
 
   const webviewRef = useRef<Electron.WebviewTag>(null);
@@ -66,6 +58,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({ panel, isActive }) => {
   useEffect(() => {
     if (!initRef.current) {
       initRef.current = true;
+      // SAFETY: The panel type discriminator determines the corresponding custom-state shape.
       const savedState = panel.state.customState as BrowserPanelState | undefined;
       if (savedState?.currentUrl) {
         setUrl(savedState.currentUrl);
@@ -106,8 +99,8 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({ panel, isActive }) => {
     } catch {
       parsed = null;
     }
-    if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) {
-      setUrlError('Enter a valid http or https URL');
+    if (!parsed || !['http:', 'https:', 'file:'].includes(parsed.protocol)) {
+      setUrlError('Enter a valid http, https, or file URL');
       return;
     }
     setUrlError('');
@@ -260,6 +253,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({ panel, isActive }) => {
   // preventing duplicate popup panels when multiple browser panels exist in a session.
   useEffect(() => {
     const handler = (e: Event) => {
+      // SAFETY: The registered DOM/custom-event source establishes this target and detail shape.
       const { url: popupUrl, sourceSessionId, sourcePanelId } = (e as CustomEvent<{ url: string; sourceSessionId: string; sourcePanelId: string }>).detail;
       if (sourceSessionId !== panel.sessionId || sourcePanelId !== panel.id) return;
       e.stopImmediatePropagation();
@@ -274,13 +268,13 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({ panel, isActive }) => {
         addPanel(newPanel);
         setActivePanelInStore(panel.sessionId, newPanel.id);
         await panelApi.setActivePanel(panel.sessionId, newPanel.id);
-      }).catch((err: unknown) => {
+      }).catch((err) => {
         console.error('[BrowserPanel] Failed to create popup panel:', err);
       });
     };
     window.addEventListener('browser-panel:popup-requested', handler);
     return () => window.removeEventListener('browser-panel:popup-requested', handler);
-  }, [panel.sessionId, addPanel, setActivePanelInStore]);
+  }, [panel.id, panel.sessionId, addPanel, setActivePanelInStore]);
 
   // Listen for browser-panel:navigate CustomEvents (e.g., from SelectionPopover "Open in Browser")
   // Uses stopImmediatePropagation so only the first browser panel for a session handles the event,
@@ -288,10 +282,15 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({ panel, isActive }) => {
   // Also auto-focuses this browser panel so the user sees the navigated page immediately.
   useEffect(() => {
     const handler = (e: Event) => {
+      // SAFETY: The registered DOM/custom-event source establishes this target and detail shape.
       const customEvent = e as CustomEvent<{ url: string; sessionId: string }>;
       if (customEvent.detail.sessionId === panel.sessionId) {
         e.stopImmediatePropagation();
-        navigateTo(customEvent.detail.url);
+        if (customEvent.detail.url === url) {
+          webviewRef.current?.reload();
+        } else {
+          navigateTo(customEvent.detail.url);
+        }
         // Auto-focus this browser panel
         setActivePanelInStore(panel.sessionId, panel.id);
         panelApi.setActivePanel(panel.sessionId, panel.id).catch(() => {});
@@ -299,8 +298,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({ panel, isActive }) => {
     };
     window.addEventListener('browser-panel:navigate', handler);
     return () => window.removeEventListener('browser-panel:navigate', handler);
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- navigateTo reads from refs; re-registering on sessionId change is sufficient
-  }, [panel.sessionId, panel.id, setActivePanelInStore]);
+  }, [panel.sessionId, panel.id, setActivePanelInStore, navigateTo, url]);
 
   // Hide/show DevTools overlay when switching between panel tabs.
   // Close the WebContentsView when inactive so it doesn't cover other panels,
@@ -424,7 +422,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({ panel, isActive }) => {
             ref={webviewRef}
             src={url}
             partition={`persist:project-${projectId ?? panel.sessionId}`}
-            allowpopups={'true' as unknown as boolean}
+            allowpopups
             className="flex-1 border-0"
             style={{ display: 'inline-flex' }}
           />

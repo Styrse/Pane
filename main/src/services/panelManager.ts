@@ -2,11 +2,20 @@ import { v4 as uuidv4 } from 'uuid';
 import { ToolPanel, CreatePanelRequest, PanelEventType, ToolPanelState, ToolPanelMetadata, ToolPanelType, LogsPanelState } from '../../../shared/types/panels';
 import { getPaneEventSink, getPaneWebviewContextMap } from '../core/runtime';
 import { databaseService } from './database';
+import { splitPanelBufferState } from '../database/panelBuffers';
 import { panelEventBus } from './panelEventBus';
 import { withLock } from '../utils/mutex';
 import type { AnalyticsManager } from './analyticsManager';
+import type { PaneEventArgument } from '../core/eventSink';
+import { boundary, decodeBoundary } from '../../../shared/validation/boundaryDecoder';
 
-export class PanelManager {
+function logsPanelState(panel: ToolPanel): LogsPanelState {
+  // SAFETY: Callers first discriminate `panel.type === 'logs'`; this state is
+  // created and persisted by the logs manager as LogsPanelState.
+  return panel.state.customState as LogsPanelState;
+}
+
+class PanelManager {
   private panels = new Map<string, ToolPanel>();
   // Sessions that have been archived during this process lifetime.
   // Used by getPanel / getPanelsForSession to skip re-caching from DB
@@ -21,27 +30,27 @@ export class PanelManager {
     this.analyticsManager = analyticsManager;
   }
 
-  private sendRendererEvent(channel: string, ...args: unknown[]): void {
+  private sendRendererEvent(channel: string, ...args: PaneEventArgument[]): void {
     getPaneEventSink().send(channel, ...args);
   }
 
   constructor() {
-    // Load panels from database on startup (but don't initialize processes)
+    // Clean up restart-only state; other panels are loaded on demand
     this.loadPanelsFromDatabase();
   }
   
   private loadPanelsFromDatabase(): void {
     // This will be called on app startup to restore panel state
     // But we don't start any processes - that happens lazily
-    console.log('[PanelManager] Loading panels from database...');
+    console.log('[PanelManager] Loading panels requiring restart cleanup...');
     
-    // Load all panels from database
-    const allPanels = databaseService.getAllPanels();
+    // Load only panels requiring restart cleanup; terminal state is loaded on demand.
+    const startupPanels = databaseService.getPanelsForStartup();
     
     // Clean up any stale running states in logs panels
-    allPanels.forEach(panel => {
+    startupPanels.forEach(panel => {
       if (panel.type === 'logs' && panel.state?.customState) {
-        const logsState = panel.state.customState as LogsPanelState;
+        const logsState = logsPanelState(panel);
         if (logsState.isRunning) {
           // Reset the running state since processes don't survive app restarts
           logsState.isRunning = false;
@@ -53,6 +62,13 @@ export class PanelManager {
             state: panel.state
           });
         }
+      }
+      // Browser panels used to be created as permanent default tabs. Those
+      // legacy defaults (marked permanent, never opened by the user) are
+      // dropped; Browser is now an ordinary tool opened from the "+" menu.
+      if (panel.type === 'browser' && panel.metadata?.permanent) {
+        databaseService.deletePanel(panel.id);
+        return;
       }
       // Cache the panel
       this.panels.set(panel.id, panel);
@@ -76,9 +92,9 @@ export class PanelManager {
       
       // Create initial state
       // Handle both formats: { customState: {...} } and direct panel state {...}
-      const providedState = request.initialState as Record<string, unknown> | undefined;
+      const providedState = request.initialState;
       const customState = (providedState && 'customState' in providedState)
-        ? providedState.customState as Record<string, unknown>
+        ? decodeBoundary(providedState.customState, boundary.jsonObject)
         : providedState ?? {};
 
       const state: ToolPanelState = {
@@ -191,21 +207,6 @@ export class PanelManager {
     }
   }
 
-  async ensureBrowserPanel(sessionId: string): Promise<void> {
-    const panels = this.getPanelsForSession(sessionId);
-    const hasBrowser = panels.some(p => p.type === 'browser');
-
-    if (!hasBrowser) {
-      console.log(`[PanelManager] Creating browser panel for session ${sessionId}`);
-      await this.createPanel({
-        sessionId,
-        type: 'browser',
-        title: 'Browser',
-        metadata: { permanent: true }
-      });
-    }
-  }
-
   async deletePanel(panelId: string): Promise<void> {
     return await withLock(`panel-delete-${panelId}`, async () => {
       const panel = this.getPanel(panelId);
@@ -231,9 +232,12 @@ export class PanelManager {
       // If this was the active panel, activate another one
       const activePanelId = databaseService.getActivePanel(panel.sessionId)?.id;
       if (activePanelId === panelId) {
+        // Prefer a working tab: Explorer and Review live in the inspector rail,
+        // so activating one of those would leave the stage empty.
         const otherPanels = this.getPanelsForSession(panel.sessionId).filter(p => p.id !== panelId);
-        if (otherPanels.length > 0) {
-          await this.setActivePanel(panel.sessionId, otherPanels[0].id);
+        const nextPanel = otherPanels.find(p => p.type !== 'explorer' && p.type !== 'diff') ?? otherPanels[0];
+        if (nextPanel) {
+          await this.setActivePanel(panel.sessionId, nextPanel.id);
         } else {
           await this.setActivePanel(panel.sessionId, null);
         }
@@ -241,7 +245,11 @@ export class PanelManager {
 
       // Track that this panel type was explicitly closed by the user
       // This prevents auto-recreation when the session is reopened
-      databaseService.addClosedPanelType(panel.sessionId, panel.type);
+      // Editor tabs are opened per file, so closing one says nothing about
+      // wanting the type back.
+      if (panel.type !== 'editor') {
+        databaseService.addClosedPanelType(panel.sessionId, panel.type);
+      }
 
       // Remove from database
       databaseService.deletePanel(panelId);
@@ -272,16 +280,20 @@ export class PanelManager {
         return;
       }
       
-      // Update in database
-      databaseService.updatePanel(panelId, {
+      // Update in database. A refused write (state over the ceiling) is
+      // already logged there with the panel, size and largest key; the cache
+      // and renderer keep the last accepted state.
+      const written = databaseService.updatePanel(panelId, {
         title: updates.title,
         state: updates.state,
         metadata: updates.metadata
       });
+      if (!written) return;
       
-      // Update in cache
+      // Update in cache. Terminal bytes are stored in panel_buffers, so the
+      // cached state (and the panel:updated payload) never carries them.
       if (updates.title !== undefined) panel.title = updates.title;
-      if (updates.state !== undefined) panel.state = updates.state;
+      if (updates.state !== undefined) panel.state = splitPanelBufferState(updates.state).state;
       if (updates.metadata !== undefined) panel.metadata = updates.metadata;
       
       // Emit IPC event to notify frontend
@@ -349,23 +361,6 @@ export class PanelManager {
     // Load from database if not cached
     const panel = databaseService.getPanel(panelId);
     if (panel) {
-      // Fix any panels that have state stored as a string (defensive programming)
-      if (typeof panel.state === 'string') {
-        try {
-          panel.state = JSON.parse(panel.state);
-        } catch (e) {
-          console.error(`[PanelManager] Failed to parse panel state for ${panel.id}:`, e);
-          panel.state = { isActive: false, hasBeenViewed: false, customState: {} };
-        }
-      }
-      if (typeof panel.metadata === 'string') {
-        try {
-          panel.metadata = JSON.parse(panel.metadata);
-        } catch (e) {
-          console.error(`[PanelManager] Failed to parse panel metadata for ${panel.id}:`, e);
-          panel.metadata = { createdAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(), position: 0 };
-        }
-      }
       // Skip caching if this panel belongs to a session we've already
       // archived in this process. Prevents a post-archive event from
       // resurrecting the cache entry and undoing L3 cleanup.
@@ -387,29 +382,11 @@ export class PanelManager {
     // would undo the L3 cleanup that cleared them moments earlier.
     const shouldCache = !this.archivedSessionIds.has(sessionId);
 
-    // Fix any panels that have state stored as a string (defensive programming)
-    panels.forEach(panel => {
-      if (typeof panel.state === 'string') {
-        try {
-          panel.state = JSON.parse(panel.state);
-        } catch (e) {
-          console.error(`[PanelManager] Failed to parse panel state for ${panel.id}:`, e);
-          panel.state = { isActive: false, hasBeenViewed: false, customState: {} };
-        }
-      }
-      if (typeof panel.metadata === 'string') {
-        try {
-          panel.metadata = JSON.parse(panel.metadata);
-        } catch (e) {
-          console.error(`[PanelManager] Failed to parse panel metadata for ${panel.id}:`, e);
-          panel.metadata = { createdAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(), position: 0 };
-        }
-      }
-      // Update cache unless we've archived this session
-      if (shouldCache) {
+    if (shouldCache) {
+      for (const panel of panels) {
         this.panels.set(panel.id, panel);
       }
-    });
+    }
 
     return panels;
   }
@@ -419,7 +396,7 @@ export class PanelManager {
     return panels.filter(p => p.type === type);
   }
   
-  async emitPanelEvent(panelId: string, eventType: PanelEventType, data: unknown): Promise<void> {
+  async emitPanelEvent(panelId: string, eventType: PanelEventType, data: PaneEventArgument): Promise<void> {
     const panel = this.getPanel(panelId);
     if (!panel) {
       console.warn(`[PanelManager] Panel ${panelId} not found for event emission`);

@@ -1,6 +1,8 @@
 import Database from "better-sqlite3-multiple-ciphers";
 import { readFileSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
+import { v4 as uuidv4 } from "uuid";
+import { createRequire } from "node:module";
 import type {
   Project,
   ProjectRunCommand,
@@ -22,6 +24,28 @@ import type {
   ToolPanelMetadata,
 } from "../../../shared/types/panels";
 import type { GitStatus } from "../types/session";
+import {
+  boundary,
+  decodeBoundary,
+  decodeOptionalBoundary,
+  type JsonObject,
+} from "../../../shared/validation/boundaryDecoder";
+import { PanelBufferStore, splitPanelBufferState, type PanelBuffers } from "./panelBuffers";
+import { ensureUsageRollup } from "../services/usage/usageRollup";
+import {
+  migratePanelBuffers,
+  unwrapStringWrappedPanelState,
+  type PanelBufferMigrationResult,
+} from "./panelBufferMigration";
+
+/**
+ * Hard ceiling on one serialized `tool_panels.state` row. Terminal bytes live
+ * in `panel_buffers`, so a state over this size is a new unbounded field, and
+ * the write is refused at the boundary rather than found at the next parse.
+ */
+export const PANEL_STATE_CEILING_BYTES = 256 * 1024;
+
+const loadDatabaseDependency = createRequire(__filename);
 
 // Interface for legacy claude_panel_settings during migration
 interface ClaudePanelSetting {
@@ -70,60 +94,163 @@ interface SessionGitStatusCacheRow {
   last_checked_ms: number;
 }
 
-const DEBUG_DB_PANEL_STATE = process.env.PANE_DEBUG_DB_PANEL_STATE === "1";
-const LARGE_PANEL_STATE_FIELDS = new Set([
-  "scrollbackBuffer",
-  "alternateScreenBuffer",
-  "serializedBuffer",
-  "commandHistory",
-  "lastActiveCommand",
-  "outputBuffer",
-]);
-
-function summarizePanelStateField(value: unknown): string {
-  if (typeof value === "string") {
-    return `[string length=${value.length}]`;
+/** Decode panel JSON once, including the string-wrapped format used by legacy callers. */
+function parsePanelJson<T extends ToolPanelState | ToolPanelMetadata>(serialized: string | null, fallback: T): T {
+  if (!serialized) return fallback;
+  if (serialized.trimStart().startsWith('"')) {
+    try {
+      const json = decodeBoundary(JSON.parse(serialized), boundary.string);
+      // SAFETY: Legacy callers supplied the same typed panel JSON wrapped in a string.
+      return JSON.parse(json) as T;
+    } catch {
+      // Preserve the manager's recovery for malformed legacy serialized values.
+      return fallback;
+    }
   }
-
-  if (Array.isArray(value)) {
-    return `[array length=${value.length}]`;
-  }
-
-  if (value && typeof value === "object") {
-    return `[object keys=${Object.keys(value).length}]`;
-  }
-
-  return `[${typeof value}]`;
+  // SAFETY: These columns are written by the typed panel state and metadata serializers.
+  return JSON.parse(serialized) as T;
 }
 
-function sanitizePanelStateForLog(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(item => sanitizePanelStateForLog(item));
-  }
+const DEBUG_DB_PANEL_STATE = process.env.PANE_DEBUG_DB_PANEL_STATE === "1";
+interface PanelStateLogSummary {
+  readonly serializedLength: number;
+  readonly isActive?: boolean;
+  readonly isPinned?: boolean;
+  readonly hasBeenViewed?: boolean;
+}
 
-  if (!value || typeof value !== "object") {
-    return value;
-  }
+interface TableStructure {
+  columns: Array<{
+    cid: number;
+    name: string;
+    type: string;
+    notnull: number;
+    dflt_value: unknown;
+    pk: number;
+  }>;
+  foreignKeys: Array<{
+    id: number;
+    seq: number;
+    table: string;
+    from: string;
+    to: string;
+    on_update: string;
+    on_delete: string;
+    match: string;
+  }>;
+  indexes: Array<{ name: string; tbl_name: string; sql: string }>;
+}
 
-  return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>).map(([key, nestedValue]) => [
-      key,
-      LARGE_PANEL_STATE_FIELDS.has(key)
-        ? summarizePanelStateField(nestedValue)
-        : sanitizePanelStateForLog(nestedValue),
-    ]),
-  );
+interface UserPreferences {
+  [key: string]: string;
+}
+
+interface SessionTokenUsage {
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCacheReadTokens: number;
+  totalCacheCreationTokens: number;
+  messageCount: number;
+}
+
+interface SessionOutputCounts {
+  json: number;
+  stdout: number;
+  stderr: number;
+}
+
+interface SessionToolUsage {
+  tools: Array<{
+    name: string;
+    count: number;
+    totalDuration: number;
+    avgDuration: number;
+    totalInputTokens: number;
+    totalOutputTokens: number;
+  }>;
+  totalToolCalls: number;
+}
+
+const ESTIMATED_TOOL_DURATIONS = new Map<string, number>([
+  ["Read", 150], ["Write", 200], ["Edit", 250], ["MultiEdit", 400],
+  ["Grep", 100], ["Glob", 80], ["LS", 50], ["Bash", 500],
+  ["BashOutput", 30], ["KillBash", 50], ["Task", 1000],
+  ["TodoWrite", 100], ["WebSearch", 2000], ["WebFetch", 1500],
+]);
+
+function sanitizePanelStateForLog(value: Partial<ToolPanelState>): PanelStateLogSummary {
+  return {
+    serializedLength: JSON.stringify(value).length,
+    isActive: value.isActive,
+    isPinned: value.isPinned,
+    hasBeenViewed: value.hasBeenViewed,
+  };
+}
+
+const toolAnalyticsMessageSchema = boundary.object({
+  type: boundary.optional(boundary.string),
+  message: boundary.optional(boundary.object({
+    content: boundary.optional(boundary.array(boundary.object({
+      type: boundary.optional(boundary.string),
+      name: boundary.optional(boundary.string),
+      id: boundary.optional(boundary.string),
+      tool_use_id: boundary.optional(boundary.string),
+    }))),
+    usage: boundary.optional(boundary.object({
+      input_tokens: boundary.optional(boundary.number),
+      output_tokens: boundary.optional(boundary.number),
+    })),
+  })),
+});
+
+/** A panel state write was refused because the serialized JSON would exceed the ceiling. */
+class PanelStateCeilingError extends Error {
+  constructor(
+    readonly panelId: string,
+    readonly bytes: number,
+    readonly largestKey: string,
+  ) {
+    super(
+      `Refused panel state write for ${panelId}: ${bytes} bytes exceeds the ` +
+      `${PANEL_STATE_CEILING_BYTES} byte ceiling; largest key ${largestKey}`,
+    );
+    this.name = "PanelStateCeilingError";
+  }
+}
+
+export interface PanelBufferMigrationOutcome {
+  result: PanelBufferMigrationResult | null;
+  error: Error | null;
 }
 
 export class DatabaseService {
   private db: Database.Database;
+  private readonly dbPath: string;
+  private readonly panelBuffers: PanelBufferStore;
+  private panelBufferMigration: PanelBufferMigrationOutcome = { result: null, error: null };
 
   constructor(dbPath: string) {
     // Ensure the directory exists before creating the database
     const dir = dirname(dbPath);
     mkdirSync(dir, { recursive: true });
 
+    this.dbPath = dbPath;
     this.db = new Database(dbPath);
+    // WAL lets reads run during a write and commits append to the -wal file
+    // instead of syncing the main file. NORMAL is WAL's recommended pairing:
+    // an app crash loses nothing, and a power loss can drop only the last
+    // commits without corrupting the file. The size limit shrinks the -wal
+    // file back after a big write such as a retention sweep. All are no-ops
+    // on :memory:.
+    this.db.pragma("journal_mode = WAL");
+    this.db.pragma("synchronous = NORMAL");
+    this.db.pragma(`journal_size_limit = ${64 * 1024 * 1024}`);
+    // Reads the main file through a memory map instead of copying pages in,
+    // which speeds up the usage reports and terminal buffer loads. Writes
+    // still go through the WAL. scripts/benchmark-db.js measures this and
+    // the pragmas left at their defaults.
+    this.db.pragma(`mmap_size = ${256 * 1024 * 1024}`);
+    this.panelBuffers = new PanelBufferStore(this.db);
   }
 
   /**
@@ -169,6 +296,25 @@ export class DatabaseService {
   initialize(): void {
     this.initializeSchema();
     this.runMigrations();
+    // Runs before any pane opens: services/database.ts initializes at module
+    // load. A failure here must not keep the app from starting, so it is
+    // captured and logged by the daemon bootstrap instead of thrown.
+    try {
+      this.panelBufferMigration = {
+        result: migratePanelBuffers(this.db, this.dbPath, this.panelBuffers),
+        error: null,
+      };
+    } catch (error) {
+      this.panelBufferMigration = {
+        result: null,
+        error: error instanceof Error ? error : new Error(String(error)),
+      };
+    }
+  }
+
+  /** Outcome of the startup terminal-buffer migration, for the bootstrap logger. */
+  getPanelBufferMigration(): PanelBufferMigrationOutcome {
+    return this.panelBufferMigration;
   }
 
   private initializeSchema(): void {
@@ -206,6 +352,7 @@ export class DatabaseService {
       created_at?: string;
       updated_at?: string;
     }
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const tableInfo = this.db
       .prepare("PRAGMA table_info(sessions)")
       .all() as SqliteTableInfo[];
@@ -242,6 +389,7 @@ export class DatabaseService {
     }
 
     // Check for WSL support columns in projects table
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const projectsTableInfoForWsl = this.db
       .prepare("PRAGMA table_info(projects)")
       .all() as SqliteTableInfo[];
@@ -341,6 +489,7 @@ export class DatabaseService {
         .run();
     } else {
       // Check if the table has the correct column name
+      // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
       const promptMarkersInfo = this.db
         .prepare("PRAGMA table_info(prompt_markers)")
         .all() as SqliteTableInfo[];
@@ -422,6 +571,7 @@ export class DatabaseService {
     }
 
     // Add commit_message column to execution_diffs if it doesn't exist
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const executionDiffsTableInfo = this.db
       .prepare("PRAGMA table_info(execution_diffs)")
       .all() as SqliteTableInfo[];
@@ -435,6 +585,7 @@ export class DatabaseService {
     }
 
     // Check if claude_session_id column exists
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const sessionTableInfoClaude = this.db
       .prepare("PRAGMA table_info(sessions)")
       .all() as SqliteTableInfo[];
@@ -490,6 +641,7 @@ export class DatabaseService {
           .run();
 
         // Add project_id to sessions table
+        // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
         const sessionsTableInfoProjects = this.db
           .prepare("PRAGMA table_info(sessions)")
           .all() as SqliteTableInfo[];
@@ -513,7 +665,7 @@ export class DatabaseService {
         // Import existing config as default project if it exists
         try {
           const configManager =
-            require("../services/configManager").configManager;
+            loadDatabaseDependency("../services/configManager").configManager;
           const gitRepoPath = configManager.getGitRepoPath();
 
           if (gitRepoPath) {
@@ -549,6 +701,7 @@ export class DatabaseService {
     }
 
     // Add is_main_repo column to sessions table if it doesn't exist
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const sessionTableInfoForMainRepo = this.db
       .prepare("PRAGMA table_info(sessions)")
       .all() as SqliteTableInfo[];
@@ -569,7 +722,20 @@ export class DatabaseService {
         .run();
     }
 
+    const hasWorktreeOwnershipColumn = sessionTableInfoForMainRepo.some(
+      (col: SqliteTableInfo) => col.name === "worktree_ownership",
+    );
+    if (!hasWorktreeOwnershipColumn) {
+      this.db.prepare(
+        "ALTER TABLE sessions ADD COLUMN worktree_ownership TEXT NOT NULL DEFAULT 'pane'",
+      ).run();
+      this.db.prepare(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_worktree_ownership ON sessions(worktree_ownership, project_id)",
+      ).run();
+    }
+
     // Add main_branch column to projects table if it doesn't exist
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const projectsTableInfo = this.db
       .prepare("PRAGMA table_info(projects)")
       .all() as SqliteTableInfo[];
@@ -657,6 +823,7 @@ export class DatabaseService {
         .run();
 
       // Migrate existing run_script data to the new table
+      // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
       const projectsWithRunScripts = this.db
         .prepare(
           "SELECT id, run_script FROM projects WHERE run_script IS NOT NULL",
@@ -677,9 +844,11 @@ export class DatabaseService {
     }
 
     // Check if display_order columns exist
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const projectsTableInfo2 = this.db
       .prepare("PRAGMA table_info(projects)")
       .all() as SqliteTableInfo[];
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const sessionsTableInfo2 = this.db
       .prepare("PRAGMA table_info(sessions)")
       .all() as SqliteTableInfo[];
@@ -749,6 +918,7 @@ export class DatabaseService {
 
     // Normalize timestamp fields migration
     // Check if last_viewed_at is still TEXT type
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const sessionTableInfoTimestamp = this.db
       .prepare("PRAGMA table_info(sessions)")
       .all() as SqliteTableInfo[];
@@ -878,6 +1048,7 @@ export class DatabaseService {
     }
 
     // Add missing completion_timestamp to prompt_markers if it doesn't exist
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const promptMarkersInfo = this.db
       .prepare("PRAGMA table_info(prompt_markers)")
       .all() as SqliteTableInfo[];
@@ -894,6 +1065,7 @@ export class DatabaseService {
     }
 
     // Add is_favorite column to sessions table if it doesn't exist
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const sessionTableInfoFavorite = this.db
       .prepare("PRAGMA table_info(sessions)")
       .all() as SqliteTableInfo[];
@@ -1009,6 +1181,7 @@ export class DatabaseService {
 
       // Check if the old folders table has INTEGER id
       if (foldersExists) {
+        // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
         const foldersInfo = this.db
           .prepare("PRAGMA table_info(folders)")
           .all() as SqliteTableInfo[];
@@ -1043,6 +1216,7 @@ export class DatabaseService {
         .run();
 
       // Migrate data from project_folders to folders
+      // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
       const projectFolders = this.db
         .prepare("SELECT * FROM project_folders")
         .all() as LegacyProjectFolder[];
@@ -1085,6 +1259,7 @@ export class DatabaseService {
       console.log("[Database] Dropped legacy project_folders table");
 
       // Update sessions table folder_id column type if needed
+      // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
       const sessionTableInfo = this.db
         .prepare("PRAGMA table_info(sessions)")
         .all() as SqliteTableInfo[];
@@ -1138,12 +1313,14 @@ export class DatabaseService {
         // fails outright on a column-count mismatch. Skipped columns are
         // re-added by their own PRAGMA-checked ALTERs on the next pass.
         const folderMigTargetCols = (
+          // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
           this.db
             .prepare("PRAGMA table_info(sessions_folders_migration)")
             .all() as SqliteTableInfo[]
         ).map((c) => c.name);
         const folderMigSourceCols = new Set(
           (
+            // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
             this.db
               .prepare("PRAGMA table_info(sessions)")
               .all() as SqliteTableInfo[]
@@ -1259,6 +1436,7 @@ export class DatabaseService {
     }
 
     // Add parent_folder_id column to folders table for nested folders support
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const foldersTableInfo = this.db
       .prepare("PRAGMA table_info(folders)")
       .all() as SqliteTableInfo[];
@@ -1337,6 +1515,7 @@ export class DatabaseService {
     }
 
     // Add app_version column to app_opens table if it doesn't exist
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const appOpensTableInfo = this.db
       .prepare("PRAGMA table_info(app_opens)")
       .all() as SqliteTableInfo[];
@@ -1352,6 +1531,7 @@ export class DatabaseService {
     }
 
     // Remove model column from sessions table if it exists (moved to panel level)
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const sessionTableInfoModel = this.db
       .prepare("PRAGMA table_info(sessions)")
       .all() as SqliteTableInfo[];
@@ -1368,6 +1548,7 @@ export class DatabaseService {
     }
 
     // Add tool_type column to sessions table if it doesn't exist
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const sessionTableInfoToolType = this.db
       .prepare("PRAGMA table_info(sessions)")
       .all() as SqliteTableInfo[];
@@ -1383,12 +1564,6 @@ export class DatabaseService {
         .run();
       console.log("[Database] Added tool_type column to sessions table");
 
-      // Best effort: mark known Codex sessions (removed model-based detection)
-      try {
-        // No longer detecting based on model since it's panel-level now
-      } catch (error) {
-        // Migration error handling removed - empty try/catch serves no purpose
-      }
     }
 
     // Add user_preferences table to store all user preferences
@@ -1453,6 +1628,7 @@ export class DatabaseService {
     }
 
     // Add worktree_folder column to projects table if it doesn't exist
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const projectsTableInfoWorktree = this.db
       .prepare("PRAGMA table_info(projects)")
       .all() as SqliteTableInfo[];
@@ -1468,6 +1644,7 @@ export class DatabaseService {
     }
 
     // Add lastUsedModel column to projects table if it doesn't exist
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const projectsTableInfoModel = this.db
       .prepare("PRAGMA table_info(projects)")
       .all() as SqliteTableInfo[];
@@ -1485,6 +1662,7 @@ export class DatabaseService {
     }
 
     // Add base_commit and base_branch columns to sessions table if they don't exist
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const sessionsTableInfoBase = this.db
       .prepare("PRAGMA table_info(sessions)")
       .all() as SqliteTableInfo[];
@@ -1517,6 +1695,7 @@ export class DatabaseService {
       .run();
 
     // Add commit mode settings columns to projects table if they don't exist
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const projectsTableInfoCommit = this.db
       .prepare("PRAGMA table_info(projects)")
       .all() as SqliteTableInfo[];
@@ -1564,6 +1743,7 @@ export class DatabaseService {
     }
 
     // Add commit mode settings columns to sessions table if they don't exist
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const sessionsTableInfoCommit = this.db
       .prepare("PRAGMA table_info(sessions)")
       .all() as SqliteTableInfo[];
@@ -1669,6 +1849,7 @@ export class DatabaseService {
     }
 
     // Add active_panel_id column to sessions table if it doesn't exist
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const sessionsTableInfoPanel = this.db
       .prepare("PRAGMA table_info(sessions)")
       .all() as SqliteTableInfo[];
@@ -1709,15 +1890,19 @@ export class DatabaseService {
 
       try {
         // Step 1: Add panel_id columns to Claude tables if they don't exist
+        // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
         const sessionOutputsInfo = this.db
           .prepare("PRAGMA table_info(session_outputs)")
           .all() as SqliteTableInfo[];
+        // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
         const conversationMessagesInfo = this.db
           .prepare("PRAGMA table_info(conversation_messages)")
           .all() as SqliteTableInfo[];
+        // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
         const promptMarkersInfo = this.db
           .prepare("PRAGMA table_info(prompt_markers)")
           .all() as SqliteTableInfo[];
+        // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
         const executionDiffsInfo = this.db
           .prepare("PRAGMA table_info(execution_diffs)")
           .all() as SqliteTableInfo[];
@@ -1817,6 +2002,7 @@ export class DatabaseService {
           .run();
 
         // Step 4: Data migration - Create Claude panels for existing sessions and migrate data
+        // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
         const sessionsWithClaude = this.db
           .prepare(
             `
@@ -1854,7 +2040,7 @@ export class DatabaseService {
             );
 
           // Create Claude panel settings with default model from config
-          const { configManager } = require("../services/configManager");
+          const { configManager } = loadDatabaseDependency("../services/configManager");
           const defaultModel =
             configManager.getDefaultModel() || "claude-3-opus-20240229";
           this.db
@@ -1940,6 +2126,7 @@ export class DatabaseService {
     }
 
     // Migration 005: Ensure all sessions have diff panels
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const diffPanelsMigrationComplete = this.db
       .prepare(
         "SELECT value FROM user_preferences WHERE key = 'diff_panels_migrated'",
@@ -1953,6 +2140,7 @@ export class DatabaseService {
 
       try {
         // Get all sessions
+        // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
         const sessions = this.db
           .prepare("SELECT id FROM sessions WHERE archived = 0")
           .all() as { id: string }[];
@@ -1967,7 +2155,7 @@ export class DatabaseService {
 
           if (!hasDiffPanel) {
             // Create diff panel for this session
-            const panelId = require("uuid").v4();
+            const panelId = uuidv4();
             const now = new Date().toISOString();
 
             this.db
@@ -2013,6 +2201,7 @@ export class DatabaseService {
     }
 
     // Migration 006: Unified panel settings storage
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const unifiedSettingsMigrationComplete = this.db
       .prepare(
         "SELECT value FROM user_preferences WHERE key = 'unified_panel_settings_migrated'",
@@ -2026,6 +2215,7 @@ export class DatabaseService {
 
       try {
         // Step 1: Add settings column to tool_panels if it doesn't exist
+        // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
         const toolPanelsInfo = this.db
           .prepare("PRAGMA table_info(tool_panels)")
           .all() as SqliteTableInfo[];
@@ -2051,6 +2241,7 @@ export class DatabaseService {
 
         if (claudePanelSettingsExists) {
           // Migrate data from claude_panel_settings to unified settings
+          // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
           const claudeSettings = this.db
             .prepare("SELECT * FROM claude_panel_settings")
             .all() as ClaudePanelSetting[];
@@ -2120,6 +2311,7 @@ export class DatabaseService {
 
       try {
         // Get all projects
+        // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
         const projects = this.db
           .prepare("SELECT id FROM projects")
           .all() as Array<{ id: number }>;
@@ -2129,6 +2321,7 @@ export class DatabaseService {
           // Check if this project has the OLD pattern: folders with low displayOrder (0-10)
           // AND sessions also with low displayOrder (0-10), indicating separate ordering systems
           // Exclude main repo sessions as they have separate handling
+          // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
           const folderStats = this.db
             .prepare(
               `
@@ -2143,6 +2336,7 @@ export class DatabaseService {
             count: number;
           };
 
+          // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
           const sessionStats = this.db
             .prepare(
               `
@@ -2178,6 +2372,7 @@ export class DatabaseService {
             );
 
             // Get all root-level sessions and folders for this project
+            // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
             const rootSessions = this.db
               .prepare(
                 `
@@ -2196,6 +2391,7 @@ export class DatabaseService {
               created_at: string;
             }>;
 
+            // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
             const allFolders = this.db
               .prepare(
                 `
@@ -2279,6 +2475,80 @@ export class DatabaseService {
         // Don't throw - allow app to continue
       }
     }
+
+    // Track which parser produced each transcript index, so a parser fix can
+    // invalidate stale rows instead of only applying to future transcripts.
+    // SAFETY: SQLite PRAGMA table_info returns the SqliteTableInfo projection.
+    const usageFilesInfo = this.db
+      .prepare("PRAGMA table_info(usage_files)")
+      .all() as SqliteTableInfo[];
+    const usageFilesExists = usageFilesInfo.length > 0;
+    const hasParserVersion = usageFilesInfo.some(
+      (col: SqliteTableInfo) => col.name === "parser_version",
+    );
+
+    if (usageFilesExists && !hasParserVersion) {
+      this.db
+        .prepare(
+          "ALTER TABLE usage_files ADD COLUMN parser_version INTEGER NOT NULL DEFAULT 0",
+        )
+        .run();
+      console.log("[Database] Added parser_version column to usage_files table");
+    }
+
+    // Codex states the model, session and cwd once at the top of a transcript.
+    // A scan resuming from a stored offset never sees those lines, so what they
+    // said is kept next to the offset they belong to.
+    const hasParseContext = usageFilesInfo.some(
+      (col: SqliteTableInfo) => col.name === "parse_context",
+    );
+
+    if (usageFilesExists && !hasParseContext) {
+      this.db
+        .prepare("ALTER TABLE usage_files ADD COLUMN parse_context TEXT")
+        .run();
+      console.log("[Database] Added parse_context column to usage_files table");
+    }
+
+    // Codex rate-limit fields that v3 dropped: credits, blocked state, spend
+    // controls, and the provider's own window name.
+    // SAFETY: SQLite PRAGMA table_info returns the SqliteTableInfo projection.
+    const rateLimitsInfo = this.db
+      .prepare("PRAGMA table_info(usage_rate_limits)")
+      .all() as SqliteTableInfo[];
+    const rateLimitsExists = rateLimitsInfo.length > 0;
+    const hasCreditsHas = rateLimitsInfo.some(
+      (col: SqliteTableInfo) => col.name === "credits_has",
+    );
+
+    if (rateLimitsExists && !hasCreditsHas) {
+      this.db.exec(`
+        ALTER TABLE usage_rate_limits ADD COLUMN credits_has INTEGER;
+        ALTER TABLE usage_rate_limits ADD COLUMN credits_balance TEXT;
+        ALTER TABLE usage_rate_limits ADD COLUMN credits_unlimited INTEGER;
+        ALTER TABLE usage_rate_limits ADD COLUMN rate_limit_reached_type TEXT;
+        ALTER TABLE usage_rate_limits ADD COLUMN spend_control_reached INTEGER;
+        ALTER TABLE usage_rate_limits ADD COLUMN limit_name TEXT;
+      `);
+      console.log("[Database] Added credit and limit-state columns to usage_rate_limits table");
+    }
+
+    ensureUsageRollup(this.db);
+
+    // Keep this ownership migration after legacy table-rebuild migrations above,
+    // since those intentionally reconstruct sessions from an older column set.
+    // SAFETY: SQLite PRAGMA table_info returns the SqliteTableInfo projection.
+    const finalSessionColumns = this.db
+      .prepare("PRAGMA table_info(sessions)")
+      .all() as SqliteTableInfo[];
+    if (!finalSessionColumns.some(column => column.name === "worktree_ownership")) {
+      this.db.prepare(
+        "ALTER TABLE sessions ADD COLUMN worktree_ownership TEXT NOT NULL DEFAULT 'pane'",
+      ).run();
+    }
+    this.db.prepare(
+      "CREATE INDEX IF NOT EXISTS idx_sessions_worktree_ownership ON sessions(worktree_ownership, project_id)",
+    ).run();
   }
 
   // Project operations
@@ -2294,6 +2564,7 @@ export class DatabaseService {
     wslDistribution?: string | null,
   ): Project {
     // Get the max display_order for projects
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const maxOrderResult = this.db
       .prepare(
         `
@@ -2325,6 +2596,7 @@ export class DatabaseService {
         wslDistribution || null,
       );
 
+    // SAFETY: SQLite row ids for these tables are configured as numeric INTEGER PRIMARY KEY values.
     const project = this.getProject(result.lastInsertRowid as number);
     if (!project) {
       throw new Error("Failed to create project");
@@ -2333,18 +2605,21 @@ export class DatabaseService {
   }
 
   getProject(id: number): Project | undefined {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     return this.db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as
       | Project
       | undefined;
   }
 
   getProjectByPath(path: string): Project | undefined {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     return this.db
       .prepare("SELECT * FROM projects WHERE path = ?")
       .get(path) as Project | undefined;
   }
 
   getActiveProject(): Project | undefined {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const project = this.db
       .prepare("SELECT * FROM projects WHERE active = 1 LIMIT 1")
       .get() as Project | undefined;
@@ -2360,6 +2635,7 @@ export class DatabaseService {
   }
 
   getAllProjects(): Project[] {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     return this.db
       .prepare(
         "SELECT * FROM projects ORDER BY display_order ASC, created_at ASC",
@@ -2475,10 +2751,10 @@ export class DatabaseService {
     parentFolderId?: string | null,
   ): Folder {
     // Validate inputs
-    if (!name || typeof name !== "string") {
+    if (!name) {
       throw new Error("Folder name must be a non-empty string");
     }
-    if (!projectId || typeof projectId !== "number" || projectId <= 0) {
+    if (!projectId || projectId <= 0) {
       throw new Error("Project ID must be a positive number");
     }
 
@@ -2514,6 +2790,7 @@ export class DatabaseService {
     let displayOrder: number;
     if (!parentFolderId) {
       // Root-level folder: check both folders and sessions
+      // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
       const maxFolderOrder = this.db
         .prepare(
           `
@@ -2524,6 +2801,7 @@ export class DatabaseService {
         )
         .get(projectId) as { max_order: number | null };
 
+      // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
       const maxSessionOrder = this.db
         .prepare(
           `
@@ -2542,6 +2820,7 @@ export class DatabaseService {
       displayOrder = maxOrder + 1;
     } else {
       // Nested folder: only check folders at the same level
+      // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
       const maxOrder = this.db
         .prepare(
           `
@@ -2573,6 +2852,7 @@ export class DatabaseService {
       SELECT * FROM folders WHERE id = ?
     `);
 
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const folder = stmt.get(id) as Folder | undefined;
     console.log(`[Database] Getting folder by id ${id}:`, folder);
     return folder;
@@ -2585,6 +2865,7 @@ export class DatabaseService {
       ORDER BY display_order ASC, name ASC
     `);
 
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const folders = stmt.all(projectId) as Folder[];
     console.log(
       `[Database] Getting folders for project ${projectId}:`,
@@ -2738,6 +3019,7 @@ export class DatabaseService {
       )
       .run(projectId, command, displayName || null, orderIndex || 0);
 
+    // SAFETY: SQLite row ids for these tables are configured as numeric INTEGER PRIMARY KEY values.
     const runCommand = this.getRunCommand(result.lastInsertRowid as number);
     if (!runCommand) {
       throw new Error("Failed to create run command");
@@ -2746,12 +3028,14 @@ export class DatabaseService {
   }
 
   getRunCommand(id: number): ProjectRunCommand | undefined {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     return this.db
       .prepare("SELECT * FROM project_run_commands WHERE id = ?")
       .get(id) as ProjectRunCommand | undefined;
   }
 
   getProjectRunCommands(projectId: number): ProjectRunCommand[] {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     return this.db
       .prepare(
         "SELECT * FROM project_run_commands WHERE project_id = ? ORDER BY order_index ASC, id ASC",
@@ -2818,6 +3102,7 @@ export class DatabaseService {
       // Get the max display_order for both sessions and folders in this project
       // Sessions and folders share the same display_order space within a project
       // Exclude main repo sessions as they have separate handling
+      // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
       const maxSessionOrder = this.db
         .prepare(
           `
@@ -2832,6 +3117,7 @@ export class DatabaseService {
         )
         .get(data.project_id ?? null) as { max_order: number | null };
 
+      // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
       const maxFolderOrder = this.db
         .prepare(
           `
@@ -2852,8 +3138,8 @@ export class DatabaseService {
       this.db
         .prepare(
           `
-        INSERT INTO sessions (id, name, initial_prompt, worktree_name, worktree_path, status, project_id, folder_id, permission_mode, is_main_repo, display_order, tool_type, base_commit, base_branch, is_favorite, favorite_pinned_at, is_hidden)
-        VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'CURRENT_TIMESTAMP' THEN CURRENT_TIMESTAMP WHEN ? = 1 AND ? IS NULL THEN CURRENT_TIMESTAMP ELSE ? END, ?)
+        INSERT INTO sessions (id, name, initial_prompt, worktree_name, worktree_path, status, project_id, folder_id, permission_mode, is_main_repo, worktree_ownership, display_order, tool_type, base_commit, base_branch, is_favorite, favorite_pinned_at, is_hidden, commit_mode)
+        VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'CURRENT_TIMESTAMP' THEN CURRENT_TIMESTAMP WHEN ? = 1 AND ? IS NULL THEN CURRENT_TIMESTAMP ELSE ? END, ?, ?)
       `,
         )
         .run(
@@ -2866,6 +3152,7 @@ export class DatabaseService {
           data.folder_id || null,
           data.permission_mode || "ignore",
           data.is_main_repo ? 1 : 0,
+          data.worktree_ownership ?? "pane",
           displayOrder,
           data.tool_type || "claude",
           data.base_commit || null,
@@ -2876,6 +3163,7 @@ export class DatabaseService {
           data.favorite_pinned_at || null,
           data.favorite_pinned_at || null,
           data.is_hidden ? 1 : 0,
+          data.commit_mode ?? null,
         );
 
       const session = this.getSession(data.id);
@@ -2887,21 +3175,31 @@ export class DatabaseService {
   }
 
   getSession(id: string): Session | undefined {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const session = this.db
       .prepare("SELECT * FROM sessions WHERE id = ?")
       .get(id) as Session | undefined;
     return session;
   }
 
+  getSessionByWorktreePath(worktreePath: string): Session | undefined {
+    // SAFETY: This fixed query selects a complete sessions row matching the declared model.
+    return this.db
+      .prepare("SELECT * FROM sessions WHERE worktree_path = ? LIMIT 1")
+      .get(worktreePath) as Session | undefined;
+  }
+
   getAllSessions(projectId?: number, options?: { includeHidden?: boolean }): Session[] {
     const hiddenClause = options?.includeHidden ? "" : " AND (is_hidden = 0 OR is_hidden IS NULL)";
     if (projectId !== undefined) {
+      // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
       return this.db
         .prepare(
           `SELECT * FROM sessions WHERE project_id = ? AND (archived = 0 OR archived IS NULL) AND (is_main_repo = 0 OR is_main_repo IS NULL)${hiddenClause} ORDER BY display_order ASC, created_at DESC`,
         )
         .all(projectId) as Session[];
     }
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     return this.db
       .prepare(
         `SELECT * FROM sessions WHERE (archived = 0 OR archived IS NULL) AND (is_main_repo = 0 OR is_main_repo IS NULL)${hiddenClause} ORDER BY display_order ASC, created_at DESC`,
@@ -2910,6 +3208,7 @@ export class DatabaseService {
   }
 
   getAllSessionGitStatusCache(): Array<{ sessionId: string; gitStatus: GitStatus; lastChecked: number }> {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const rows = this.db
       .prepare("SELECT session_id, status_json, last_checked_ms FROM session_git_status_cache")
       .all() as SessionGitStatusCacheRow[];
@@ -2918,6 +3217,7 @@ export class DatabaseService {
       try {
         return [{
           sessionId: row.session_id,
+          // SAFETY: Persisted JSON in this column is produced by the matching typed serializer.
           gitStatus: JSON.parse(row.status_json) as GitStatus,
           lastChecked: row.last_checked_ms,
         }];
@@ -2928,6 +3228,7 @@ export class DatabaseService {
   }
 
   getSessionGitStatusCache(sessionId: string): { gitStatus: GitStatus; lastChecked: number } | null {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const row = this.db
       .prepare("SELECT status_json, last_checked_ms FROM session_git_status_cache WHERE session_id = ?")
       .get(sessionId) as Pick<SessionGitStatusCacheRow, "status_json" | "last_checked_ms"> | undefined;
@@ -2936,6 +3237,7 @@ export class DatabaseService {
 
     try {
       return {
+        // SAFETY: Persisted JSON in this column is produced by the matching typed serializer.
         gitStatus: JSON.parse(row.status_json) as GitStatus,
         lastChecked: row.last_checked_ms,
       };
@@ -2972,6 +3274,7 @@ export class DatabaseService {
 
   getAllSessionsIncludingArchived(options?: { includeHidden?: boolean }): Session[] {
     const hiddenClause = options?.includeHidden ? "" : " AND (is_hidden = 0 OR is_hidden IS NULL)";
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     return this.db
       .prepare(
         `SELECT * FROM sessions WHERE (is_main_repo = 0 OR is_main_repo IS NULL)${hiddenClause} ORDER BY created_at DESC`,
@@ -2981,6 +3284,7 @@ export class DatabaseService {
 
   getPowerSaveSnapshotSessions(options?: { includeHidden?: boolean }): Session[] {
     const hiddenClause = options?.includeHidden ? "" : "WHERE (is_hidden = 0 OR is_hidden IS NULL)";
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     return this.db
       .prepare(
         `SELECT * FROM sessions ${hiddenClause} ORDER BY created_at DESC`,
@@ -2991,12 +3295,14 @@ export class DatabaseService {
   getArchivedSessions(projectId?: number, options?: { includeHidden?: boolean }): Session[] {
     const hiddenClause = options?.includeHidden ? "" : " AND (is_hidden = 0 OR is_hidden IS NULL)";
     if (projectId !== undefined) {
+      // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
       return this.db
         .prepare(
           `SELECT * FROM sessions WHERE project_id = ? AND archived = 1 AND (is_main_repo = 0 OR is_main_repo IS NULL)${hiddenClause} ORDER BY updated_at DESC`,
         )
         .all(projectId) as Session[];
     }
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     return this.db
       .prepare(
         `SELECT * FROM sessions WHERE archived = 1 AND (is_main_repo = 0 OR is_main_repo IS NULL)${hiddenClause} ORDER BY updated_at DESC`,
@@ -3005,6 +3311,7 @@ export class DatabaseService {
   }
 
   getMainRepoSession(projectId: number): Session | undefined {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     return this.db
       .prepare(
         "SELECT * FROM sessions WHERE project_id = ? AND is_main_repo = 1 AND (archived = 0 OR archived IS NULL)",
@@ -3019,6 +3326,12 @@ export class DatabaseService {
       )
       .get(name, name);
     return result !== undefined;
+  }
+
+  checkActiveSessionNameExists(name: string, projectId: number): boolean {
+    return this.db.prepare(
+      "SELECT id FROM sessions WHERE name = ? AND project_id = ? AND (archived = 0 OR archived IS NULL) LIMIT 1",
+    ).get(name, projectId) !== undefined;
   }
 
   updateSession(id: string, data: UpdateSessionData): Session | undefined {
@@ -3038,6 +3351,10 @@ export class DatabaseService {
     if (data.status_message !== undefined) {
       updates.push("status_message = ?");
       values.push(data.status_message);
+    }
+    if (data.worktree_path !== undefined) {
+      updates.push("worktree_path = ?");
+      values.push(data.worktree_path);
     }
     if (data.folder_id !== undefined) {
       console.log(`[Database] Setting folder_id to: ${data.folder_id}`);
@@ -3183,6 +3500,7 @@ export class DatabaseService {
   }
 
   private deleteSessionOwnedRows(sessionId: string): void {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const panelRows = this.db
       .prepare("SELECT id FROM tool_panels WHERE session_id = ?")
       .all(sessionId) as Array<{ id: string }>;
@@ -3223,6 +3541,7 @@ export class DatabaseService {
 
   deleteArchivedSessionsPermanently(): number {
     return this.transaction(() => {
+      // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
       const rows = this.db
         .prepare(
           `
@@ -3263,9 +3582,18 @@ export class DatabaseService {
       .run(sessionId, type, data);
   }
 
+  getSessionOutputCount(sessionId: string): number {
+    // SAFETY: COUNT always returns one row with a numeric count, including zero for an empty session.
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS count FROM session_outputs WHERE session_id = ?")
+      .get(sessionId) as { count: number };
+    return row.count;
+  }
+
   getSessionOutputs(sessionId: string, limit?: number): SessionOutput[] {
-    const effectiveLimit = typeof limit === "number" ? limit : Number(limit);
+    const effectiveLimit = limit ?? Number.NaN;
     if (Number.isFinite(effectiveLimit) && effectiveLimit > 0) {
+      // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
       const rows = this.db
         .prepare(
           `
@@ -3279,6 +3607,7 @@ export class DatabaseService {
       return rows.reverse();
     }
 
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     return this.db
       .prepare(
         `
@@ -3291,8 +3620,9 @@ export class DatabaseService {
   }
 
   getSessionOutputsForPanel(panelId: string, limit?: number): SessionOutput[] {
-    const effectiveLimit = typeof limit === "number" ? limit : Number(limit);
+    const effectiveLimit = limit ?? Number.NaN;
     if (Number.isFinite(effectiveLimit) && effectiveLimit > 0) {
+      // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
       const rows = this.db
         .prepare(
           `
@@ -3306,6 +3636,7 @@ export class DatabaseService {
       return rows.reverse();
     }
 
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     return this.db
       .prepare(
         `
@@ -3319,6 +3650,7 @@ export class DatabaseService {
 
   getRecentSessionOutputs(sessionId: string, since?: Date): SessionOutput[] {
     if (since) {
+      // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
       return this.db
         .prepare(
           `
@@ -3362,8 +3694,9 @@ export class DatabaseService {
   }
 
   getPanelOutputs(panelId: string, limit?: number): SessionOutput[] {
-    const effectiveLimit = typeof limit === "number" ? limit : Number(limit);
+    const effectiveLimit = limit ?? Number.NaN;
     if (Number.isFinite(effectiveLimit) && effectiveLimit > 0) {
+      // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
       const rows = this.db
         .prepare(
           `
@@ -3377,6 +3710,7 @@ export class DatabaseService {
       return rows.reverse();
     }
 
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     return this.db
       .prepare(
         `
@@ -3390,6 +3724,7 @@ export class DatabaseService {
 
   getRecentPanelOutputs(panelId: string, since?: Date): SessionOutput[] {
     if (since) {
+      // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
       return this.db
         .prepare(
           `
@@ -3427,6 +3762,7 @@ export class DatabaseService {
   }
 
   getConversationMessages(sessionId: string): ConversationMessage[] {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     return this.db
       .prepare(
         `
@@ -3467,6 +3803,7 @@ export class DatabaseService {
   }
 
   getPanelConversationMessages(panelId: string): ConversationMessage[] {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     return this.db
       .prepare(
         `
@@ -3486,6 +3823,7 @@ export class DatabaseService {
 
   // Cleanup operations
   getActiveSessions(): Session[] {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     return this.db
       .prepare("SELECT * FROM sessions WHERE status IN ('running', 'pending')")
       .all() as Session[];
@@ -3535,6 +3873,7 @@ export class DatabaseService {
         "[Database] Prompt marker added successfully, ID:",
         result.lastInsertRowid,
       );
+      // SAFETY: SQLite row ids for these tables are configured as numeric INTEGER PRIMARY KEY values.
       return result.lastInsertRowid as number;
     } catch (error) {
       console.error("[Database] Failed to add prompt marker:", error);
@@ -3543,6 +3882,7 @@ export class DatabaseService {
   }
 
   getPromptMarkers(sessionId: string): PromptMarker[] {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const markers = this.db
       .prepare(
         `
@@ -3569,6 +3909,7 @@ export class DatabaseService {
   }
 
   getPanelPromptMarkers(panelId: string): PromptMarker[] {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const markers = this.db
       .prepare(
         `
@@ -3682,6 +4023,7 @@ export class DatabaseService {
         "[Database] Panel prompt marker added successfully, ID:",
         result.lastInsertRowid,
       );
+      // SAFETY: SQLite row ids for these tables are configured as numeric INTEGER PRIMARY KEY values.
       return result.lastInsertRowid as number;
     } catch (error) {
       console.error("[Database] Failed to add panel prompt marker:", error);
@@ -3756,6 +4098,7 @@ export class DatabaseService {
         data.commit_message || null,
       );
 
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const diff = this.db
       .prepare("SELECT * FROM execution_diffs WHERE id = ?")
       .get(result.lastInsertRowid) as ExecutionDiffRow | undefined;
@@ -3766,6 +4109,7 @@ export class DatabaseService {
   }
 
   getExecutionDiffs(sessionId: string): ExecutionDiff[] {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const rows = this.db
       .prepare(
         `
@@ -3780,6 +4124,7 @@ export class DatabaseService {
   }
 
   getExecutionDiff(id: number): ExecutionDiff | undefined {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const row = this.db
       .prepare("SELECT * FROM execution_diffs WHERE id = ?")
       .get(id) as ExecutionDiffRow | undefined;
@@ -3787,6 +4132,7 @@ export class DatabaseService {
   }
 
   getNextExecutionSequence(sessionId: string): number {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const result = this.db
       .prepare(
         `
@@ -3845,6 +4191,7 @@ export class DatabaseService {
         data.commit_message || null,
       );
 
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const diff = this.db
       .prepare("SELECT * FROM execution_diffs WHERE id = ?")
       .get(result.lastInsertRowid) as ExecutionDiffRow | undefined;
@@ -3855,6 +4202,7 @@ export class DatabaseService {
   }
 
   getPanelExecutionDiffs(panelId: string): ExecutionDiff[] {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const rows = this.db
       .prepare(
         `
@@ -3869,6 +4217,7 @@ export class DatabaseService {
   }
 
   getNextPanelExecutionSequence(panelId: string): number {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const result = this.db
       .prepare(
         `
@@ -3948,34 +4297,11 @@ export class DatabaseService {
   }
 
   // Debug method to check table structure
-  getTableStructure(tableName: "folders" | "sessions"): {
-    columns: Array<{
-      cid: number;
-      name: string;
-      type: string;
-      notnull: number;
-      dflt_value: unknown;
-      pk: number;
-    }>;
-    foreignKeys: Array<{
-      id: number;
-      seq: number;
-      table: string;
-      from: string;
-      to: string;
-      on_update: string;
-      on_delete: string;
-      match: string;
-    }>;
-    indexes: Array<{
-      name: string;
-      tbl_name: string;
-      sql: string;
-    }>;
-  } {
+  getTableStructure(tableName: "folders" | "sessions"): TableStructure {
     console.log(`[Database] Getting structure for table: ${tableName}`);
 
     // Get column information
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const columns = this.db
       .prepare(`PRAGMA table_info(${tableName})`)
       .all() as Array<{
@@ -3988,6 +4314,7 @@ export class DatabaseService {
     }>;
 
     // Get foreign key information
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const foreignKeys = this.db
       .prepare(`PRAGMA foreign_key_list(${tableName})`)
       .all() as Array<{
@@ -4002,6 +4329,7 @@ export class DatabaseService {
     }>;
 
     // Get indexes
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const indexes = this.db
       .prepare(
         `
@@ -4028,6 +4356,7 @@ export class DatabaseService {
 
   // UI State operations
   getUIState(key: string): string | undefined {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const result = this.db
       .prepare("SELECT value FROM ui_state WHERE key = ?")
       .get(key) as { value: string } | undefined;
@@ -4074,6 +4403,7 @@ export class DatabaseService {
     discord_shown: boolean;
     app_version?: string;
   } | null {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const result = this.db
       .prepare(
         `
@@ -4103,6 +4433,7 @@ export class DatabaseService {
   }
 
   getLastAppVersion(): string | null {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const result = this.db
       .prepare(
         `
@@ -4132,6 +4463,7 @@ export class DatabaseService {
 
   // User preferences operations
   getUserPreference(key: string): string | null {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const result = this.db
       .prepare(
         `
@@ -4157,7 +4489,8 @@ export class DatabaseService {
       .run(key, value);
   }
 
-  getUserPreferences(): Record<string, string> {
+  getUserPreferences(): UserPreferences {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const rows = this.db
       .prepare(
         `
@@ -4166,7 +4499,7 @@ export class DatabaseService {
       )
       .all() as Array<{ key: string; value: string }>;
 
-    const preferences: Record<string, string> = {};
+    const preferences: UserPreferences = {};
     for (const row of rows) {
       preferences[row.key] = row.value;
     }
@@ -4174,130 +4507,218 @@ export class DatabaseService {
   }
 
   // Panel operations
+
+  /**
+   * Insert a panel row. Terminal byte buffers in `state.customState` go to
+   * `panel_buffers`; the remaining state must fit under the ceiling or the
+   * insert is rolled back and PanelStateCeilingError thrown.
+   */
+  private insertPanelRow(data: {
+    id: string;
+    sessionId: string;
+    type: string;
+    title: string;
+    state?: ToolPanelState;
+    metadata?: ToolPanelMetadata;
+  }): void {
+    const split = data.state ? splitPanelBufferState(data.state) : null;
+    const stateJson = split ? JSON.stringify(split.state) : null;
+    const metadataJson = data.metadata ? JSON.stringify(data.metadata) : null;
+
+    this.db
+      .prepare(
+        `
+      INSERT INTO tool_panels (id, session_id, type, title, state, metadata)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `,
+      )
+      .run(
+        data.id,
+        data.sessionId,
+        data.type,
+        data.title,
+        stateJson,
+        metadataJson,
+      );
+    if (split?.patch) {
+      this.panelBuffers.apply(data.id, split.patch);
+    }
+    this.assertPanelStateWithinCeiling(data.id);
+  }
+
+  /** Insert a panel; throws PanelStateCeilingError (already logged) when the state is over the ceiling. */
   createPanel(data: {
     id: string;
     sessionId: string;
     type: string;
     title: string;
-    state?: unknown;
-    metadata?: unknown;
+    state?: ToolPanelState;
+    metadata?: ToolPanelMetadata;
   }): void {
-    this.transaction(() => {
-      const stateJson = data.state ? JSON.stringify(data.state) : null;
-      const metadataJson = data.metadata ? JSON.stringify(data.metadata) : null;
-
-      this.db
-        .prepare(
-          `
-        INSERT INTO tool_panels (id, session_id, type, title, state, metadata)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `,
-        )
-        .run(
-          data.id,
-          data.sessionId,
-          data.type,
-          data.title,
-          stateJson,
-          metadataJson,
-        );
-    });
+    this.transaction(() => this.insertPanelRow(data));
   }
 
+  private jsonPath(segments: readonly string[]): string {
+    return `$${segments.map((segment) => `."${segment.replace(/"/g, '\\"')}"`).join("")}`;
+  }
+
+  /**
+   * Merge a partial state into the stored JSON inside SQLite, one key at a
+   * time, so the main process never parses or re-serializes the whole blob.
+   * A key set to `undefined` is removed, matching the object spread this
+   * replaces; `customState` keys merge one level deep, also as before.
+   */
+  private mergePanelState(panelId: string, state: ToolPanelState): void {
+    // A row created without state is NULL; older builds wrapped the object in
+    // a JSON string. json_set needs an object to merge into.
+    unwrapStringWrappedPanelState(this.db, panelId);
+    this.db
+      .prepare(
+        `UPDATE tool_panels SET state = '{}'
+         WHERE id = ? AND (state IS NULL OR json_valid(state) = 0 OR json_type(state) <> 'object')`,
+      )
+      .run(panelId);
+
+    const removePaths: string[] = [];
+    const setPaths: string[] = [];
+    const setValues: string[] = [];
+    for (const [key, value] of Object.entries(state)) {
+      if (key === "customState") continue;
+      const path = this.jsonPath([key]);
+      if (value === undefined) {
+        removePaths.push(path);
+      } else {
+        setPaths.push(path);
+        setValues.push(JSON.stringify(value));
+      }
+    }
+    if (state.customState) {
+      this.db
+        .prepare(
+          `UPDATE tool_panels SET state = json_set(state, '$.customState', json('{}'))
+           WHERE id = ? AND json_type(state, '$.customState') IS NOT 'object'`,
+        )
+        .run(panelId);
+      for (const [key, value] of Object.entries(state.customState)) {
+        const path = this.jsonPath(["customState", key]);
+        if (value === undefined) {
+          removePaths.push(path);
+        } else {
+          setPaths.push(path);
+          setValues.push(JSON.stringify(value));
+        }
+      }
+    }
+
+    let expression = "state";
+    const params: string[] = [];
+    if (removePaths.length > 0) {
+      expression = `json_remove(${expression}, ${removePaths.map(() => "?").join(", ")})`;
+      params.push(...removePaths);
+    }
+    if (setPaths.length > 0) {
+      expression = `json_set(${expression}, ${setPaths.map(() => "?, json(?)").join(", ")})`;
+      setPaths.forEach((path, index) => params.push(path, setValues[index]));
+    }
+    this.db
+      .prepare(`UPDATE tool_panels SET state = ${expression}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+      .run(...params, panelId);
+  }
+
+  /** Name the largest leaf value in the state (e.g. `$.customState.initialInput`) for a refusal log line. */
+  private largestPanelStateKey(panelId: string): string {
+    const largest = decodeOptionalBoundary(
+      this.db
+        .prepare(
+          `SELECT fullkey AS key, octet_length(value) AS bytes
+           FROM json_tree((SELECT state FROM tool_panels WHERE id = ?))
+           WHERE atom IS NOT NULL
+           ORDER BY bytes DESC LIMIT 1`,
+        )
+        .get(panelId),
+      boundary.object({ key: boundary.string, bytes: boundary.number }),
+    );
+    return largest ? `${largest.key} (${largest.bytes} bytes)` : "unknown";
+  }
+
+  /**
+   * Log and throw PanelStateCeilingError when the stored state is over the
+   * ceiling; the caller's transaction rolls the write back.
+   */
+  private assertPanelStateWithinCeiling(panelId: string): void {
+    const row = decodeOptionalBoundary(
+      this.db
+        .prepare("SELECT COALESCE(octet_length(state), 0) AS bytes FROM tool_panels WHERE id = ?")
+        .get(panelId),
+      boundary.object({ bytes: boundary.number }),
+    );
+    if (!row || row.bytes <= PANEL_STATE_CEILING_BYTES) return;
+    const error = new PanelStateCeilingError(panelId, row.bytes, this.largestPanelStateKey(panelId));
+    console.error(`[Database] ${error.message}`);
+    throw error;
+  }
+
+  /**
+   * Update a panel. Returns false when the resulting state would exceed the
+   * ceiling (the refusal is logged with the panel, the size and the largest
+   * key); nothing is written in that case.
+   */
   updatePanel(
     panelId: string,
     updates: {
       title?: string;
-      state?: unknown;
-      metadata?: unknown;
+      state?: ToolPanelState;
+      metadata?: ToolPanelMetadata;
     },
-  ): void {
-    // Get existing panel first to merge state
-    const existingPanel = this.getPanel(panelId);
+  ): boolean {
+    try {
+      this.transaction(() => {
+        const setClauses: string[] = [];
+        const values: string[] = [];
 
-    this.transaction(() => {
-      const setClauses: string[] = [];
-      const values: (string | number | boolean | null)[] = [];
+        if (updates.title !== undefined) {
+          setClauses.push("title = ?");
+          values.push(updates.title);
+        }
 
-      if (updates.title !== undefined) {
-        setClauses.push("title = ?");
-        values.push(updates.title);
-      }
+        if (updates.metadata !== undefined) {
+          setClauses.push("metadata = ?");
+          values.push(JSON.stringify(updates.metadata));
+        }
 
-      if (updates.state !== undefined) {
-        // Merge with existing state instead of replacing
-        const existingState = existingPanel?.state || {};
-        const mergedState = {
-          ...existingState,
-          ...updates.state,
-        };
+        if (setClauses.length > 0) {
+          setClauses.push("updated_at = CURRENT_TIMESTAMP");
+          this.db
+            .prepare(`UPDATE tool_panels SET ${setClauses.join(", ")} WHERE id = ?`)
+            .run(...values, panelId);
+        }
 
-        // If there's a customState in either, merge that too
-        if (
-          typeof existingState === "object" &&
-          existingState !== null &&
-          "customState" in existingState
-        ) {
-          const existingCustomState = (
-            existingState as { customState?: unknown }
-          ).customState;
-          const updatesCustomState =
-            typeof updates.state === "object" &&
-            updates.state !== null &&
-            "customState" in updates.state
-              ? (updates.state as { customState?: unknown }).customState
-              : undefined;
-
-          if (
-            existingCustomState !== undefined ||
-            updatesCustomState !== undefined
-          ) {
-            (mergedState as { customState: unknown }).customState = {
-              ...(typeof existingCustomState === "object" &&
-              existingCustomState !== null
-                ? existingCustomState
-                : {}),
-              ...(typeof updatesCustomState === "object" &&
-              updatesCustomState !== null
-                ? updatesCustomState
-                : {}),
-            };
+        if (updates.state !== undefined) {
+          const { state, patch } = splitPanelBufferState(updates.state);
+          if (DEBUG_DB_PANEL_STATE) {
+            console.log("[DB-DEBUG] updatePanel state merge:", {
+              panelId,
+              updates: sanitizePanelStateForLog(state),
+              buffers: patch ? Object.keys(patch) : [],
+            });
           }
+          if (patch) {
+            this.panelBuffers.apply(panelId, patch);
+          }
+          this.mergePanelState(panelId, state);
+          this.assertPanelStateWithinCeiling(panelId);
         }
+      });
+      return true;
+    } catch (error) {
+      if (error instanceof PanelStateCeilingError) return false;
+      throw error;
+    }
+  }
 
-        if (DEBUG_DB_PANEL_STATE) {
-          console.log("[DB-DEBUG] updatePanel state merge:", {
-            panelId,
-            updates: sanitizePanelStateForLog(updates.state),
-            existing: sanitizePanelStateForLog(existingState),
-            merged: sanitizePanelStateForLog(mergedState),
-          });
-        }
-
-        setClauses.push("state = ?");
-        values.push(JSON.stringify(mergedState));
-      }
-
-      if (updates.metadata !== undefined) {
-        setClauses.push("metadata = ?");
-        values.push(JSON.stringify(updates.metadata));
-      }
-
-      if (setClauses.length > 0) {
-        setClauses.push("updated_at = CURRENT_TIMESTAMP");
-        values.push(panelId);
-
-        this.db
-          .prepare(
-            `
-          UPDATE tool_panels
-          SET ${setClauses.join(", ")}
-          WHERE id = ?
-        `,
-          )
-          .run(...values);
-      }
-    });
+  /** Persisted terminal bytes for a panel, or null when none are stored. */
+  getPanelBuffers(panelId: string): PanelBuffers | null {
+    return this.panelBuffers.get(panelId);
   }
 
   deletePanel(panelId: string): void {
@@ -4314,29 +4735,11 @@ export class DatabaseService {
     sessionId: string;
     type: string;
     title: string;
-    state?: unknown;
-    metadata?: unknown;
+    state?: ToolPanelState;
+    metadata?: ToolPanelMetadata;
   }): void {
     this.transaction(() => {
-      // Create the panel
-      const stateJson = data.state ? JSON.stringify(data.state) : null;
-      const metadataJson = data.metadata ? JSON.stringify(data.metadata) : null;
-
-      this.db
-        .prepare(
-          `
-        INSERT INTO tool_panels (id, session_id, type, title, state, metadata)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `,
-        )
-        .run(
-          data.id,
-          data.sessionId,
-          data.type,
-          data.title,
-          stateJson,
-          metadataJson,
-        );
+      this.insertPanelRow(data);
 
       // Set as active panel
       this.db
@@ -4346,6 +4749,7 @@ export class DatabaseService {
   }
 
   getPanel(panelId: string): ToolPanel | null {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const row = this.db
       .prepare("SELECT * FROM tool_panels WHERE id = ?")
       .get(panelId) as ToolPanelRow | undefined;
@@ -4353,94 +4757,97 @@ export class DatabaseService {
     if (!row) return null;
 
     // Check if this panel is the active one for its session
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const activePanel = this.db
       .prepare("SELECT active_panel_id FROM sessions WHERE id = ?")
       .get(row.session_id) as { active_panel_id: string | null } | undefined;
     const isActive = activePanel?.active_panel_id === panelId;
 
-    const state = row.state
-      ? (JSON.parse(row.state) as ToolPanelState)
-      : { isActive: false, hasBeenViewed: false, customState: {} };
+    // SAFETY: Panel state JSON is written from ToolPanelState by createPanel/updatePanel.
+    const state = parsePanelJson<ToolPanelState>(row.state, { isActive: false, hasBeenViewed: false, customState: {} });
     // Update isActive based on whether this panel is the active one
     state.isActive = isActive;
 
+    // SAFETY: Panel metadata JSON is written from ToolPanelMetadata by createPanel/updatePanel.
     return {
       id: row.id,
       sessionId: row.session_id,
+      // SAFETY: The panel type column is constrained to values written from ToolPanelType.
       type: row.type as ToolPanelType,
       title: row.title,
       state,
-      metadata: row.metadata
-        ? (JSON.parse(row.metadata) as ToolPanelMetadata)
-        : {
-            createdAt: row.created_at,
-            lastActiveAt: row.created_at,
-            position: 0,
-          },
+      metadata: parsePanelJson<ToolPanelMetadata>(row.metadata, {
+        createdAt: row.created_at,
+        lastActiveAt: row.created_at,
+        position: 0,
+      }),
     };
   }
 
+  // Panel rows never carry terminal bytes (see panel_buffers), so one query
+  // serves both startup summaries and full restoration reads.
   getPanelsForSession(sessionId: string): ToolPanel[] {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const rows = this.db
-      .prepare(
-        "SELECT * FROM tool_panels WHERE session_id = ? ORDER BY created_at",
-      )
+      .prepare("SELECT * FROM tool_panels WHERE session_id = ? ORDER BY created_at")
       .all(sessionId) as ToolPanelRow[];
 
     // Get the active panel ID for this session
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const activePanel = this.db
       .prepare("SELECT active_panel_id FROM sessions WHERE id = ?")
       .get(sessionId) as { active_panel_id: string | null } | undefined;
     const activePanelId = activePanel?.active_panel_id;
 
     return rows.map((row) => {
-      const state = row.state
-        ? (JSON.parse(row.state) as ToolPanelState)
-        : { isActive: false, hasBeenViewed: false, customState: {} };
+      // SAFETY: Panel state JSON is written from ToolPanelState by createPanel/updatePanel.
+      const state = parsePanelJson<ToolPanelState>(row.state, { isActive: false, hasBeenViewed: false, customState: {} });
       // Update isActive based on whether this panel is the active one
       state.isActive = row.id === activePanelId;
 
+      // SAFETY: Panel metadata JSON is written from ToolPanelMetadata by createPanel/updatePanel.
       return {
         id: row.id,
         sessionId: row.session_id,
+        // SAFETY: The panel type column is constrained to values written from ToolPanelType.
         type: row.type as ToolPanelType,
         title: row.title,
         state,
-        metadata: row.metadata
-          ? (JSON.parse(row.metadata) as ToolPanelMetadata)
-          : {
-              createdAt: row.created_at,
-              lastActiveAt: row.created_at,
-              position: 0,
-            },
+        metadata: parsePanelJson<ToolPanelMetadata>(row.metadata, {
+          createdAt: row.created_at,
+          lastActiveAt: row.created_at,
+          position: 0,
+        }),
       };
     });
   }
 
-  getAllPanels(): ToolPanel[] {
+  // Only these panel types need restart cleanup. Terminal history stays on disk
+  // until its session is opened, including stopped and archived sessions.
+  getPanelsForStartup(): ToolPanel[] {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const rows = this.db
-      .prepare("SELECT * FROM tool_panels ORDER BY created_at")
+      .prepare("SELECT * FROM tool_panels WHERE type IN ('logs', 'browser') ORDER BY created_at")
       .all() as ToolPanelRow[];
 
+    // SAFETY: Panel state and metadata JSON are written by the matching typed panel serializers.
     return rows.map((row) => ({
       id: row.id,
       sessionId: row.session_id,
+      // SAFETY: The panel type column is constrained to values written from ToolPanelType.
       type: row.type as ToolPanelType,
       title: row.title,
-      state: row.state
-        ? (JSON.parse(row.state) as ToolPanelState)
-        : { isActive: false },
-      metadata: row.metadata
-        ? (JSON.parse(row.metadata) as ToolPanelMetadata)
-        : {
-            createdAt: row.created_at,
-            lastActiveAt: row.created_at,
-            position: 0,
-          },
+      state: parsePanelJson<ToolPanelState>(row.state, { isActive: false }),
+      metadata: parsePanelJson<ToolPanelMetadata>(row.metadata, {
+        createdAt: row.created_at,
+        lastActiveAt: row.created_at,
+        position: 0,
+      }),
     }));
   }
 
   getActivePanels(): ToolPanel[] {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const rows = this.db
       .prepare(
         `
@@ -4452,21 +4859,19 @@ export class DatabaseService {
       )
       .all() as ToolPanelRow[];
 
+    // SAFETY: Panel state and metadata JSON are written by the matching typed panel serializers.
     return rows.map((row) => ({
       id: row.id,
       sessionId: row.session_id,
+      // SAFETY: The panel type column is constrained to values written from ToolPanelType.
       type: row.type as ToolPanelType,
       title: row.title,
-      state: row.state
-        ? (JSON.parse(row.state) as ToolPanelState)
-        : { isActive: false },
-      metadata: row.metadata
-        ? (JSON.parse(row.metadata) as ToolPanelMetadata)
-        : {
-            createdAt: row.created_at,
-            lastActiveAt: row.created_at,
-            position: 0,
-          },
+      state: parsePanelJson<ToolPanelState>(row.state, { isActive: false }),
+      metadata: parsePanelJson<ToolPanelMetadata>(row.metadata, {
+        createdAt: row.created_at,
+        lastActiveAt: row.created_at,
+        position: 0,
+      }),
     }));
   }
 
@@ -4478,6 +4883,7 @@ export class DatabaseService {
 
   /** Get the raw JSON layout string for a session's split tab groups. */
   getSessionPanelLayout(sessionId: string): string | null {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const row = this.db
       .prepare("SELECT panel_layout FROM sessions WHERE id = ?")
       .get(sessionId) as { panel_layout: string | null } | undefined;
@@ -4492,6 +4898,7 @@ export class DatabaseService {
   }
 
   getActivePanel(sessionId: string): ToolPanel | null {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const row = this.db
       .prepare(
         `
@@ -4504,25 +4911,24 @@ export class DatabaseService {
 
     if (!row) return null;
 
-    const state = row.state
-      ? (JSON.parse(row.state) as ToolPanelState)
-      : { isActive: true, hasBeenViewed: false };
+    // SAFETY: Panel state JSON is written from ToolPanelState by createPanel/updatePanel.
+    const state = parsePanelJson<ToolPanelState>(row.state, { isActive: true, hasBeenViewed: false });
     // This panel is the active one by definition (we joined on active_panel_id)
     state.isActive = true;
 
+    // SAFETY: Panel metadata JSON is written from ToolPanelMetadata by createPanel/updatePanel.
     return {
       id: row.id,
       sessionId: row.session_id,
+      // SAFETY: The panel type column is constrained to values written from ToolPanelType.
       type: row.type as ToolPanelType,
       title: row.title,
       state,
-      metadata: row.metadata
-        ? (JSON.parse(row.metadata) as ToolPanelMetadata)
-        : {
-            createdAt: row.created_at,
-            lastActiveAt: row.created_at,
-            position: 0,
-          },
+      metadata: parsePanelJson<ToolPanelMetadata>(row.metadata, {
+        createdAt: row.created_at,
+        lastActiveAt: row.created_at,
+        position: 0,
+      }),
     };
   }
 
@@ -4539,6 +4945,7 @@ export class DatabaseService {
    * Get the list of panel types that have been closed by the user for a session
    */
   getClosedPanelTypes(sessionId: string): string[] {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const row = this.db
       .prepare("SELECT closed_panel_types FROM sessions WHERE id = ?")
       .get(sessionId) as { closed_panel_types: string | null } | undefined;
@@ -4600,7 +5007,8 @@ export class DatabaseService {
    * Get panel settings from the unified JSON storage
    * Returns the parsed settings object or an empty object if none exist
    */
-  getPanelSettings(panelId: string): Record<string, unknown> {
+  getPanelSettings(panelId: string): JsonObject {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const row = this.db
       .prepare(
         `
@@ -4614,7 +5022,7 @@ export class DatabaseService {
     }
 
     try {
-      return JSON.parse(row.settings);
+      return decodeBoundary(JSON.parse(row.settings), boundary.jsonObject);
     } catch (e) {
       console.error(`Failed to parse settings for panel ${panelId}:`, e);
       return {};
@@ -4627,7 +5035,7 @@ export class DatabaseService {
    */
   updatePanelSettings(
     panelId: string,
-    settings: Record<string, unknown>,
+    settings: JsonObject,
   ): void {
     // Get existing settings
     const existingSettings = this.getPanelSettings(panelId);
@@ -4654,7 +5062,7 @@ export class DatabaseService {
   /**
    * Set panel settings (replaces all existing settings)
    */
-  setPanelSettings(panelId: string, settings: Record<string, unknown>): void {
+  setPanelSettings(panelId: string, settings: JsonObject): void {
     const settingsWithTimestamp = {
       ...settings,
       updatedAt: new Date().toISOString(),
@@ -4707,23 +5115,22 @@ export class DatabaseService {
       return null;
     }
 
-    // Convert from new format to old format for compatibility
-    const s = settings as Record<string, unknown>;
+    const decodedSettings = decodeBoundary(settings, boundary.object({
+      model: boundary.optional(boundary.string),
+      systemPrompt: boundary.optional(boundary.string),
+      maxTokens: boundary.optional(boundary.number),
+      temperature: boundary.optional(boundary.number),
+      createdAt: boundary.optional(boundary.string),
+      updatedAt: boundary.optional(boundary.string),
+    }));
     return {
       panel_id: panelId,
-      model: (typeof s.model === "string" ? s.model : null) || "auto",
-      system_prompt:
-        (typeof s.systemPrompt === "string" ? s.systemPrompt : null) || null,
-      max_tokens:
-        (typeof s.maxTokens === "number" ? s.maxTokens : null) || 4096,
-      temperature:
-        (typeof s.temperature === "number" ? s.temperature : null) || 0.7,
-      created_at:
-        (typeof s.createdAt === "string" ? s.createdAt : null) ||
-        new Date().toISOString(),
-      updated_at:
-        (typeof s.updatedAt === "string" ? s.updatedAt : null) ||
-        new Date().toISOString(),
+      model: decodedSettings.model || "auto",
+      system_prompt: decodedSettings.systemPrompt || null,
+      max_tokens: decodedSettings.maxTokens || 4096,
+      temperature: decodedSettings.temperature || 0.7,
+      created_at: decodedSettings.createdAt || new Date().toISOString(),
+      updated_at: decodedSettings.updatedAt || new Date().toISOString(),
     };
   }
 
@@ -4736,7 +5143,7 @@ export class DatabaseService {
       temperature?: number;
     },
   ): void {
-    const updateObj: Record<string, unknown> = {};
+    const updateObj: JsonObject = {};
 
     if (settings.model !== undefined) updateObj.model = settings.model;
     if (settings.system_prompt !== undefined)
@@ -4756,13 +5163,8 @@ export class DatabaseService {
   }
 
   // Session statistics methods
-  getSessionTokenUsage(sessionId: string): {
-    totalInputTokens: number;
-    totalOutputTokens: number;
-    totalCacheReadTokens: number;
-    totalCacheCreationTokens: number;
-    messageCount: number;
-  } {
+  getSessionTokenUsage(sessionId: string): SessionTokenUsage {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const rows = this.db
       .prepare(
         `
@@ -4796,7 +5198,7 @@ export class DatabaseService {
         if (data.cache_creation_input_tokens) {
           totalCacheCreationTokens += data.cache_creation_input_tokens;
         }
-      } catch (e) {
+      } catch {
         // Ignore parse errors
       }
     });
@@ -4810,11 +5212,8 @@ export class DatabaseService {
     };
   }
 
-  getSessionOutputCounts(sessionId: string): {
-    json: number;
-    stdout: number;
-    stderr: number;
-  } {
+  getSessionOutputCounts(sessionId: string): SessionOutputCounts {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const result = this.db
       .prepare(
         `
@@ -4828,22 +5227,23 @@ export class DatabaseService {
       )
       .all(sessionId) as { type: string; count: number }[];
 
-    const counts: { json: number; stdout: number; stderr: number } = {
+    const counts: SessionOutputCounts = {
       json: 0,
       stdout: 0,
       stderr: 0,
     };
 
     result.forEach((row: { type: string; count: number }) => {
-      if (row.type in counts) {
-        counts[row.type as keyof typeof counts] = row.count;
-      }
+      if (row.type === "json") counts.json = row.count;
+      if (row.type === "stdout") counts.stdout = row.count;
+      if (row.type === "stderr") counts.stderr = row.count;
     });
 
     return counts;
   }
 
   getConversationMessageCount(sessionId: string): number {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const result = this.db
       .prepare(
         `
@@ -4858,6 +5258,7 @@ export class DatabaseService {
   }
 
   getPanelConversationMessageCount(panelId: string): number {
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const result = this.db
       .prepare(
         `
@@ -4871,18 +5272,9 @@ export class DatabaseService {
     return result?.count || 0;
   }
 
-  getSessionToolUsage(sessionId: string): {
-    tools: Array<{
-      name: string;
-      count: number;
-      totalDuration: number;
-      avgDuration: number;
-      totalInputTokens: number;
-      totalOutputTokens: number;
-    }>;
-    totalToolCalls: number;
-  } {
+  getSessionToolUsage(sessionId: string): SessionToolUsage {
     // Get all tool_use messages for this session
+    // SAFETY: This fixed SQLite query projection matches the declared row type at this database boundary.
     const toolUseRows = this.db
       .prepare(
         `
@@ -4910,18 +5302,14 @@ export class DatabaseService {
 
     // Process each message
     toolUseRows.forEach(
-      (row: { data: string; timestamp: string }, index: number) => {
+      (row: { data: string; timestamp: string }, _index: number) => {
         try {
-          const data = JSON.parse(row.data);
+          const data = decodeBoundary(JSON.parse(row.data), toolAnalyticsMessageSchema);
+          const message = data.message;
 
           // Check if this is a tool_use message
-          if (data.type === "assistant" && data.message?.content) {
-            data.message.content.forEach((content: unknown) => {
-              const contentObj = content as {
-                type?: string;
-                name?: string;
-                id?: string;
-              };
+          if (data.type === "assistant" && message?.content) {
+            message.content.forEach((contentObj) => {
               if (contentObj.type === "tool_use" && contentObj.name) {
                 totalToolCalls++;
                 const toolName = contentObj.name!;
@@ -4944,21 +5332,17 @@ export class DatabaseService {
                 }
 
                 // Add token usage if available
-                if (data.message.usage) {
-                  stats.inputTokens += data.message.usage.input_tokens || 0;
-                  stats.outputTokens += data.message.usage.output_tokens || 0;
+                if (message.usage) {
+                  stats.inputTokens += message.usage.input_tokens || 0;
+                  stats.outputTokens += message.usage.output_tokens || 0;
                 }
               }
             });
           }
 
           // Check if this is a tool_result message
-          if (data.type === "user" && data.message?.content) {
-            data.message.content.forEach((content: unknown) => {
-              const contentObj = content as {
-                type?: string;
-                tool_use_id?: string;
-              };
+          if (data.type === "user" && message?.content) {
+            message.content.forEach((contentObj) => {
               if (contentObj.type === "tool_result" && contentObj.tool_use_id) {
                 // Find which tool this result belongs to
                 for (const [toolName, stats] of toolStats.entries()) {
@@ -4976,23 +5360,7 @@ export class DatabaseService {
                     // If duration is 0 (same second), estimate based on tool type
                     // These are typical execution times in milliseconds
                     if (duration === 0) {
-                      const estimatedDurations: Record<string, number> = {
-                        Read: 150,
-                        Write: 200,
-                        Edit: 250,
-                        MultiEdit: 400,
-                        Grep: 100,
-                        Glob: 80,
-                        LS: 50,
-                        Bash: 500,
-                        BashOutput: 30,
-                        KillBash: 50,
-                        Task: 1000,
-                        TodoWrite: 100,
-                        WebSearch: 2000,
-                        WebFetch: 1500,
-                      };
-                      duration = estimatedDurations[toolName] || 100; // Default 100ms for unknown tools
+                      duration = ESTIMATED_TOOL_DURATIONS.get(toolName) ?? 100;
                     }
 
                     if (duration >= 0 && duration < 3600000) {
@@ -5005,7 +5373,7 @@ export class DatabaseService {
               }
             });
           }
-        } catch (e) {
+        } catch {
           // Ignore parse errors
         }
       },

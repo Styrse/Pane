@@ -69,7 +69,7 @@ export function AboutDialog({ isOpen, onClose, onUpdate }: AboutDialogProps) {
 
     try {
       const result = await window.electronAPI.checkForUpdates();
-      if (result.success) {
+      if (result.success && result.data) {
         setVersionInfo(result.data);
         if (result.data.hasUpdate) {
           handleUpdate(result.data);
@@ -110,7 +110,7 @@ export function AboutDialog({ isOpen, onClose, onUpdate }: AboutDialogProps) {
       onClose={onClose}
       size="sm"
       restoreFocusOnClose={!isHandingOff}
-      className="mx-auto !w-[360px] max-w-full !rounded-xl border border-border-primary/50 !bg-surface-primary !shadow-2xl"
+      className="mx-auto !w-[360px] max-w-full !rounded-xl border border-border-primary !bg-surface-primary !shadow-2xl"
     >
         <LiveRegion>
           {isChecking
@@ -131,6 +131,7 @@ export function AboutDialog({ isOpen, onClose, onUpdate }: AboutDialogProps) {
               alt="Pane"
               className="w-16 h-16 mb-4"
               onError={(e) => {
+                // SAFETY: The registered DOM/custom-event source establishes this target and detail shape.
                 (e.target as HTMLImageElement).style.display = 'none';
               }}
             />
@@ -223,7 +224,7 @@ export function AboutDialog({ isOpen, onClose, onUpdate }: AboutDialogProps) {
           {/* Links - minimal style */}
           <div className="flex items-center justify-center gap-4 text-xs text-text-tertiary">
             <a
-              href="https://github.com/dcouple/Pane"
+              href="https://github.com/greenfield-inc/Pane"
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center gap-1 hover:text-text-secondary transition-colors"
@@ -253,7 +254,7 @@ export function AboutDialog({ isOpen, onClose, onUpdate }: AboutDialogProps) {
         </div>
 
         {/* Footer */}
-        <div className="px-8 py-4 bg-surface-secondary/50 border-t border-border-primary/50">
+        <div className="px-8 py-4 bg-surface-secondary/50 border-t border-border-primary">
           <p className="text-[10px] text-text-tertiary text-center leading-relaxed">
             Made by <a href="https://dcouple.ai" target="_blank" rel="noopener noreferrer" className="hover:text-text-secondary">Dcouple</a> · macOS, Windows & Linux
           </p>

@@ -8,6 +8,8 @@ import type { VoiceTranscriptionMode } from '../../../shared/types/voiceTranscri
 import { ShellDetector } from '../utils/shellDetector';
 import { syncAutoStartOnBoot } from '../utils/autoStart';
 import { ensureProjectAgentContext } from '../services/agentContextManager';
+import { boundary, decodeBoundary } from '../../../shared/validation/boundaryDecoder';
+import { AppearanceValidationError } from '../../../shared/types/appearance';
 
 export function registerConfigHandlers(
   ipcMain: IpcMain,
@@ -107,6 +109,9 @@ export function registerConfigHandlers(
       return { success: true, data: updatedConfig };
     } catch (error) {
       console.error('Failed to update config:', error);
+      if (error instanceof AppearanceValidationError) {
+        return { success: false, error: error.message };
+      }
       return { success: false, error: 'Failed to update config' };
     }
   });
@@ -209,7 +214,12 @@ export function registerConfigHandlers(
                 return;
               }
               try {
-                const data = JSON.parse(spStdout) as { SPFontsDataType?: Array<{ _name?: string; family?: string }> };
+                const data = decodeBoundary(JSON.parse(spStdout), boundary.object({
+                  SPFontsDataType: boundary.optional(boundary.array(boundary.object({
+                    _name: boundary.optional(boundary.string),
+                    family: boundary.optional(boundary.string),
+                  }))),
+                }));
                 const families = new Set<string>();
                 const monoKeywords = ['mono', 'courier', 'console', 'code', 'fixed', 'menlo', 'terminal'];
                 for (const font of data.SPFontsDataType || []) {
@@ -291,6 +301,6 @@ function hasConfiguredValue(...values: Array<string | undefined>): boolean {
   return values.some(value => Boolean(value?.trim()));
 }
 
-function isVoiceTranscriptionMode(value: unknown): value is VoiceTranscriptionMode {
+function isVoiceTranscriptionMode(value: string | undefined): value is VoiceTranscriptionMode {
   return value === 'recorded' || value === 'streaming';
 }

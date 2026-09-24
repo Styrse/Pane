@@ -3,10 +3,8 @@ import { createPortal } from 'react-dom';
 import { CreateSessionDialog } from './CreateSessionDialog';
 import { ProjectSessionList, ArchivedSessions } from './ProjectSessionList';
 import { ArchiveProgress } from './ArchiveProgress';
-import { ArrowUpDown, ChevronDown, ChevronRight, Cpu, FolderGit2, Home, Monitor, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pin, Settings as SettingsIcon, Plus, RefreshCw, MessageSquare } from 'lucide-react';
+import { ArrowUpDown, BarChart3, BookOpen, ChevronDown, ChevronRight, Info, FolderGit2, Home, Monitor, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Pin, Settings as SettingsIcon, Plus, RefreshCw, MessageSquare, SquareTerminal } from 'lucide-react';
 import { SessionDetailTooltip } from './SessionDetailTooltip';
-import { usePaneLogo } from '../hooks/usePaneLogo';
-import { isMac } from '../utils/platformUtils';
 import { IconButton } from './ui/Button';
 import { Tooltip } from './ui/Tooltip';
 import { Kbd } from './ui/Kbd';
@@ -24,17 +22,16 @@ import { API } from '../utils/api';
 import type { Project } from '../types/project';
 import type { Session } from '../types/session';
 import { useSessionNavigationHotkeys } from '../hooks/useSessionNavigationHotkeys';
-import { useResourceMonitor } from '../hooks/useResourceMonitor';
-import {
-  createDefaultRemoteDaemonHostRuntimeState,
-  createDefaultRemotePaneConnectionState,
-  type RemoteDaemonHostRuntimeState,
-  type RemotePaneConnectionState,
-} from '../../../shared/types/remoteDaemon';
+import { useRemoteRuntimeState } from '../hooks/useRemoteRuntimeState';
+import { useAppBuildInfo } from '../hooks/useAppBuildInfo';
+import { CompactSessionMenu, type CompactSessionMenuState } from './CompactSessionMenu';
 import { getRemoteFooterStatus } from '../utils/remoteRuntimePresentation';
 import { usePanelStore } from '../stores/panelStore';
 import { rollupAgentDisplayStatus, rollupSessionAgentState, toAgentDisplayStatus } from '../utils/agentStatus';
 import { createProjectById, getPinnedSessions, groupSessionsByProject } from '../utils/sessionOrdering';
+import { DiscordIcon } from './DiscordIcon';
+import { OrchestrationSessionNav } from './OrchestrationSessionNav';
+import { useOrchestrationSessionStore } from '../stores/orchestrationSessionStore';
 
 // --- Collapsed sidebar tooltip content ---
 
@@ -76,25 +73,21 @@ interface SidebarProps {
   onResize: (e: React.MouseEvent) => void;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
+  /** Title-bar slot the toggle and menu render into; null keeps them in the sidebar header. */
+  titleBarControlsSlot?: HTMLDivElement | null;
   onHelpClick: () => void;
   onDocsClick: () => void;
+  onFeedbackClick: () => void;
+  onDiscordClick: () => void;
 }
 
 const REMOTE_DESKTOP_URL = 'https://remotedesktop.google.com/access';
 const REMOTE_DESKTOP_TOOLTIP = 'Use Remote Desktop to access the host device for Electron apps, native windows, and UI running on the remote machine.';
-const RESOURCE_POPOVER_WIDTH = 320;
-const RESOURCE_POPOVER_GAP = 8;
-const RESOURCE_POPOVER_VIEWPORT_MARGIN = 8;
 type SidebarSection = 'pinned' | 'repositories';
 const COMPACT_RAIL_BUTTON = 'relative flex h-9 min-h-9 w-9 min-w-9 shrink-0 items-center justify-center rounded transition-colors focus:outline-none focus:ring-2 focus:ring-interactive';
 const COMPACT_RAIL_IDLE = 'text-text-tertiary hover:bg-surface-hover hover:text-text-primary';
-const COMPACT_RAIL_ACTIVE = 'bg-surface-hover text-text-primary';
+const COMPACT_RAIL_ACTIVE = 'bg-surface-selected text-text-primary';
 
-function formatMemory(mb: number): string {
-  if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
-  if (mb >= 1) return `${Math.round(mb)} MB`;
-  return `${Math.round(mb * 1024)} KB`;
-}
 
 const HelpCircleIcon = ({ className }: { className?: string }) => (
   <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -102,63 +95,29 @@ const HelpCircleIcon = ({ className }: { className?: string }) => (
   </svg>
 );
 
-export function Sidebar({ onAboutClick, onSettingsClick, onRemoteSettingsClick, width, onResize, collapsed, onToggleCollapse, onHelpClick, onDocsClick }: SidebarProps) {
-  const paneLogo = usePaneLogo();
+export function Sidebar({ onAboutClick, onSettingsClick, onRemoteSettingsClick, width, onResize, collapsed, onToggleCollapse, titleBarControlsSlot, onHelpClick, onDocsClick, onFeedbackClick, onDiscordClick }: SidebarProps) {
+  const useCompactFooterActions = width < 260;
   const hotkeys = useHotkeyStore((s) => s.hotkeys);
   const hotkeyDisplay = useCallback((id: string) => {
     const keys = hotkeys.get(id)?.keys;
     return keys ? formatKeyDisplay(keys) : null;
   }, [hotkeys]);
-  const [version, setVersion] = useState<string>('');
-  const [gitCommit, setGitCommit] = useState<string>('');
-  const [worktreeName, setWorktreeName] = useState<string>('');
+  const { version, gitCommit, worktreeName } = useAppBuildInfo();
   const [sessionSortAscending, setSessionSortAscending] = useState<boolean>(true); // Default to ascending (newest at bottom)
   const [sidebarSectionExpansion, setSidebarSectionExpansion] = useState<Record<SidebarSection, boolean>>({
     pinned: true,
     repositories: true,
   });
-  const [remoteConnectionState, setRemoteConnectionState] = useState<RemotePaneConnectionState>(createDefaultRemotePaneConnectionState());
-  const [remoteHostState, setRemoteHostState] = useState<RemoteDaemonHostRuntimeState>(createDefaultRemoteDaemonHostRuntimeState());
-  const resourceMenuButtonRef = useRef<HTMLButtonElement>(null);
-  const resourcePopoverRef = useRef<HTMLDivElement>(null);
-  const [showResourcePopover, setShowResourcePopover] = useState(false);
-  const [resourcePopoverStyle, setResourcePopoverStyle] = useState<React.CSSProperties>({});
-  const [expandedResourceSections, setExpandedResourceSections] = useState<Set<string>>(new Set(['pane-app']));
-  const { snapshot, isLoading: resourceLoading, startActive, stopActive, refresh } = useResourceMonitor();
+  const { connectionState: remoteConnectionState, hostState: remoteHostState } = useRemoteRuntimeState();
   const hydrateExpandedProjects = useNavigationStore(s => s.hydrateExpandedProjects);
 
   useEffect(() => {
-    // Fetch version info and UI state on component mount
-    const fetchVersion = async () => {
-      try {
-        console.log('[Sidebar Debug] Fetching version info...');
-        const result = await window.electronAPI.getVersionInfo();
-        console.log('[Sidebar Debug] Version info result:', result);
-        if (result.success && result.data) {
-          console.log('[Sidebar Debug] Version data:', result.data);
-          if (result.data.current) {
-            setVersion(result.data.current);
-            console.log('[Sidebar Debug] Set version:', result.data.current);
-          }
-          if (result.data.gitCommit) {
-            setGitCommit(result.data.gitCommit);
-            console.log('[Sidebar Debug] Set gitCommit:', result.data.gitCommit);
-          }
-          if (result.data.worktreeName) {
-            setWorktreeName(result.data.worktreeName);
-            console.log('[Sidebar Debug] Set worktreeName:', result.data.worktreeName);
-          } else {
-            console.log('[Sidebar Debug] No worktreeName in response');
-          }
-        }
-      } catch (error) {
-        console.error('Failed to fetch version:', error);
-      }
-    };
+    let cancelled = false;
 
     const loadUIState = async () => {
       try {
         const result = await window.electronAPI.uiState.getExpanded();
+        if (cancelled) return;
         if (result.success && result.data) {
           setSessionSortAscending(result.data.sessionSortAscending ?? true);
           hydrateExpandedProjects(result.data.expandedProjects ?? []);
@@ -172,41 +131,12 @@ export function Sidebar({ onAboutClick, onSettingsClick, onRemoteSettingsClick, 
       }
     };
 
-    fetchVersion();
-    loadUIState();
-  }, [hydrateExpandedProjects]);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const fetchRemoteState = async () => {
-      try {
-        const [connectionResponse, hostResponse] = await Promise.all([
-          API.remoteDaemon.getConnectionState(),
-          API.remoteDaemon.getHostState(),
-        ]);
-
-        if (!cancelled && connectionResponse.success && connectionResponse.data) {
-          setRemoteConnectionState(connectionResponse.data);
-        }
-        if (!cancelled && hostResponse.success && hostResponse.data) {
-          setRemoteHostState(hostResponse.data);
-        }
-      } catch (error) {
-        console.error('Failed to fetch remote runtime state:', error);
-      }
-    };
-
-    const unsubscribeConnectionState = API.remoteDaemon.onConnectionStateChanged(setRemoteConnectionState);
-    const unsubscribeHostState = API.remoteDaemon.onHostStateChanged(setRemoteHostState);
-    void fetchRemoteState();
+    void loadUIState();
 
     return () => {
       cancelled = true;
-      unsubscribeConnectionState();
-      unsubscribeHostState();
     };
-  }, []);
+  }, [hydrateExpandedProjects]);
 
   const toggleSessionSortOrder = async () => {
     const newValue = !sessionSortAscending;
@@ -235,121 +165,16 @@ export function Sidebar({ onAboutClick, onSettingsClick, onRemoteSettingsClick, 
     handleSidebarSectionExpandedChange('pinned', expanded);
   }, [handleSidebarSectionExpandedChange]);
 
+  const addRepositoryRef = useRef<(() => void) | null>(null);
+  const registerAddRepository = useCallback((open: () => void) => {
+    addRepositoryRef.current = open;
+  }, []);
+
   const handleRepositoriesSectionExpandedChange = useCallback((expanded: boolean) => {
     handleSidebarSectionExpandedChange('repositories', expanded);
   }, [handleSidebarSectionExpandedChange]);
 
-  const openResourcePopover = useCallback(() => {
-    setShowResourcePopover(true);
-    void refresh();
-    startActive();
-  }, [refresh, startActive]);
 
-  const closeResourcePopover = useCallback((restoreFocus = false) => {
-    setShowResourcePopover(false);
-    stopActive();
-    if (restoreFocus) {
-      requestAnimationFrame(() => resourceMenuButtonRef.current?.focus());
-    }
-  }, [stopActive]);
-
-  const toggleResourceSection = useCallback((id: string) => {
-    setExpandedResourceSections(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }, []);
-
-  const handleResourceRefresh = useCallback(() => {
-    void refresh();
-  }, [refresh]);
-
-  useEffect(() => {
-    if (!showResourcePopover || !resourceMenuButtonRef.current) return;
-
-    const updatePosition = () => {
-      if (!resourceMenuButtonRef.current) return;
-      const rect = resourceMenuButtonRef.current.getBoundingClientRect();
-      const popoverWidth = Math.min(
-        RESOURCE_POPOVER_WIDTH,
-        window.innerWidth - RESOURCE_POPOVER_VIEWPORT_MARGIN * 2,
-      );
-      const rightSideLeft = rect.right + RESOURCE_POPOVER_GAP;
-      const leftSideLeft = rect.left - RESOURCE_POPOVER_GAP - popoverWidth;
-      const maxLeft = window.innerWidth - popoverWidth - RESOURCE_POPOVER_VIEWPORT_MARGIN;
-      const left = rightSideLeft <= maxLeft
-        ? rightSideLeft
-        : Math.max(RESOURCE_POPOVER_VIEWPORT_MARGIN, leftSideLeft);
-
-      setResourcePopoverStyle({
-        position: 'fixed',
-        top: rect.bottom + 8,
-        left: Math.min(left, maxLeft),
-        zIndex: 10000,
-      });
-    };
-
-    updatePosition();
-    window.addEventListener('resize', updatePosition);
-    window.addEventListener('scroll', updatePosition, true);
-    return () => {
-      window.removeEventListener('resize', updatePosition);
-      window.removeEventListener('scroll', updatePosition, true);
-    };
-  }, [showResourcePopover]);
-
-  useEffect(() => {
-    if (!showResourcePopover) return;
-
-    const focusFrame = requestAnimationFrame(() => {
-      resourcePopoverRef.current
-        ?.querySelector<HTMLElement>('button:not(:disabled), [tabindex="0"]')
-        ?.focus();
-    });
-
-    const handleClickOutside = (event: MouseEvent) => {
-      const target = event.target as Node;
-      if (
-        resourceMenuButtonRef.current && !resourceMenuButtonRef.current.contains(target) &&
-        resourcePopoverRef.current && !resourcePopoverRef.current.contains(target)
-      ) {
-        closeResourcePopover();
-      }
-    };
-
-    const timer = setTimeout(() => document.addEventListener('mousedown', handleClickOutside), 0);
-    return () => {
-      cancelAnimationFrame(focusFrame);
-      clearTimeout(timer);
-      document.removeEventListener('mousedown', handleClickOutside);
-    };
-  }, [showResourcePopover, closeResourcePopover]);
-
-  useEffect(() => {
-    if (!showResourcePopover) return;
-
-    const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        closeResourcePopover(true);
-      }
-    };
-
-    document.addEventListener('keydown', handleEscape);
-    return () => document.removeEventListener('keydown', handleEscape);
-  }, [showResourcePopover, closeResourcePopover]);
-
-  const electronTotalCpu = useMemo(
-    () => snapshot?.electronProcesses.reduce((sum, p) => sum + p.cpuPercent, 0) ?? 0,
-    [snapshot],
-  );
-
-  const electronTotalMem = useMemo(
-    () => snapshot?.electronProcesses.reduce((sum, p) => sum + p.memoryMB, 0) ?? 0,
-    [snapshot],
-  );
 
   const sessions = useSessionStore((state) => state.sessions);
   const activeSessionId = useSessionStore((state) => state.activeSessionId);
@@ -374,18 +199,26 @@ export function Sidebar({ onAboutClick, onSettingsClick, onRemoteSettingsClick, 
   // State for collapsed sidebar
   const [projects, setProjects] = useState<Project[]>([]);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
+  const [compactSessionMenu, setCompactSessionMenu] = useState<CompactSessionMenuState | null>(null);
   const activeProjectId = useNavigationStore((state) => state.activeProjectId);
   const activeView = useNavigationStore((state) => state.activeView);
   const expandedProjects = useNavigationStore((state) => state.expandedProjects);
   const navigateToProject = useNavigationStore((state) => state.navigateToProject);
   const navigateToSessions = useNavigationStore((state) => state.navigateToSessions);
   const navigateToPaneChat = useNavigationStore((state) => state.navigateToPaneChat);
+  const navigateToUsage = useNavigationStore((state) => state.navigateToUsage);
   const paneChatStatus = useSessionAgentDisplayStatus(PANE_CHAT_SESSION_ID);
+  const orchestrationAvailability = useOrchestrationSessionStore((state) => state.availability);
+  const loadOrchestrationSessions = useOrchestrationSessionStore((state) => state.load);
   const setSidebarNavigationScope = useNavigationStore((state) => state.setSidebarNavigationScope);
   const agentStatusByPanel = usePanelStore((state) => state.agentStatus);
   const agentPanelSessions = usePanelStore((state) => state.agentStatusSession);
   const unviewedBySession = usePanelStore((state) => state.unviewedCompletedActivity);
   useSessionNavigationHotkeys({ projects, sessionSortAscending });
+
+  useEffect(() => {
+    void loadOrchestrationSessions();
+  }, [loadOrchestrationSessions]);
 
   const handleRefreshGitStatus = async () => {
     try {
@@ -435,12 +268,132 @@ export function Sidebar({ onAboutClick, onSettingsClick, onRemoteSettingsClick, 
   );
 
   const openCompactSession = useCallback((sessionId: string, scope: 'pinned' | 'repositories') => {
+    setCompactSessionMenu(null);
     setSidebarNavigationScope(scope);
     void setActiveSession(sessionId);
     navigateToSessions();
   }, [navigateToSessions, setActiveSession, setSidebarNavigationScope]);
 
-  // Collapsed sidebar view
+  const openCompactSessionMenu = useCallback((event: React.MouseEvent, session: Session) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setCompactSessionMenu({ session, x: event.clientX, y: event.clientY });
+  }, []);
+
+  const archiveCompactSession = useCallback(async () => {
+    if (!compactSessionMenu) return;
+    const { id } = compactSessionMenu.session;
+    setCompactSessionMenu(null);
+    try {
+      await API.sessions.delete(id);
+    } catch (error) {
+      console.error('Failed to archive session:', error);
+    }
+  }, [compactSessionMenu]);
+
+  const toggleCompactSessionPinned = useCallback(async () => {
+    if (!compactSessionMenu) return;
+    const { id } = compactSessionMenu.session;
+    setCompactSessionMenu(null);
+    try {
+      await API.sessions.toggleFavorite(id);
+    } catch (error) {
+      console.error('Failed to toggle pinned session:', error);
+    }
+  }, [compactSessionMenu]);
+
+  const sidebarMenuItems = [
+        {
+          id: 'help',
+          label: 'Help',
+          icon: HelpCircleIcon,
+          onClick: onHelpClick
+        },
+        {
+          id: 'settings',
+          label: 'Settings',
+          icon: SettingsIcon,
+          onClick: onSettingsClick
+        },
+        {
+          id: 'sort',
+          label: sessionSortAscending ? 'Sort: Oldest first' : 'Sort: Newest first',
+          icon: ArrowUpDown,
+          onClick: toggleSessionSortOrder
+        },
+        {
+          id: 'refresh',
+          label: 'Refresh git status',
+          icon: RefreshCw,
+          onClick: handleRefreshGitStatus
+        },
+        {
+          id: 'remote',
+          label: 'Remote',
+          description: remoteFooterStatus.title,
+          icon: Monitor,
+          showDot: true,
+          dotColor: remoteFooterStatus.dotClassName,
+          onClick: onRemoteSettingsClick
+        },
+        {
+          id: 'feedback',
+          label: 'Feedback',
+          icon: MessageSquare,
+          onClick: onFeedbackClick
+        },
+        {
+          id: 'discord',
+          label: 'Discord',
+          icon: DiscordIcon,
+          onClick: onDiscordClick
+        },
+        {
+          id: 'docs',
+          label: 'Docs',
+          icon: BookOpen,
+          onClick: onDocsClick
+        },
+        {
+          id: 'about',
+          label: version ? `About Pane · v${version}` : 'About Pane',
+          description: [worktreeName, gitCommit].filter(Boolean).join(' · ') || undefined,
+          icon: Info,
+          onClick: onAboutClick
+        }
+  ] satisfies DropdownItem[];
+
+  // Title-strip controls (portalled into the window title bar when it has a
+  // slot; rendered inline by each layout otherwise).
+  const headerControls = (
+    <>
+      {onToggleCollapse && (
+        <Tooltip content={hotkeyDisplay('toggle-sidebar') ? <Kbd>{hotkeyDisplay('toggle-sidebar')}</Kbd> : undefined} side="bottom">
+          <IconButton
+            type="button"
+            onClick={onToggleCollapse}
+            aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            size="sm"
+            icon={collapsed ? <PanelLeftOpen className="w-4 h-4" /> : <PanelLeftClose className="w-4 h-4" />}
+          />
+        </Tooltip>
+      )}
+      <Dropdown
+        trigger={
+          <IconButton
+            type="button"
+            aria-label="Sidebar menu"
+            size="sm"
+            icon={<MoreHorizontal className="w-4 h-4" />}
+          />
+        }
+        items={sidebarMenuItems}
+        position="bottom-left"
+        width="sm"
+      />
+    </>
+  );
+
   if (collapsed) {
     return (
       <>
@@ -449,14 +402,7 @@ export function Sidebar({ onAboutClick, onSettingsClick, onRemoteSettingsClick, 
           className="pane-sidebar-shell pane-sidebar-shell-collapsed bg-surface-primary text-text-primary h-full flex flex-col flex-shrink-0"
           style={{ width: '48px' }}
         >
-          {/* Drag handle for window (not needed on macOS — handled by App-level spacer) */}
-          {!isMac() && (
-            <div className="h-3 flex-shrink-0" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties} />
-          )}
-          {/* Logo */}
-          <div className="flex shrink-0 items-center justify-center border-b border-border-primary px-1 py-2">
-            <img src={paneLogo} alt="Pane" className="h-6 w-6" />
-          </div>
+          {titleBarControlsSlot && createPortal(headerControls, titleBarControlsSlot)}
 
           <div className="flex shrink-0 flex-col items-center gap-1 border-b border-border-primary py-2">
             <Tooltip content="Home" side="right">
@@ -475,21 +421,41 @@ export function Sidebar({ onAboutClick, onSettingsClick, onRemoteSettingsClick, 
               </button>
             </Tooltip>
 
-            <Tooltip content="Pane Chat" side="right">
+            {orchestrationAvailability === 'ready' || orchestrationAvailability === 'loading' || orchestrationAvailability === 'error' ? (
+              <OrchestrationSessionNav compact />
+            ) : (
+              <Tooltip content="Pane Chat" side="right">
+                <button
+                  type="button"
+                  data-testid="compact-pane-chat"
+                  data-compact-rail-item
+                  onClick={() => {
+                    setSidebarNavigationScope('repositories');
+                    void setActiveSession(null);
+                    navigateToPaneChat();
+                  }}
+                  aria-label="Pane Chat"
+                  className={`${COMPACT_RAIL_BUTTON} ${activeView === 'pane-chat' ? COMPACT_RAIL_ACTIVE : COMPACT_RAIL_IDLE}`}
+                >
+                  <MessageSquare className="h-4 w-4" />
+                  <AgentStatusDot status={paneChatStatus} size="sm" className="absolute right-0 top-0" />
+                </button>
+              </Tooltip>
+            )}
+
+            <Tooltip content="Usage & Limits" side="right">
               <button
                 type="button"
-                data-testid="compact-pane-chat"
+                data-testid="compact-usage"
                 data-compact-rail-item
                 onClick={() => {
                   setSidebarNavigationScope('repositories');
-                  void setActiveSession(null);
-                  navigateToPaneChat();
+                  navigateToUsage();
                 }}
-                aria-label="Pane Chat"
-                className={`${COMPACT_RAIL_BUTTON} ${activeView === 'pane-chat' ? COMPACT_RAIL_ACTIVE : COMPACT_RAIL_IDLE}`}
+                aria-label="Usage and Limits"
+                className={`${COMPACT_RAIL_BUTTON} ${activeView === 'usage' ? COMPACT_RAIL_ACTIVE : COMPACT_RAIL_IDLE}`}
               >
-                <MessageSquare className="h-4 w-4" />
-                <AgentStatusDot status={paneChatStatus} size="sm" className="absolute right-0 top-0" />
+                <BarChart3 className="h-4 w-4" />
               </button>
             </Tooltip>
 
@@ -536,18 +502,26 @@ export function Sidebar({ onAboutClick, onSettingsClick, onRemoteSettingsClick, 
                     key={`compact-pinned-${session.id}`}
                     content={<CompactSessionTooltip session={session} label={label} />}
                     side="right"
+                    interactive
                   >
                     <button
                       type="button"
                       data-testid={`compact-pinned-pane-${session.id}`}
                       data-compact-rail-item
                       onClick={() => openCompactSession(session.id, 'pinned')}
+                      onContextMenu={(event) => openCompactSessionMenu(event, session)}
                       aria-label={`Open pinned pane ${label}`}
                       className={`${COMPACT_RAIL_BUTTON} ${session.id === activeSessionId && activeView === 'sessions' ? COMPACT_RAIL_ACTIVE : COMPACT_RAIL_IDLE}`}
                     >
                       <SessionStatusBadge
                         sessionId={session.id}
-                        unknownClassName="bg-text-tertiary/60 opacity-100 duration-150"
+                        unknownFallback={(
+                          <SquareTerminal
+                            data-testid={`compact-pinned-pane-placeholder-${session.id}`}
+                            aria-hidden="true"
+                            className="h-4 w-4 text-text-tertiary"
+                          />
+                        )}
                       />
                     </button>
                   </Tooltip>
@@ -607,18 +581,26 @@ export function Sidebar({ onAboutClick, onSettingsClick, onRemoteSettingsClick, 
                         key={session.id}
                         content={<CompactSessionTooltip session={session} label={session.name || 'Untitled'} />}
                         side="right"
+                        interactive
                       >
                         <button
                           type="button"
                           data-testid={`compact-repository-pane-${session.id}`}
                           data-compact-rail-item
                           onClick={() => openCompactSession(session.id, 'repositories')}
+                          onContextMenu={(event) => openCompactSessionMenu(event, session)}
                           aria-label={`Open pane ${project.name}/${session.name || 'Untitled'}`}
                           className={`${COMPACT_RAIL_BUTTON} ${session.id === activeSessionId && activeView === 'sessions' ? COMPACT_RAIL_ACTIVE : COMPACT_RAIL_IDLE}`}
                         >
                           <SessionStatusBadge
                             sessionId={session.id}
-                            unknownClassName="bg-text-tertiary/60 opacity-100 duration-150"
+                            unknownFallback={(
+                              <SquareTerminal
+                                data-testid={`compact-repository-pane-placeholder-${session.id}`}
+                                aria-hidden="true"
+                                className="h-4 w-4 text-text-tertiary"
+                              />
+                            )}
                           />
                         </button>
                       </Tooltip>
@@ -667,17 +649,34 @@ export function Sidebar({ onAboutClick, onSettingsClick, onRemoteSettingsClick, 
                 <SettingsIcon className="h-4 w-4" />
               </button>
             </Tooltip>
-            <Tooltip content={hotkeyDisplay('toggle-sidebar') ? <Kbd>{hotkeyDisplay('toggle-sidebar')}</Kbd> : undefined} side="right">
-              <button
-                type="button"
-                data-compact-rail-item
-                onClick={onToggleCollapse}
-                aria-label="Expand sidebar"
-                className={`${COMPACT_RAIL_BUTTON} ${COMPACT_RAIL_IDLE}`}
-              >
-                <PanelLeftOpen className="h-4 w-4" />
-              </button>
-            </Tooltip>
+            {!titleBarControlsSlot && (<>
+              <Dropdown
+                trigger={
+                  <button
+                    type="button"
+                    data-compact-rail-item
+                    aria-label="Sidebar menu"
+                    className={`${COMPACT_RAIL_BUTTON} ${COMPACT_RAIL_IDLE}`}
+                  >
+                    <MoreHorizontal className="h-4 w-4" />
+                  </button>
+                }
+                items={sidebarMenuItems}
+                position="top-right"
+                width="sm"
+              />
+              <Tooltip content={hotkeyDisplay('toggle-sidebar') ? <Kbd>{hotkeyDisplay('toggle-sidebar')}</Kbd> : undefined} side="right">
+                <button
+                  type="button"
+                  data-compact-rail-item
+                  onClick={onToggleCollapse}
+                  aria-label="Expand sidebar"
+                  className={`${COMPACT_RAIL_BUTTON} ${COMPACT_RAIL_IDLE}`}
+                >
+                  <PanelLeftOpen className="h-4 w-4" />
+                </button>
+              </Tooltip>
+            </>)}
           </div>
         </div>
 
@@ -689,6 +688,13 @@ export function Sidebar({ onAboutClick, onSettingsClick, onRemoteSettingsClick, 
             projectId={activeProject.id}
           />
         )}
+
+        <CompactSessionMenu
+          menu={compactSessionMenu}
+          onClose={() => setCompactSessionMenu(null)}
+          onTogglePinned={() => void toggleCompactSessionPinned()}
+          onArchive={() => void archiveCompactSession()}
+        />
       </>
     );
   }
@@ -700,91 +706,23 @@ export function Sidebar({ onAboutClick, onSettingsClick, onRemoteSettingsClick, 
         className="pane-sidebar-shell bg-surface-primary text-text-primary h-full flex flex-col relative flex-shrink-0"
         style={{ width: `${width}px` }}
       >
-        {/* Drag handle for window (not needed on macOS — handled by App-level spacer) */}
-        {!isMac() && (
-          <div className="h-3 flex-shrink-0" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties} />
-        )}
         {/* Resize handle */}
         <div
           className="absolute top-0 right-0 w-1 h-full cursor-col-resize group z-10"
           onMouseDown={onResize}
         >
-          {/* Visual indicator */}
-          <div className="absolute inset-0 group-hover:bg-interactive transition-colors" />
+          {/* Visual indicator: the theme's border-hover tone, not the accent */}
+          <div className="absolute inset-0 group-hover:bg-border-hover group-active:bg-border-hover" />
           {/* Larger grab area */}
           <div className="absolute -left-2 -right-2 top-0 bottom-0" />
-          {/* Drag indicator dots */}
-          <div className="absolute top-1/2 -translate-y-1/2 right-0 transform translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity">
-            <div className="flex flex-col gap-1">
-              <div className="w-1 h-1 bg-interactive rounded-full" />
-              <div className="w-1 h-1 bg-interactive rounded-full" />
-              <div className="w-1 h-1 bg-interactive rounded-full" />
+        </div>
+        {titleBarControlsSlot
+          ? createPortal(headerControls, titleBarControlsSlot)
+          : (
+            <div className="flex h-8 items-center justify-end gap-0.5 border-b border-border-primary px-1.5">
+              {headerControls}
             </div>
-          </div>
-        </div>
-        <div className="px-3 py-2 border-b border-border-primary flex items-center justify-between overflow-hidden">
-          <div className="flex items-center space-x-2 min-w-0">
-            <img src={paneLogo} alt="Pane" className="h-6 w-6 flex-shrink-0" />
-            <h1 className="text-xl font-bold truncate">Pane</h1>
-          </div>
-          <div className="flex items-center space-x-2 flex-shrink-0">
-            {onToggleCollapse && (
-              <Tooltip content={hotkeyDisplay('toggle-sidebar') ? <Kbd>{hotkeyDisplay('toggle-sidebar')}</Kbd> : undefined} side="bottom">
-                <IconButton
-                  onClick={onToggleCollapse}
-                  aria-label="Collapse sidebar"
-                  size="md"
-                  icon={<PanelLeftClose className="w-5 h-5" />}
-                />
-              </Tooltip>
-            )}
-            <Dropdown
-              trigger={
-                <button
-                  ref={resourceMenuButtonRef}
-                  className="p-1 rounded-md hover:bg-interactive/10 text-text-secondary hover:text-text-primary"
-                  aria-label="Sidebar menu"
-                >
-                  <MoreHorizontal size={14} />
-                </button>
-              }
-              items={[
-                {
-                  id: 'help',
-                  label: 'Help',
-                  icon: HelpCircleIcon,
-                  onClick: onHelpClick
-                },
-                {
-                  id: 'settings',
-                  label: 'Settings',
-                  icon: SettingsIcon,
-                  onClick: onSettingsClick
-                },
-                {
-                  id: 'resources',
-                  label: 'Resource Usage',
-                  icon: Cpu,
-                  onClick: openResourcePopover
-                },
-                {
-                  id: 'sort',
-                  label: sessionSortAscending ? 'Sort: Oldest first' : 'Sort: Newest first',
-                  icon: ArrowUpDown,
-                  onClick: toggleSessionSortOrder
-                },
-                {
-                  id: 'refresh',
-                  label: 'Refresh git status',
-                  icon: RefreshCw,
-                  onClick: handleRefreshGitStatus
-                }
-              ] satisfies DropdownItem[]}
-              position="bottom-right"
-              width="sm"
-            />
-          </div>
-        </div>
+          )}
 
         <div className="flex-1 overflow-y-auto overflow-x-hidden min-h-0">
           <ProjectSessionList
@@ -796,6 +734,7 @@ export function Sidebar({ onAboutClick, onSettingsClick, onRemoteSettingsClick, 
             repositoriesSectionExpanded={sidebarSectionExpansion.repositories}
             onPinnedSectionExpandedChange={handlePinnedSectionExpandedChange}
             onRepositoriesSectionExpandedChange={handleRepositoriesSectionExpandedChange}
+            onRegisterAddRepository={registerAddRepository}
             showRemoteDesktopLink={showRemoteDesktopLink}
             onRemoteDesktopClick={handleOpenRemoteDesktop}
             remoteDesktopTooltip={REMOTE_DESKTOP_TOOLTIP}
@@ -807,156 +746,50 @@ export function Sidebar({ onAboutClick, onSettingsClick, onRemoteSettingsClick, 
           <ArchivedSessions />
         </div>
 
+        {/* Primary creation plus quiet utility actions. */}
+        <div className="flex h-12 flex-shrink-0 items-center gap-1 border-t border-border-primary pl-2 pr-2">
+          <button
+            type="button"
+            onClick={() => addRepositoryRef.current?.()}
+            className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-[13px] text-text-secondary hover:bg-surface-hover hover:text-text-primary"
+          >
+            <Plus className="h-4 w-4 flex-shrink-0" />
+            <span className="truncate">Add repository</span>
+          </button>
+          <button
+            type="button"
+            onClick={onFeedbackClick}
+            aria-label="Feedback"
+            className="flex h-8 flex-shrink-0 items-center gap-1.5 rounded-md px-2 text-[12px] text-text-tertiary hover:bg-surface-hover hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring-subtle"
+          >
+            <MessageSquare className="h-3.5 w-3.5" />
+            {!useCompactFooterActions && <span>Feedback</span>}
+          </button>
+          <button
+            type="button"
+            onClick={onDiscordClick}
+            aria-label="Discord"
+            className="flex h-8 flex-shrink-0 items-center gap-1.5 rounded-md px-2 text-[12px] text-text-tertiary hover:bg-surface-hover hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring-subtle"
+          >
+            <DiscordIcon className="h-3.5 w-3.5" />
+            {!useCompactFooterActions && <span>Discord</span>}
+          </button>
+          <IconButton
+            aria-label="Settings"
+            onClick={onSettingsClick}
+            size="sm"
+            variant="ghost"
+            icon={<SettingsIcon className="h-4 w-4" />}
+          />
+        </div>
+
         {/* Bottom section - always visible */}
         <div className="flex-shrink-0">
           {/* Archive progress indicator above version */}
           <ArchiveProgress />
 
-          {/* Version display at bottom */}
-          <div className="px-3 py-2 border-t border-border-primary space-y-1.5">
-            <Tooltip content={remoteFooterTooltip} side="top" interactive delay={250} className="block">
-              <button
-                type="button"
-                onClick={onRemoteSettingsClick}
-                aria-label={remoteFooterStatus.ariaLabel}
-                className="flex w-full items-center justify-center gap-1.5 text-xs text-text-tertiary hover:text-text-secondary transition-colors truncate"
-              >
-                <span className={`h-2 w-2 rounded-full flex-shrink-0 ${remoteFooterStatus.dotClassName}`} />
-                <span className="font-medium">Remote</span>
-              </button>
-            </Tooltip>
-            {version && (
-              <div className="flex items-center justify-center gap-1.5 text-xs text-text-tertiary truncate">
-                <button
-                  type="button"
-                  className="hover:text-text-secondary transition-colors"
-                  onClick={onAboutClick}
-                  aria-label={`About Pane version ${version}`}
-                >
-                  v{version}{worktreeName && ` \u00b7 ${worktreeName}`}{gitCommit && ` \u00b7 ${gitCommit}`}
-                </button>
-                <span className="text-border-primary">&middot;</span>
-                <button
-                  type="button"
-                  className="hover:text-text-secondary transition-colors"
-                  onClick={onDocsClick}
-                >
-                  Docs
-                </button>
-              </div>
-            )}
-          </div>
         </div>
     </div>
-
-      {showResourcePopover && createPortal(
-        <div
-          ref={resourcePopoverRef}
-          role="dialog"
-          aria-label="Resource Usage"
-          aria-busy={resourceLoading}
-          tabIndex={-1}
-          className="bg-surface-primary border border-border-subtle/60 rounded-lg shadow-dropdown-elevated backdrop-blur-sm animate-dropdown-enter overflow-hidden w-[320px] max-w-[calc(100vw-16px)]"
-          style={resourcePopoverStyle}
-        >
-          <div className="flex items-center justify-between px-3 py-2 border-b border-border-secondary">
-            <span className="text-[10px] font-semibold text-text-tertiary tracking-wider uppercase">
-              Resource Usage
-            </span>
-            <button
-              type="button"
-              onClick={handleResourceRefresh}
-              className="p-1 rounded text-text-tertiary hover:text-text-primary hover:bg-surface-hover transition-colors"
-              disabled={resourceLoading}
-              aria-label="Refresh resource usage"
-            >
-              <RefreshCw aria-hidden="true" className={`w-3.5 h-3.5 ${resourceLoading ? 'animate-spin' : ''}`} />
-            </button>
-          </div>
-
-          {!snapshot ? (
-            <div className="px-3 py-4 text-sm text-text-secondary">
-              {resourceLoading ? 'Loading resource usage...' : 'No resource snapshot yet.'}
-            </div>
-          ) : (
-            <>
-              <div className="flex items-center gap-4 px-3 py-2 border-b border-border-secondary">
-                <span className="text-sm text-text-secondary">
-                  CPU <strong className="text-text-primary">{snapshot.cpuReady ? `${snapshot.totalCpuPercent.toFixed(1)}%` : '-'}</strong>
-                </span>
-                <span className="text-sm text-text-secondary">
-                  Memory <strong className="text-text-primary">{formatMemory(snapshot.totalMemoryMB)}</strong>
-                </span>
-              </div>
-
-              <div className="max-h-[400px] overflow-y-auto">
-                <div className="border-b border-border-secondary">
-                  <button
-                    type="button"
-                    onClick={() => toggleResourceSection('pane-app')}
-                    aria-expanded={expandedResourceSections.has('pane-app')}
-                    aria-controls="resource-pane-app-processes"
-                    className="flex items-center justify-between w-full px-3 py-1.5 hover:bg-surface-hover transition-colors"
-                  >
-                    <div className="flex items-center gap-1.5">
-                      {expandedResourceSections.has('pane-app')
-                        ? <ChevronDown className="w-3 h-3 text-text-quaternary" />
-                        : <ChevronRight className="w-3 h-3 text-text-quaternary" />}
-                      <span className="text-sm font-medium text-text-primary">Pane App</span>
-                    </div>
-                    <div className="flex items-center gap-3 text-xs text-text-tertiary font-mono">
-                      <span>{snapshot.cpuReady ? `${electronTotalCpu.toFixed(1)}%` : '-'}</span>
-                      <span>{formatMemory(electronTotalMem)}</span>
-                    </div>
-                  </button>
-                  {expandedResourceSections.has('pane-app') && <div id="resource-pane-app-processes">{snapshot.electronProcesses.map(p => (
-                    <div key={p.pid} className="flex items-center justify-between px-3 py-1 pl-8">
-                      <span className="text-xs text-text-secondary">{p.label}</span>
-                      <div className="flex items-center gap-3 text-xs text-text-tertiary font-mono">
-                        <span>{snapshot.cpuReady ? `${p.cpuPercent.toFixed(1)}%` : '-'}</span>
-                        <span>{formatMemory(p.memoryMB)}</span>
-                      </div>
-                    </div>
-                  ))}</div>}
-                </div>
-
-                {snapshot.sessions.map(sess => (
-                  <div key={sess.sessionId} className="border-b border-border-secondary">
-                    <button
-                      type="button"
-                      onClick={() => toggleResourceSection(sess.sessionId)}
-                      aria-expanded={expandedResourceSections.has(sess.sessionId)}
-                      aria-controls={`resource-session-${sess.sessionId}`}
-                      className="flex items-center justify-between w-full px-3 py-1.5 hover:bg-surface-hover transition-colors"
-                    >
-                      <div className="flex items-center gap-1.5 min-w-0">
-                        {expandedResourceSections.has(sess.sessionId)
-                          ? <ChevronDown className="w-3 h-3 text-text-quaternary flex-shrink-0" />
-                          : <ChevronRight className="w-3 h-3 text-text-quaternary flex-shrink-0" />}
-                        <span className="text-sm font-medium text-text-primary truncate">{sess.sessionName}</span>
-                      </div>
-                      <div className="flex items-center gap-3 text-xs text-text-tertiary font-mono flex-shrink-0 ml-2">
-                        <span>{snapshot.cpuReady ? `${sess.totalCpuPercent.toFixed(1)}%` : '-'}</span>
-                        <span>{formatMemory(sess.totalMemoryMB)}</span>
-                      </div>
-                    </button>
-                    {expandedResourceSections.has(sess.sessionId) && <div id={`resource-session-${sess.sessionId}`}>{sess.children.map(child => (
-                      <div key={child.pid} className="flex items-center justify-between px-3 py-1 pl-8">
-                        <span className="text-xs text-text-secondary truncate">{child.name}</span>
-                        <div className="flex items-center gap-3 text-xs text-text-tertiary font-mono flex-shrink-0 ml-2">
-                          <span>{snapshot.cpuReady ? `${child.cpuPercent.toFixed(1)}%` : '-'}</span>
-                          <span>{formatMemory(child.memoryMB)}</span>
-                        </div>
-                      </div>
-                    ))}</div>}
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
-        </div>,
-        document.body
-      )}
     </>
   );
 }

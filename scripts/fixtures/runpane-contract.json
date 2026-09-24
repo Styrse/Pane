@@ -68,6 +68,52 @@
       "/tmp/pane"
     ],
     [
+      "doctor",
+      "--report",
+      "--title",
+      "watch failed",
+      "--body-file",
+      "/tmp/watch-evidence.txt",
+      "--json"
+    ],
+    [
+      "watch",
+      "--as",
+      "monitor",
+      "--from",
+      "earliest",
+      "--follow",
+      "--format",
+      "lines",
+      "--heartbeat",
+      "60",
+      "--idle-after",
+      "600000",
+      "--settle",
+      "180000",
+      "--blocked-settle",
+      "30000",
+      "--min-interval",
+      "600000",
+      "--idle-backoff",
+      "--all-managed",
+      "--agents-only",
+      "--exclude-pane",
+      "pane-old",
+      "--kinds",
+      "agent.ready,agent.idle",
+      "--include-held-input",
+      "--self-test"
+    ],
+    [
+      "daemon",
+      "repair",
+      "--pane-dir",
+      "/tmp/pane-remote",
+      "--yes",
+      "--json"
+    ],
+    [
       "agent-context"
     ],
     [
@@ -105,6 +151,13 @@
     ],
     [
       "panes",
+      "cost",
+      "--pane",
+      "session-1",
+      "--json"
+    ],
+    [
+      "panes",
       "create",
       "--repo",
       "active",
@@ -117,6 +170,24 @@
       "--source",
       "agent",
       "--pinned",
+      "--dry-run",
+      "--yes",
+      "--json"
+    ],
+    [
+      "panes",
+      "create",
+      "--repo",
+      "active",
+      "--name",
+      "issue-252",
+      "--agent",
+      "codex",
+      "--prompt",
+      "Kick off discussion",
+      "--source",
+      "agent",
+      "--no-pinned",
       "--dry-run",
       "--yes",
       "--json"
@@ -153,6 +224,28 @@
       "unpin",
       "--pane",
       "session-1",
+      "--yes",
+      "--json"
+    ],
+    [
+      "panes",
+      "rename",
+      "--pane",
+      "session-1",
+      "--name",
+      "issue-393",
+      "--yes",
+      "--json"
+    ],
+    [
+      "panes",
+      "focus",
+      "--pane",
+      "session-1",
+      "--panel",
+      "panel-1",
+      "--source",
+      "user",
       "--yes",
       "--json"
     ],
@@ -280,6 +373,26 @@
       "auto",
       "--yes",
       "--json"
+    ],
+    [
+      "sessions",
+      "list",
+      "--json"
+    ],
+    [
+      "sessions",
+      "get",
+      "--session",
+      "demo",
+      "--json"
+    ],
+    [
+      "sessions",
+      "update",
+      "--session",
+      "demo",
+      "--from-json",
+      "-"
     ]
   ],
   "help": {

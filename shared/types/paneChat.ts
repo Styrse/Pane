@@ -1,11 +1,20 @@
 import type { ToolPanel } from './panels';
+import { boundary, decodeBoundary } from '../validation/boundaryDecoder';
+import type { JsonValue } from '../validation/boundaryDecoder';
 
-export type PaneChatAgent = 'claude' | 'codex';
+export type PaneChatAgent = 'claude' | 'codex' | 'cursor';
 
 export const DEFAULT_PANE_CHAT_AGENT: PaneChatAgent = 'claude';
 export const PANE_CHAT_SESSION_ID = '__pane_chat_session__';
 export const PANE_CHAT_PANEL_ID = '__pane_chat_terminal__';
 export const PANE_CHAT_CODEX_PANEL_ID = '__pane_chat_terminal_codex__';
+export const PANE_CHAT_CURSOR_PANEL_ID = '__pane_chat_terminal_cursor__';
+
+const PANE_CHAT_PANEL_IDS = {
+  claude: PANE_CHAT_PANEL_ID,
+  codex: PANE_CHAT_CODEX_PANEL_ID,
+  cursor: PANE_CHAT_CURSOR_PANEL_ID,
+} satisfies Record<PaneChatAgent, string>;
 
 export interface PaneChatState<TSession = unknown> {
   session: TSession;
@@ -16,10 +25,14 @@ export interface PaneChatState<TSession = unknown> {
   started: boolean;
 }
 
-export function normalizePaneChatAgent(value: unknown): PaneChatAgent {
-  return value === 'codex' ? 'codex' : DEFAULT_PANE_CHAT_AGENT;
+export function normalizePaneChatAgent(value: JsonValue | undefined): PaneChatAgent {
+  try {
+    return decodeBoundary(value, boundary.enumeration('claude', 'codex', 'cursor'));
+  } catch {
+    return DEFAULT_PANE_CHAT_AGENT;
+  }
 }
 
 export function getPaneChatPanelId(agent: PaneChatAgent): string {
-  return agent === 'codex' ? PANE_CHAT_CODEX_PANEL_ID : PANE_CHAT_PANEL_ID;
+  return PANE_CHAT_PANEL_IDS[agent];
 }

@@ -2,7 +2,7 @@ import fs from 'fs';
 import net from 'net';
 import os from 'os';
 import path from 'path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import type { PaneDaemonFrame } from '../../../shared/types/daemon';
 import { PaneCommandRegistry } from './commandRegistry';
 import { encodePaneDaemonFrame, PaneDaemonFrameDecoder } from './socketFraming';
@@ -70,7 +70,10 @@ async function connectClient(server: PaneDaemonServer): Promise<TestClient> {
     socket,
     nextFrame(timeoutMs = 5000) {
       if (queuedFrames.length > 0) {
-        return Promise.resolve(queuedFrames.shift() as PaneDaemonFrame);
+        const queuedFrame = queuedFrames.shift();
+        if (queuedFrame) {
+          return Promise.resolve(queuedFrame);
+        }
       }
 
       return new Promise((resolve, reject) => {
@@ -88,7 +91,7 @@ async function connectClient(server: PaneDaemonServer): Promise<TestClient> {
 }
 
 function getSubscriberCount(server: PaneDaemonServer): number {
-  return (server as unknown as { clients: Map<string, unknown> }).clients.size;
+  return server.getSubscriberCount();
 }
 
 async function waitForSubscriberCount(server: PaneDaemonServer, expectedCount: number): Promise<void> {
@@ -104,7 +107,11 @@ async function waitForSubscriberCount(server: PaneDaemonServer, expectedCount: n
 describe('PaneDaemonServer', () => {
   it('serves registered daemon commands over the local endpoint', async () => {
     const registry = new PaneCommandRegistry();
-    registry.register('sessions:get-all', async () => [{ id: 'session-1' }]);
+    registry.register('sessions:get-all', async () => [{
+      id: 'session-1',
+      omitted: undefined,
+      timestamp: new Date('2026-08-17T00:00:00.000Z'),
+    }]);
 
     const server = new PaneDaemonServer(registry, createTempAppDirectory());
     activeServers.push(server);
@@ -122,7 +129,10 @@ describe('PaneDaemonServer', () => {
       type: 'response',
       id: 1,
       ok: true,
-      result: [{ id: 'session-1' }],
+      result: [{
+        id: 'session-1',
+        timestamp: '2026-08-17T00:00:00.000Z',
+      }],
     });
   });
 
@@ -168,6 +178,42 @@ describe('PaneDaemonServer', () => {
 
     server.getEventSink().send('version:update-available', { version: '1.2.3' });
     await expect(client.nextFrame(100)).rejects.toThrow('Timed out waiting for Pane daemon frame');
+  });
+
+  it('mutes event frames per client without affecting other clients', async () => {
+    const registry = new PaneCommandRegistry();
+    const server = new PaneDaemonServer(registry, createTempAppDirectory());
+    activeServers.push(server);
+    await server.start();
+    const muted = await connectClient(server);
+    const live = await connectClient(server);
+
+    muted.socket.write(encodePaneDaemonFrame({
+      type: 'request', id: 10, channel: 'daemon:events', args: [{ include: [] }],
+    }));
+    await expect(muted.nextFrame()).resolves.toMatchObject({
+      type: 'response', id: 10, ok: true, result: { muted: true, include: [] },
+    });
+
+    server.getEventSink().send('terminal:output', { data: 'noise' });
+    await expect(live.nextFrame()).resolves.toMatchObject({ type: 'event', channel: 'terminal:output' });
+    await expect(muted.nextFrame(100)).rejects.toThrow('Timed out waiting for Pane daemon frame');
+  });
+
+  it('filters event frames by channel prefix', async () => {
+    const registry = new PaneCommandRegistry();
+    const server = new PaneDaemonServer(registry, createTempAppDirectory());
+    activeServers.push(server);
+    await server.start();
+    const client = await connectClient(server);
+    client.socket.write(encodePaneDaemonFrame({
+      type: 'request', id: 11, channel: 'daemon:events', args: [{ include: ['panel:'] }],
+    }));
+    await client.nextFrame();
+
+    server.getEventSink().send('terminal:output', { data: 'ignored' });
+    server.getEventSink().send('panel:agentStatus', { state: 'working' });
+    await expect(client.nextFrame()).resolves.toMatchObject({ type: 'event', channel: 'panel:agentStatus' });
   });
 
   it('forwards logs panel runtime events to daemon clients', async () => {
@@ -311,26 +357,32 @@ describe('PaneDaemonServer', () => {
     }
 
     const registry = new PaneCommandRegistry();
-    const server = new PaneDaemonServer(registry, createTempAppDirectory(), 'linux');
+    let stalledServerSocket: net.Socket | undefined;
+    let stalledWriteCount = 0;
+    let shouldBackpressure = true;
+    const server = new PaneDaemonServer(
+      registry,
+      createTempAppDirectory(),
+      'linux',
+      (clientId, socket, encodedFrame) => {
+        const accepted = socket.write(encodedFrame);
+        if (clientId !== '1') {
+          return accepted;
+        }
+        stalledServerSocket = socket;
+        stalledWriteCount += 1;
+        if (shouldBackpressure) {
+          shouldBackpressure = false;
+          return false;
+        }
+        return accepted;
+      },
+    );
     activeServers.push(server);
     await server.start();
 
     const stalledClient = await connectClient(server);
     const healthyClient = await connectClient(server);
-    const stalledServerSocket = (server as unknown as { clients: Map<string, { socket: net.Socket }> }).clients.get('1')?.socket;
-    expect(stalledServerSocket).toBeDefined();
-    const originalWrite = (stalledServerSocket as net.Socket).write.bind(stalledServerSocket);
-    let shouldBackpressure = true;
-    const stalledWriteSpy = vi.spyOn(stalledServerSocket as net.Socket, 'write').mockImplementation(((...args: Parameters<net.Socket['write']>) => {
-      const result = originalWrite(...args);
-      if (shouldBackpressure) {
-        shouldBackpressure = false;
-        return false;
-      }
-
-      return result;
-    }) as typeof net.Socket.prototype.write);
-
     server.getEventSink().send('terminal:output', {
       panelId: 'panel-1',
       data: 'hello\n',
@@ -367,8 +419,11 @@ describe('PaneDaemonServer', () => {
       }],
     });
 
-    expect(stalledWriteSpy).toHaveBeenCalledTimes(1);
-    stalledServerSocket?.emit('drain');
+    expect(stalledWriteCount).toBe(1);
+    if (!stalledServerSocket) {
+      throw new Error('Expected the stalled daemon client socket to be captured');
+    }
+    stalledServerSocket.emit('drain');
     await expect(stalledClient.nextFrame()).resolves.toEqual({
       type: 'event',
       channel: 'terminal:output',
@@ -378,7 +433,7 @@ describe('PaneDaemonServer', () => {
       }],
     });
 
-    expect(stalledWriteSpy).toHaveBeenCalledTimes(2);
+    expect(stalledWriteCount).toBe(2);
     expect(server.hasSubscribers()).toBe(true);
   });
 

@@ -3,7 +3,13 @@ import { useEffect, useId, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { RemotePwaCustomCommand } from '../../../../shared/types/remoteDaemon';
 import type { ToolPanel } from '../../../../shared/types/panels';
-import { ClaudeIcon, getCliBrandIcon, OpenAIIcon } from '../../components/ui/BrandIcons';
+import { AGENT_LAUNCH_PRESETS } from '../../../../shared/constants/agentLaunchPresets';
+import { getCliBrandIcon } from '../../components/ui/brandIconRegistry';
+import { getRemotePanelTabId, getRemotePanelTabPanelId } from './remotePanelTabIds';
+
+// The remote host executes these commands. Until its platform capabilities are
+// exposed here, the viewer's browser platform must not hide valid host tools.
+const agentPresets = AGENT_LAUNCH_PRESETS;
 
 export interface RemoteTerminalCreateOptions {
   title?: string;
@@ -38,6 +44,7 @@ export function RemotePanelTabs({
     if (!showAddMenu) return;
 
     const closeOnPointerDown = (event: PointerEvent) => {
+      // SAFETY: The registered DOM/custom-event source establishes this target and detail shape.
       if (!menuRef.current?.contains(event.target as Node)) {
         setShowAddMenu(false);
       }
@@ -78,6 +85,7 @@ export function RemotePanelTabs({
 
   const handleMenuKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     const items = menuItemRefs.current.filter((item): item is HTMLButtonElement => Boolean(item));
+    // SAFETY: The registered DOM/custom-event source establishes this target and detail shape.
     const currentIndex = items.indexOf(document.activeElement as HTMLButtonElement);
     let nextIndex: number | null = null;
 
@@ -116,7 +124,9 @@ export function RemotePanelTabs({
             tabIndex={selectedPanelId === panel.id || (!selectedPanelId && index === 0) ? 0 : -1}
             onClick={() => onSelectPanel(panel.id)}
             onKeyDown={(event) => handleTabKeyDown(event, index)}
-            className={`relative flex h-10 max-w-[min(12rem,55vw)] shrink-0 items-center gap-2 rounded-t-lg border px-3 text-sm font-medium shadow-sm transition-colors ${
+            // No transition: the selected tab is how you confirm the switch
+            // landed, so it has to be right on the frame you tapped it.
+            className={`relative flex h-10 max-w-[min(12rem,55vw)] shrink-0 items-center gap-2 rounded-t-lg border px-3 text-sm font-medium shadow-sm ${
               selectedPanelId === panel.id
                 ? 'border-border-primary border-b-bg-primary bg-bg-primary text-text-primary shadow-[0_-1px_0_rgba(255,255,255,0.04)_inset]'
                 : 'border-border-secondary bg-surface-primary text-text-secondary hover:border-border-primary hover:bg-surface-hover hover:text-text-primary'
@@ -148,7 +158,7 @@ export function RemotePanelTabs({
         {showAddMenu && (
           <div
             id={addMenuId}
-            className="absolute right-0 top-full z-30 mt-2 w-[min(20rem,calc(100vw-1rem))] overflow-hidden rounded-lg border border-border-primary bg-surface-primary shadow-dropdown"
+            className="animate-dropdown-enter absolute right-0 top-full z-40 mt-2 w-[min(20rem,calc(100vw-1rem))] origin-top-right overflow-hidden rounded-lg border border-border-primary bg-surface-primary shadow-dropdown"
             role="menu"
             aria-label="Add tool"
             onKeyDown={handleMenuKeyDown}
@@ -160,30 +170,23 @@ export function RemotePanelTabs({
               description="Start a shell on the remote host"
               onClick={() => addTerminal()}
             />
-            <AddToolMenuItem
-              buttonRef={(element) => { menuItemRefs.current[1] = element; }}
-              icon={<ClaudeIcon className="h-4 w-4" />}
-              title="Claude Code"
-              description="Run claude --dangerously-skip-permissions"
-              onClick={() => addTerminal({
-                title: 'Claude Code',
-                initialCommand: 'claude --dangerously-skip-permissions',
-              })}
-            />
-            <AddToolMenuItem
-              buttonRef={(element) => { menuItemRefs.current[2] = element; }}
-              icon={<OpenAIIcon className="h-4 w-4" />}
-              title="Codex"
-              description="Run codex --yolo"
-              onClick={() => addTerminal({
-                title: 'Codex',
-                initialCommand: 'codex --yolo',
-              })}
-            />
+            {agentPresets.map((preset, presetIndex) => (
+              <AddToolMenuItem
+                key={preset.id}
+                buttonRef={(element) => { menuItemRefs.current[presetIndex + 1] = element; }}
+                icon={getCliBrandIcon(preset.iconKey, 'h-4 w-4') ?? <TerminalSquare className="h-4 w-4" />}
+                title={preset.title}
+                description={`Run ${preset.command}`}
+                onClick={() => addTerminal({
+                  title: preset.title,
+                  initialCommand: preset.command,
+                })}
+              />
+            ))}
             {customCommands.map((command, index) => (
               <AddToolMenuItem
                 key={`${command.name}-${index}`}
-                buttonRef={(element) => { menuItemRefs.current[index + 3] = element; }}
+                buttonRef={(element) => { menuItemRefs.current[index + 1 + agentPresets.length] = element; }}
                 icon={getCliBrandIcon(command.command, 'h-4 w-4') ?? <TerminalSquare className="h-4 w-4" />}
                 title={command.name}
                 description={command.command}
@@ -229,16 +232,4 @@ function AddToolMenuItem({
       </span>
     </button>
   );
-}
-
-function toDomId(value: string): string {
-  return value.replace(/[^a-zA-Z0-9_-]/g, '-');
-}
-
-export function getRemotePanelTabId(panelId: string): string {
-  return `remote-panel-tab-${toDomId(panelId)}`;
-}
-
-export function getRemotePanelTabPanelId(panelId: string): string {
-  return `remote-panel-tabpanel-${toDomId(panelId)}`;
 }

@@ -5,12 +5,13 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createDefaultRemoteDaemonConfig, type RemoteDaemonConfig } from '../../../../shared/types/remoteDaemon';
 import type { PaneEventSink } from '../../core/eventSink';
 import { RemotePaneClient, RemotePaneClientController } from './remotePaneClient';
+import { boundary, decodeBoundary, type JsonValue } from '../../../../shared/validation/boundaryDecoder';
 
 interface TestRemoteServer {
   baseUrl: string;
   close(): Promise<void>;
   closeEventStream(): void;
-  emitDaemonEvent(payload: unknown): void;
+  emitDaemonEvent(payload: JsonValue): void;
   getLastInvokeAuth(): string | undefined;
   getLastInvokeBody(): string | undefined;
   getLastInvokeHost(): string | undefined;
@@ -22,8 +23,12 @@ interface TestRemoteServer {
   setEventsReady(ready: boolean): void;
 }
 
+interface RemoteConfigSnapshot {
+  remoteDaemon: RemoteDaemonConfig;
+}
+
 interface ConfigManagerStub extends EventEmitter {
-  getConfig(): { remoteDaemon: RemoteDaemonConfig };
+  getConfig(): RemoteConfigSnapshot;
   setRemoteConfig(remoteDaemon: RemoteDaemonConfig): void;
 }
 
@@ -478,7 +483,10 @@ async function createTestRemoteServer(host = '127.0.0.1', basePath = ''): Promis
       lastInvokeBody = await readRequestBody(request);
       lastInvokeHost = request.headers.host;
       lastInvokePath = request.url;
-      const parsed = JSON.parse(lastInvokeBody) as { channel: string; args: unknown[] };
+      const parsed = decodeBoundary(JSON.parse(lastInvokeBody), boundary.object({
+        channel: boundary.string,
+        args: boundary.array(boundary.json),
+      }));
       response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       response.end(JSON.stringify({
         ok: true,
@@ -530,7 +538,7 @@ async function createTestRemoteServer(host = '127.0.0.1', basePath = ''): Promis
   });
 
   const address = server.address();
-  if (!address || typeof address === 'string') {
+  if (!address || !(address instanceof Object)) {
     throw new Error('Test remote server failed to bind');
   }
 
@@ -541,7 +549,7 @@ async function createTestRemoteServer(host = '127.0.0.1', basePath = ''): Promis
         streamResponse.destroy();
       }
     },
-    emitDaemonEvent(payload: unknown) {
+    emitDaemonEvent(payload: JsonValue) {
       if (!streamResponse) {
         throw new Error('Remote event stream is not connected');
       }
@@ -601,7 +609,7 @@ function createConfigManagerStub(initialConfig: RemoteDaemonConfig): ConfigManag
   class Stub extends EventEmitter implements ConfigManagerStub {
     private remoteDaemon = initialConfig;
 
-    getConfig(): { remoteDaemon: RemoteDaemonConfig } {
+    getConfig(): RemoteConfigSnapshot {
       return { remoteDaemon: this.remoteDaemon };
     }
 
@@ -617,7 +625,7 @@ function createConfigManagerStub(initialConfig: RemoteDaemonConfig): ConfigManag
 async function readRequestBody(request: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of request) {
-    chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
 
   return Buffer.concat(chunks).toString('utf8');

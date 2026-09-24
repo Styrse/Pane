@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Check, X, Shield, AlertTriangle, Code, Edit } from 'lucide-react';
 import type { PanePermissionRequest } from '../../../shared/types/daemon';
+import { boundary, decodeOptionalBoundary } from '../../../shared/validation/boundaryDecoder';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from './ui/Modal';
 import { Button } from './ui/Button';
 import { Textarea } from './ui/Textarea';
@@ -14,6 +15,26 @@ interface PermissionDialogProps {
     message?: string,
   ) => void;
   session?: { name: string };
+}
+
+const TOOL_DESCRIPTIONS = {
+  Bash: 'Execute shell commands',
+  Write: 'Write files to disk',
+  Edit: 'Modify existing files',
+  MultiEdit: 'Make multiple edits to a file',
+  Delete: 'Delete files or directories',
+  Move: 'Move or rename files',
+  Read: 'Read file contents',
+  Grep: 'Search file contents',
+  WebFetch: 'Fetch content from the web',
+  WebSearch: 'Search the web',
+};
+
+function getToolDescription(toolName: string): string {
+  for (const [key, description] of Object.entries(TOOL_DESCRIPTIONS)) {
+    if (toolName.includes(key)) return description;
+  }
+  return 'Perform an action';
 }
 
 export const PermissionDialog: React.FC<PermissionDialogProps> = ({ request, onRespond, session }) => {
@@ -54,28 +75,6 @@ export const PermissionDialog: React.FC<PermissionDialogProps> = ({ request, onR
     return toolName;
   };
 
-  const getToolDescription = (toolName: string) => {
-    const descriptions: Record<string, string> = {
-      'Bash': 'Execute shell commands',
-      'Write': 'Write files to disk',
-      'Edit': 'Modify existing files',
-      'MultiEdit': 'Make multiple edits to a file',
-      'Delete': 'Delete files or directories',
-      'Move': 'Move or rename files',
-      'Read': 'Read file contents',
-      'Grep': 'Search file contents',
-      'WebFetch': 'Fetch content from the web',
-      'WebSearch': 'Search the web',
-    };
-    
-    for (const [key, desc] of Object.entries(descriptions)) {
-      if (toolName.includes(key)) {
-        return desc;
-      }
-    }
-    return 'Perform an action';
-  };
-
   const isHighRisk = (toolName: string) => {
     const highRiskTools = ['Bash', 'Delete', 'Write', 'Edit', 'MultiEdit'];
     return highRiskTools.some(tool => toolName.includes(tool));
@@ -85,10 +84,8 @@ export const PermissionDialog: React.FC<PermissionDialogProps> = ({ request, onR
     const { input, toolName } = request;
     
     // Helper to safely get string value
-    const getStringValue = (obj: Record<string, unknown>, key: string): string | undefined => {
-      const value = obj[key];
-      return typeof value === 'string' ? value : undefined;
-    };
+    const getStringValue = (obj: PanePermissionRequest['input'], key: string): string | undefined =>
+      decodeOptionalBoundary(obj[key], boundary.string);
     
     if (toolName.includes('Bash')) {
       const command = getStringValue(input, 'command');

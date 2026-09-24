@@ -1,4 +1,5 @@
 import { SerializeAddon } from '@xterm/addon-serialize';
+import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { Terminal } from '@xterm/headless';
 
 const HEADLESS_SCROLLBACK_LINES = 2500;
@@ -6,7 +7,8 @@ const HEADLESS_SCROLLBACK_LINES = 2500;
 /**
  * Maintains an xterm-compatible terminal model for state restoration and
  * local-control screen reads. PTY output parsing is asynchronous, so callers
- * that need a coherent snapshot must await waitForIdle first.
+ * that need a coherent snapshot must await waitForIdle first. The app runs
+ * these on the emulator thread (terminalEmulatorHost.ts), not the main thread.
  */
 export class TerminalStateEmulator {
   private readonly terminal: Terminal;
@@ -19,6 +21,7 @@ export class TerminalStateEmulator {
   private finalScreenText = '';
   private currentTitle = '';
   private currentProgress = '';
+  private win32InputMode = false;
 
   constructor(cols: number, rows: number) {
     this.terminal = new Terminal({
@@ -28,6 +31,28 @@ export class TerminalStateEmulator {
       allowProposedApi: true,
     });
     this.terminal.loadAddon(this.serializeAddon);
+    // Match the renderer's cell widths. This model backs terminal restore,
+    // runpane's screen reads, and agent status detection, so if it measures a
+    // wide emoji as one cell while the renderer measures two, every one of
+    // those drifts from what the user is actually looking at.
+    this.terminal.loadAddon(new Unicode11Addon());
+    this.terminal.unicode.activeVersion = '11';
+    // The headless 6.0 model/serializer does not know DECSET 9001. Retain it
+    // explicitly so a renderer reset or remount does not lose ConPTY's request.
+    for (const [final, enabled] of [['h', true], ['l', false]] as const) {
+      this.terminal.parser.registerCsiHandler({ prefix: '?', final }, (params) => {
+        if (params.includes(9001)) this.win32InputMode = enabled;
+        return false;
+      });
+    }
+    this.terminal.parser.registerEscHandler({ final: 'c' }, () => {
+      this.win32InputMode = false;
+      return false;
+    });
+    this.terminal.parser.registerCsiHandler({ intermediates: '!', final: 'p' }, () => {
+      this.win32InputMode = false;
+      return false;
+    });
     // Capture OSC window/icon title (OSC 0 / OSC 2) — agents encode live status
     // (spinner, "Action Required") into it, which the status detector reads.
     this.terminal.onTitleChange((title) => {
@@ -82,19 +107,34 @@ export class TerminalStateEmulator {
       ? this.finalSerializedBuffer
       : this.serializeAddon.serialize({
           scrollback: includeScrollback ? HEADLESS_SCROLLBACK_LINES : 0,
-        });
+        }) + (this.win32InputMode ? '\x1b[?9001h' : '');
   }
 
-  /** Return plain text for the currently visible viewport. */
-  getScreenText(): string {
+  /**
+   * Return plain text for the currently visible viewport. omitDim blanks dim
+   * cells, which agent TUIs use for placeholder suggestions in their composer.
+   */
+  getScreenText({ omitDim = false }: { omitDim?: boolean } = {}): string {
     if (this.disposed) return this.finalScreenText;
 
     const buffer = this.terminal.buffer.active;
     const lines: string[] = [];
     const end = buffer.viewportY + this.terminal.rows;
+    const cell = buffer.getNullCell();
 
     for (let index = buffer.viewportY; index < end; index += 1) {
-      lines.push(buffer.getLine(index)?.translateToString(true) ?? '');
+      const line = buffer.getLine(index);
+      if (!line || !omitDim) {
+        lines.push(line?.translateToString(true) ?? '');
+        continue;
+      }
+      let text = '';
+      for (let column = 0; column < line.length; column += 1) {
+        line.getCell(column, cell);
+        if (cell.getWidth() === 0) continue;
+        text += cell.isDim() ? ' '.repeat(cell.getWidth()) : cell.getChars() || ' ';
+      }
+      lines.push(text.trimEnd());
     }
 
     while (lines.length > 0 && lines[lines.length - 1] === '') {

@@ -9,7 +9,7 @@ export interface InterceptorState {
   triggerChar: string | null;
   buffer: string; // characters typed after trigger (for filtering)
   // Handler-specific UI state passed opaquely
-  handlerState: unknown;
+  handlerState: AtTerminalHandlerState | null;
 }
 
 /** A pluggable handler for a trigger character */
@@ -21,7 +21,7 @@ export interface InterceptHandler {
   /** Clean up when deactivating */
   onDeactivate: () => void;
   /** Get current handler-specific state for UI rendering */
-  getState: () => unknown;
+  getState: () => AtTerminalHandlerState;
 }
 
 /** Actions a handler can return from onInput */
@@ -33,15 +33,13 @@ export type InterceptAction =
   | { type: 'update'; buffer: string }; // update filter buffer, stay active
 
 /** Payload when executing an action */
-export interface InterceptPayload {
+interface InterceptPayload {
   action: string;
-  data: Record<string, unknown>;
+  data: JsonObject;
 }
 
 /** Preset line count options for the line count selector */
 export const LINE_COUNT_PRESETS = [100, 300, 500, -1] as const; // -1 = All
-export type LineCountPreset = (typeof LINE_COUNT_PRESETS)[number];
-
 /** Paste mode: raw pastes text into PTY, embed saves to file and inserts path */
 export type PasteMode = 'raw' | 'embed';
 
@@ -60,3 +58,4 @@ export interface TerminalSuggestion {
   title: string;
   preview: string[]; // last 3 clean lines, ANSI-stripped
 }
+import type { JsonObject } from '../../../../shared/validation/boundaryDecoder';

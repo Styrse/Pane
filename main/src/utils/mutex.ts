@@ -1,5 +1,3 @@
-import { Logger } from './logger';
-
 // Use console logging for mutex operations since logger might not be available
 const logger = {
   debug: (msg: string) => console.log(`[Mutex] ${msg}`),
@@ -10,9 +8,8 @@ const logger = {
  * A simple async mutex implementation for preventing race conditions
  * in critical sections of code. Supports named locks and timeouts.
  */
-export class Mutex {
+class Mutex {
   private locks = new Map<string, Promise<void>>();
-  private lockCounts = new Map<string, number>();
   private defaultTimeout = 30000; // 30 seconds
 
   /**
@@ -41,10 +38,6 @@ export class Mutex {
 
     // Store the lock
     this.locks.set(resourceName, lockPromise);
-    this.lockCounts.set(resourceName, (this.lockCounts.get(resourceName) || 0) + 1);
-    
-    const lockId = this.lockCounts.get(resourceName);
-
     // Return the release function
     return () => {
       if (this.locks.get(resourceName) === lockPromise) {
@@ -109,12 +102,11 @@ export class Mutex {
   releaseAll(): void {
     logger.warn(`[Mutex] Force releasing all locks (${this.locks.size} active locks)`);
     this.locks.clear();
-    this.lockCounts.clear();
   }
 }
 
 // Global mutex instance for the application
-export const mutex = new Mutex();
+const mutex = new Mutex();
 
 /**
  * Convenience function to execute code with a named lock
@@ -129,23 +121,4 @@ export async function withLock<T>(
   timeout?: number
 ): Promise<T> {
   return mutex.withLock(resourceName, fn, timeout);
-}
-
-/**
- * Convenience function to acquire a named lock
- * @param resourceName - Unique name for the resource to lock
- * @param timeout - Optional timeout in milliseconds
- * @returns Promise<() => void> - Release function to unlock the resource
- */
-export async function acquireLock(resourceName: string, timeout?: number): Promise<() => void> {
-  return mutex.acquire(resourceName, timeout);
-}
-
-/**
- * Check if a resource is currently locked
- * @param resourceName - Name of the resource to check
- * @returns boolean - True if the resource is locked
- */
-export function isLocked(resourceName: string): boolean {
-  return mutex.isLocked(resourceName);
 }

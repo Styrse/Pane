@@ -156,6 +156,317 @@
   --terra-accent8: #d68e6e;
   --terra-accent9: #dea080;
   --terra-accent10: #e6b498;
+
+  /* Synthwave primitives — synthwave ramp */
+  --syn-100: #f1eafc;
+  --syn-200: #d5c9ea;
+  --syn-300: #b5a5d6;
+  --syn-400: #8d79b5;
+  --syn-500: #5b4587;
+  --syn-600: #3d2a60;
+  --syn-700: #2e1d4a;
+  --syn-800: #221538;
+  --syn-850: #1a1029;
+  --syn-900: #120b1f;
+  --syn-950: #0b0714;
+
+  /* Synthwave accent ramp */
+  --syn-accent6: #ff5fd7;
+  --syn-accent7: #ff7ae0;
+  --syn-accent8: #ff94e7;
+  --syn-glow: #3de3ff;
+
+  /* Acid Terminal primitives — acid ramp */
+  --acid-100: #eaf2ea;
+  --acid-200: #cbd6cb;
+  --acid-300: #a3b3a3;
+  --acid-400: #778a77;
+  --acid-500: #4f5c4f;
+  --acid-600: #354035;
+  --acid-700: #283028;
+  --acid-800: #1e221e;
+  --acid-850: #171a17;
+  --acid-900: #111311;
+  --acid-950: #0a0b0a;
+
+  /* Acid Terminal accent ramp */
+  --acid-accent6: #b4ff3a;
+  --acid-accent7: #c6ff63;
+  --acid-accent8: #d6ff8a;
+  --acid-glow: #c6ff63;
+
+  /* Tokyo Rain primitives — tokyo-rain ramp */
+  --rain-100: #e6ebf4;
+  --rain-200: #c3ccdc;
+  --rain-300: #9facc3;
+  --rain-400: #74839f;
+  --rain-500: #4a5878;
+  --rain-600: #2f3c5e;
+  --rain-700: #242e4a;
+  --rain-800: #1a2238;
+  --rain-850: #131a2c;
+  --rain-900: #0d1120;
+  --rain-950: #080b16;
+
+  /* Tokyo Rain accent ramp */
+  --rain-accent6: #ff4f9a;
+  --rain-accent7: #ff6cab;
+  --rain-accent8: #ff8abd;
+  --rain-glow: #5cb3ff;
+
+  /* Folio primitives — warm cream paper and near-black ink (print) */
+  --folio-paper: #f6f0e4;        /* page: body background */
+  --folio-sheet: #fbf7ee;        /* sheet: editor, terminal, cards — brightest surface */
+  --folio-chrome: #efe7d8;       /* margin: sidebar, tab bar */
+  --folio-hover: #e7dcc9;
+  --folio-active: #dfd3be;
+  --folio-ink: #1f1b17;
+  --folio-ink-2: #433c35;
+  --folio-ink-3: #5a524a;
+  --folio-ink-muted: #605850;    /* 6.2:1 on paper, 4.7:1 on active */
+  --folio-ink-disabled: #93897b; /* 3.0:1 on paper (AA large / disabled affordance) */
+  --folio-rule: rgba(31, 27, 23, 0.16);
+  --folio-rule-soft: rgba(31, 27, 23, 0.09);
+  --folio-rule-faint: rgba(31, 27, 23, 0.05);
+
+  /* Folio rubrication — one vermilion accent, used sparingly */
+  --folio-rubric: #b3321c;       /* 5.5:1 on paper; 6.2:1 with white text */
+  --folio-rubric-hover: #9c2a17;
+  --folio-rubric-active: #c53d24;
+  --folio-rubric-text: #a02c18;  /* links — 6.5:1 on paper */
+
+  /* Newsprint primitives — cool grey-white stock, graphite ink, halftone greys */
+  --news-paper: #f1f2f0;
+  --news-sheet: #f8f8f6;
+  --news-chrome: #e8eae7;
+  --news-hover: #dfe2de;
+  --news-active: #d8dcd7;
+  --news-ink: #24272b;
+  --news-ink-2: #43484e;
+  --news-ink-3: #575d64;
+  --news-ink-muted: #585e66;     /* 5.9:1 on paper, 4.7:1 on active */
+  --news-ink-disabled: #878d93;  /* 3.0:1 on paper */
+  --news-rule: rgba(36, 39, 43, 0.18);
+  --news-rule-soft: rgba(36, 39, 43, 0.10);
+  --news-rule-faint: rgba(36, 39, 43, 0.06);
+
+  /* Newsprint accent — a single dark ink blue */
+  --news-blue: #1f4e8c;          /* 7.4:1 with white text */
+  --news-blue-hover: #1a4277;
+  --news-blue-active: #25599e;
+  --news-blue-text: #1c4884;     /* links — 7.4:1 on paper */
+
+  /* Walnut primitives — deep warm brown-black ramp, parchment text */
+  --walnut-950: #120e0b;         /* sunken editor / terminal */
+  --walnut-900: #1a1512;         /* body, chrome */
+  --walnut-850: #221c18;
+  --walnut-800: #2b241f;
+  --walnut-700: #352d27;
+  --walnut-600: #40372f;         /* active / borders — a real step above 700 (1.16:1) */
+  --walnut-500: #4a4037;
+  --walnut-400: #6a5e51;         /* disabled */
+  --walnut-300: #8d7d6a;         /* neutral / bright-black */
+  --walnut-200: #b09f89;         /* muted — 7.0:1 on --walnut-900, 4.5:1 on --walnut-600 */
+  --parchment-300: #b4a48b;      /* tertiary */
+  --parchment-200: #d3c4ab;      /* secondary */
+  --parchment-100: #ede1cd;      /* primary */
+  --parchment-50: #f7efe2;
+
+  /* Walnut accent — brass, carries dark ink text */
+  --brass-500: #c9a24d;          /* 9.4:1 with --walnut-900 text; 7.6:1 on --walnut-900 */
+  --brass-400: #d6b262;
+  --brass-600: #bd9440;
+  --brass-text: #d4ae5c;         /* links — 8.3:1 on --walnut-900 */
+
+  /* Amber CRT primitives — black-brown glass ramp + amber-phosphor accent */
+  --crt-950: #0c0905;
+  --crt-900: #140f08;
+  --crt-850: #1b140a;
+  --crt-800: #241a0d;
+  --crt-700: #332512;
+  --crt-600: #46331a;
+  --crt-500: #66501f;
+  --crt-400: #a07d3a;
+  --crt-300: #b8933d;
+  --crt-200: #d9b25a;
+  --crt-100: #f0d9a8;
+  --crt-amber: #ffb000;         /* P3 phosphor */
+  --crt-amber-bright: #ffc233;
+  --crt-amber-deep: #e69e00;
+
+  /* Teletype primitives — warm paper ramp + brown ink ramp */
+  --tty-paper-50: #fbf8f1;
+  --tty-paper-100: #f5efe2;
+  --tty-paper-200: #ece4d2;
+  --tty-paper-300: #e0d5be;
+  --tty-paper-400: #cdbfa2;
+  --tty-ink-900: #2b2116;
+  --tty-ink-700: #5a4a36;
+  --tty-ink-600: #63533e;
+  --tty-ink-500: #6b5b45;
+  --tty-ink-400: #a3947c;
+  --tty-orange-600: #b5451b;    /* burnt orange — 5.5:1 with white text */
+  --tty-orange-700: #9a3412;
+  --tty-orange-500: #c2410c;
+  --tty-orange-text: #a63a0c;   /* 5.7:1 on --tty-paper-100 */
+  --tty-olive: #4f6b12;
+
+  /* Dot Matrix primitives — deep olive-black ramp + 4-step LCD green ramp */
+  --lcd-950: #0a0d08;
+  --lcd-900: #10150c;
+  --lcd-850: #161d10;
+  --lcd-800: #1c2514;
+  --lcd-700: #27331b;
+  --lcd-600: #354523;
+  --lcd-500: #4b6030;
+  --lcd-green-1: #7f9a52;       /* muted — 5.9:1 on --lcd-900 */
+  --lcd-green-2: #8bac0f;       /* accent */
+  --lcd-green-3: #b9d36a;       /* secondary text */
+  --lcd-green-4: #dcecb0;       /* primary text */
+  --lcd-green-accent-hover: #9bbc0f;
+  --lcd-green-accent-active: #7a9a0c;
+  --lcd-green-text: #a9cd3a;    /* interactive text — 10:1 on --lcd-900 */
+  --lcd-hot: #ff5c72;           /* the one hot accent — errors only */
+
+  /* Haar primitives — cold pre-dawn sea fog (light ramp, blue-grey neutrals) */
+  --haar-50: #f5f7f9;
+  --haar-100: #eceff3;
+  --haar-150: #e2e7ec;
+  --haar-200: #d5dce3;
+  --haar-300: #c1cad3;
+  --haar-400: #93a1ad;
+  --haar-500: #66727e;
+  --haar-600: #505c68;
+  --haar-700: #3a4550;
+  --haar-800: #252d36;
+  --haar-900: #151b21;
+
+  /* Haar accent ramp — steel blue seen through fog */
+  --haar-steel-300: #a9bccf;
+  --haar-steel-400: #7c96ad;
+  --haar-steel-500: #4f6d8a;
+  --haar-steel-600: #3e5a75;
+  --haar-steel-700: #304a62;
+
+  /* Abyss primitives — deep-ocean navy ramp */
+  --abyss-950: #04090f;
+  --abyss-900: #07111c;
+  --abyss-850: #0b1826;
+  --abyss-800: #102030;
+  --abyss-700: #172d40;
+  --abyss-600: #203c52;
+  --abyss-500: #325670;
+  --abyss-400: #6389a2;
+  --abyss-300: #8fb0c5;
+  --abyss-200: #b6cedb;
+  --abyss-100: #dbeaf1;
+
+  /* Abyss accent ramp — bioluminescent sea-glass teal */
+  --abyss-glow-300: #9fe3d8;
+  --abyss-glow-400: #6fcfc1;
+  --abyss-glow-500: #4db8ab;
+
+  /* Understory primitives — moss floor ramp (green-black neutrals) */
+  --under-950: #0d110c;
+  --under-900: #131911;
+  --under-850: #192117;
+  --under-800: #20291d;
+  --under-700: #2a3626;
+  --under-600: #374532;
+  --under-500: #55654c;
+  --under-400: #7f8f73;
+  --under-300: #a4b297;
+  --under-200: #c5ceb8;
+  --under-100: #e4e9d9;
+
+  /* Understory bark ramp — warm brown chrome */
+  --under-bark-850: #1e1914;
+  --under-bark-800: #27201a;
+  --under-bark-700: #352c23;
+  --under-bark-600: #46392e;
+
+  /* Understory accent ramp — pale lichen */
+  --under-lichen-300: #d3dda8;
+  --under-lichen-400: #bfcc8b;
+  --under-lichen-500: #a6b56d;
+
+  /* Colorblind Safe primitives — neutral cool-gray ramp (no hue cast so the
+     Okabe-Ito semantic colors below carry every signal) */
+  --cbs-950: #0b0e12;
+  --cbs-900: #12161b;
+  --cbs-850: #181d23;
+  --cbs-800: #1f252c;
+  --cbs-700: #2a323b;
+  --cbs-600: #3a444f;
+  --cbs-500: #5c6977;
+  --cbs-400: #7d8996;
+  --cbs-300: #a5aeb8;
+  --cbs-200: #c9d0d8;
+  --cbs-100: #e7ebf0;
+
+  /* Okabe & Ito (2008) / Wong (2011) colorblind-safe palette — exact values.
+     Distinguishable under protanopia, deuteranopia and tritanopia. */
+  --okabe-orange: #E69F00;
+  --okabe-sky: #56B4E9;
+  --okabe-green: #009E73;
+  --okabe-yellow: #F0E442;
+  --okabe-blue: #0072B2;
+  --okabe-vermillion: #D55E00;
+  --okabe-purple: #CC79A7;
+  /* Same-hue tints used where the exact value cannot reach 4.5:1 on a dark
+     background (ANSI blue) or where a "bright" ANSI variant is needed. */
+  --okabe-green-lift: #31b588;
+  --okabe-blue-lift: #2a81c3;
+  --okabe-sky-lift: #88d5ff;
+  --okabe-orange-bright: #f2b93f;
+  --okabe-sky-bright: #b3e2fb;
+  --okabe-green-bright: #5ad4a8;
+  --okabe-yellow-bright: #f6ed7e;
+  --okabe-blue-bright: #5aa6e3;
+  --okabe-vermillion-bright: #ee7a2a;
+  --okabe-purple-bright: #de9bc2;
+
+  /* Low Fatigue primitives — warm sepia-dark ramp, mid-dark rather than
+     near-black so text/background contrast stays soft (~10:1, not 18:1) */
+  --lf-950: #1f1b17;
+  --lf-900: #27221d;
+  --lf-850: #2e2923;
+  --lf-800: #36302a;
+  --lf-700: #433b33;
+  --lf-600: #54493f;
+  --lf-500: #6f6154;
+  --lf-400: #94846f;
+  --lf-300: #b3a48c;
+  --lf-200: #cfc1a8;
+  --lf-100: #e6dcc7;
+  --lf-50: #f0e8d8;     /* brightest value in the theme — never pure white */
+
+  /* Low Fatigue accent — honey gold (low blue-light content) */
+  --lf-gold: #d1a54a;
+  --lf-gold-hover: #dbb262;
+  --lf-gold-active: #c39638;
+  --lf-gold-text: #dfb866;
+
+  /* High Legibility primitives — neutral grayscale, every step chosen for a
+     specific contrast target against white (see comments) */
+  --hl-white: #ffffff;
+  --hl-50: #f5f5f5;
+  --hl-100: #ececec;
+  --hl-200: #dcdcdc;
+  --hl-300: #c6c6c6;
+  --hl-400: #8f8f8f;    /* 3.2:1 — disabled (perceivable, still clearly dimmed) */
+  --hl-500: #767676;    /* 4.5:1 — borders, scrollbar thumb */
+  --hl-600: #4f4f4f;    /* 8.2:1 on white, 7.5:1 on --hl-50 — muted text (AAA) */
+  --hl-700: #3b3b3b;    /* 10.9:1 — tertiary text */
+  --hl-800: #262626;    /* 15.3:1 — secondary text */
+  --hl-900: #111111;    /* 18.9:1 — primary text */
+  --hl-blue: #1e40af;   /* 8.2:1 — the ONLY non-state color: links, focus, primary action */
+  --hl-blue-hover: #172f83;
+  --hl-blue-active: #2b5be0;
+  --hl-blue-tint: #e4e8f5;
+  --hl-green: #0b5d27;  /* 8.0:1 */
+  --hl-amber: #7a4b00;  /* 7.4:1 */
+  --hl-red: #a3141b;    /* 7.9:1 */
 }
 
 /* Dark Theme - Pure Black OLED */
@@ -172,6 +483,9 @@
   --color-surface-secondary: var(--gh-800);
   --color-surface-tertiary: var(--gh-700);
   --color-surface-hover: rgba(255, 255, 255, 0.04);
+  /* Selected row (sidebar). Mixed from the theme's own text colour so every
+     theme gets a fitting shade without a per-theme override. */
+  --color-surface-selected: color-mix(in srgb, var(--color-text-primary) 9%, transparent);
 
   /* Structural tokens for theme-aware layout */
   --color-bg-chrome: var(--color-bg-primary);
@@ -189,9 +503,9 @@
   --color-text-disabled: rgb(72 79 88);
 
   /* Semantic Tokens - Borders */
-  --color-border-primary: rgba(255, 255, 255, 0.08);
-  --color-border-secondary: rgba(255, 255, 255, 0.05);
-  --color-border-hover: rgba(255, 255, 255, 0.12);
+  --color-border-primary: rgba(255, 255, 255, 0.06);
+  --color-border-secondary: rgba(255, 255, 255, 0.04);
+  --color-border-hover: rgba(255, 255, 255, 0.10);
   --color-border-focus: rgb(88 166 255);
 
   /* Semantic Tokens - Interactive */
@@ -215,8 +529,8 @@
   --color-interactive-surface-hover: rgba(var(--color-interactive-rgb), 0.25);
 
   /* Interactive border tokens */
-  --color-border-interactive-subtle: rgba(255, 255, 255, 0.06);
-  --color-border-interactive: rgba(255, 255, 255, 0.1);
+  --color-border-interactive-subtle: rgba(255, 255, 255, 0.05);
+  --color-border-interactive: rgba(255, 255, 255, 0.08);
   --color-interactive-border: rgba(var(--color-interactive-rgb), 0.5);
   --color-interactive-border-hover: rgba(var(--color-interactive-rgb), 0.7);
 
@@ -291,7 +605,7 @@
   --color-text-navigation-section: rgb(114 122 133);  /* #727a85 — 4.7:1 on bg-primary (AA) */
   --color-text-navigation-brand: rgb(125 133 144);
 
-  --color-border-navigation: rgba(255, 255, 255, 0.06);
+  --color-border-navigation: rgba(255, 255, 255, 0.05);
   --color-divider-navigation: rgba(255, 255, 255, 0.05);
   --color-divider-navigation-subtle: rgba(255, 255, 255, 0.03);
 
@@ -498,16 +812,16 @@
   --color-surface-hover: rgba(255, 255, 255, 0.06);
 
   /* Borders - slightly brighter for separation on pure black */
-  --color-border-primary: rgba(255, 255, 255, 0.10);
-  --color-border-secondary: rgba(255, 255, 255, 0.07);
-  --color-border-hover: rgba(255, 255, 255, 0.15);
+  --color-border-primary: rgba(255, 255, 255, 0.06);
+  --color-border-secondary: rgba(255, 255, 255, 0.04);
+  --color-border-hover: rgba(255, 255, 255, 0.10);
 
   /* Interactive surfaces */
   --color-surface-interactive: rgb(15 15 15);
   --color-surface-interactive-hover: rgb(25 25 25);
 
   /* Interactive borders - slightly brighter */
-  --color-border-interactive: rgba(255, 255, 255, 0.12);
+  --color-border-interactive: rgba(255, 255, 255, 0.08);
 
   /* Buttons - secondary/ghost need darker backgrounds */
   --color-button-secondary-bg: rgb(25 25 25);
@@ -541,7 +855,7 @@
   --color-bg-chrome: var(--color-bg-primary);
   --color-bg-editor: var(--color-bg-primary);
   --tab-indicator-color: var(--aurora-accent-400);
-  --tab-indicator-height: 3px;
+  --tab-indicator-height: 2px;
 
   /* Terminal - only bg and black need to change */
   --color-terminal-bg: rgb(0 0 0);
@@ -573,9 +887,9 @@
   --color-text-disabled: var(--dusk-600);
 
   /* Borders */
-  --color-border-primary: rgba(255, 255, 255, 0.08);
-  --color-border-secondary: rgba(255, 255, 255, 0.05);
-  --color-border-hover: rgba(255, 255, 255, 0.12);
+  --color-border-primary: rgba(255, 255, 255, 0.06);
+  --color-border-secondary: rgba(255, 255, 255, 0.04);
+  --color-border-hover: rgba(255, 255, 255, 0.10);
   --color-border-focus: #3b82f6;
 
   /* Interactive */
@@ -599,8 +913,8 @@
   --color-interactive-surface-hover: rgba(59, 130, 246, 0.25);
 
   /* Interactive border tokens */
-  --color-border-interactive-subtle: rgba(255, 255, 255, 0.06);
-  --color-border-interactive: rgba(255, 255, 255, 0.1);
+  --color-border-interactive-subtle: rgba(255, 255, 255, 0.05);
+  --color-border-interactive: rgba(255, 255, 255, 0.08);
   --color-interactive-border: rgba(59, 130, 246, 0.5);
   --color-interactive-border-hover: rgba(59, 130, 246, 0.7);
 
@@ -661,7 +975,7 @@
   --color-text-navigation-hover: var(--dusk-100);
   --color-text-navigation-section: #7c8492;  /* 4.7:1 on --dusk-900 (AA) */
   --color-text-navigation-brand: var(--dusk-400);
-  --color-border-navigation: rgba(255, 255, 255, 0.06);
+  --color-border-navigation: rgba(255, 255, 255, 0.05);
   --color-divider-navigation: rgba(255, 255, 255, 0.05);
   --color-divider-navigation-subtle: rgba(255, 255, 255, 0.03);
 
@@ -707,9 +1021,9 @@
   --color-text-disabled: var(--dusk-600);
 
   /* Borders */
-  --color-border-primary: rgba(255, 255, 255, 0.12);
-  --color-border-secondary: rgba(255, 255, 255, 0.07);
-  --color-border-hover: rgba(255, 255, 255, 0.16);
+  --color-border-primary: rgba(255, 255, 255, 0.06);
+  --color-border-secondary: rgba(255, 255, 255, 0.04);
+  --color-border-hover: rgba(255, 255, 255, 0.10);
   --color-border-focus: #3b82f6;
 
   /* Interactive */
@@ -733,8 +1047,8 @@
   --color-interactive-surface-hover: rgba(59, 130, 246, 0.26);
 
   /* Interactive border tokens */
-  --color-border-interactive-subtle: rgba(255, 255, 255, 0.08);
-  --color-border-interactive: rgba(255, 255, 255, 0.12);
+  --color-border-interactive-subtle: rgba(255, 255, 255, 0.05);
+  --color-border-interactive: rgba(255, 255, 255, 0.08);
   --color-interactive-border: rgba(59, 130, 246, 0.55);
   --color-interactive-border-hover: rgba(59, 130, 246, 0.75);
 
@@ -795,7 +1109,7 @@
   --color-text-navigation-hover: var(--dusk-100);
   --color-text-navigation-section: #7c8492;  /* 5.6:1 on pure black (AA) */
   --color-text-navigation-brand: var(--dusk-400);
-  --color-border-navigation: rgba(255, 255, 255, 0.08);
+  --color-border-navigation: rgba(255, 255, 255, 0.05);
   --color-divider-navigation: rgba(255, 255, 255, 0.06);
   --color-divider-navigation-subtle: rgba(255, 255, 255, 0.04);
 
@@ -866,8 +1180,8 @@
   --color-interactive-surface-hover: rgba(53, 116, 240, 0.25);
 
   /* Interactive border tokens */
-  --color-border-interactive-subtle: rgba(255, 255, 255, 0.06);
-  --color-border-interactive: rgba(255, 255, 255, 0.1);
+  --color-border-interactive-subtle: rgba(255, 255, 255, 0.05);
+  --color-border-interactive: rgba(255, 255, 255, 0.08);
   --color-interactive-border: rgba(53, 116, 240, 0.5);
   --color-interactive-border-hover: rgba(53, 116, 240, 0.7);
 
@@ -949,7 +1263,7 @@
 
   /* Tab indicator — UNDERLINE mode for Forge */
   --tab-indicator-color: var(--forge-blue6);
-  --tab-indicator-height: 4px;
+  --tab-indicator-height: 2px;
 
   /* Terminal — IntelliJ dark scheme */
   --color-terminal-bg: var(--forge-gray1);
@@ -1016,8 +1330,8 @@
   --color-interactive-surface: rgba(255, 106, 193, 0.18);
   --color-interactive-surface-hover: rgba(255, 106, 193, 0.28);
 
-  --color-border-interactive-subtle: rgba(255, 255, 255, 0.08);
-  --color-border-interactive: rgba(255, 255, 255, 0.12);
+  --color-border-interactive-subtle: rgba(255, 255, 255, 0.05);
+  --color-border-interactive: rgba(255, 255, 255, 0.08);
   --color-interactive-border: rgba(255, 106, 193, 0.52);
   --color-interactive-border-hover: rgba(255, 106, 193, 0.72);
   --color-text-interactive-muted: #9e7ac8;
@@ -1086,7 +1400,7 @@
   --color-scrollbar-thumb-hover: #9e7ac8;
 
   --tab-indicator-color: #ff6ac1;
-  --tab-indicator-height: 3px;
+  --tab-indicator-height: 2px;
 
   --color-terminal-bg: #17111f;
   --color-terminal-fg: #f7eaff;
@@ -1152,8 +1466,8 @@
   --color-interactive-surface: rgba(196, 167, 231, 0.16);
   --color-interactive-surface-hover: rgba(196, 167, 231, 0.24);
 
-  --color-border-interactive-subtle: rgba(255, 255, 255, 0.08);
-  --color-border-interactive: rgba(255, 255, 255, 0.12);
+  --color-border-interactive-subtle: rgba(255, 255, 255, 0.05);
+  --color-border-interactive: rgba(255, 255, 255, 0.08);
   --color-interactive-border: rgba(196, 167, 231, 0.5);
   --color-interactive-border-hover: rgba(196, 167, 231, 0.7);
   --color-text-interactive-muted: #908caa;
@@ -1296,8 +1610,8 @@
   --color-interactive-surface-hover: rgba(196, 92, 92, 0.25);
 
   /* Interactive border tokens */
-  --color-border-interactive-subtle: rgba(255, 255, 255, 0.06);
-  --color-border-interactive: rgba(255, 255, 255, 0.1);
+  --color-border-interactive-subtle: rgba(255, 255, 255, 0.05);
+  --color-border-interactive: rgba(255, 255, 255, 0.08);
   --color-interactive-border: rgba(196, 92, 92, 0.5);
   --color-interactive-border-hover: rgba(196, 92, 92, 0.7);
 
@@ -1379,7 +1693,7 @@
 
   /* Tab indicator — UNDERLINE mode for Night Owl */
   --tab-indicator-color: var(--owl-rose6);
-  --tab-indicator-height: 4px;
+  --tab-indicator-height: 2px;
 
   /* Terminal — warm palette, zero blue */
   --color-terminal-bg: var(--owl-950);
@@ -1454,8 +1768,8 @@
   --color-interactive-surface-hover: rgba(196, 92, 92, 0.25);
 
   /* Interactive border tokens */
-  --color-border-interactive-subtle: rgba(255, 255, 255, 0.08);
-  --color-border-interactive: rgba(255, 255, 255, 0.12);
+  --color-border-interactive-subtle: rgba(255, 255, 255, 0.05);
+  --color-border-interactive: rgba(255, 255, 255, 0.08);
   --color-interactive-border: rgba(196, 92, 92, 0.5);
   --color-interactive-border-hover: rgba(196, 92, 92, 0.7);
 
@@ -1537,7 +1851,7 @@
 
   /* Tab indicator — UNDERLINE mode */
   --tab-indicator-color: var(--owl-rose6);
-  --tab-indicator-height: 4px;
+  --tab-indicator-height: 2px;
 
   /* Terminal — warm palette, zero blue */
   --color-terminal-bg: rgb(0 0 0);
@@ -1612,8 +1926,8 @@
   --color-interactive-surface-hover: rgba(192, 112, 80, 0.25);
 
   /* Interactive border tokens */
-  --color-border-interactive-subtle: rgba(255, 255, 255, 0.06);
-  --color-border-interactive: rgba(255, 255, 255, 0.1);
+  --color-border-interactive-subtle: rgba(255, 255, 255, 0.05);
+  --color-border-interactive: rgba(255, 255, 255, 0.08);
   --color-interactive-border: rgba(192, 112, 80, 0.5);
   --color-interactive-border-hover: rgba(192, 112, 80, 0.7);
 
@@ -1695,7 +2009,7 @@
 
   /* Tab indicator — UNDERLINE mode for Terracotta */
   --tab-indicator-color: var(--terra-accent6);
-  --tab-indicator-height: 4px;
+  --tab-indicator-height: 2px;
 
   /* Terminal — warm earth palette, zero blue */
   --color-terminal-bg: var(--terra-950);
@@ -1719,6 +2033,1914 @@
   --color-terminal-bright-white: #F2E4D6;
 }
 
+/* Synthwave Theme — deep violet-black, magenta primary, cyan links/cursor */
+:root.synthwave {
+  /* Backgrounds — TWO-TONE foundation */
+  --color-bg-primary: var(--syn-900);
+  --color-bg-secondary: var(--syn-850);
+  --color-bg-tertiary: var(--syn-700);
+  --color-bg-hover: var(--syn-700);
+  --color-bg-active: var(--syn-600);
+  --color-bg-chrome: var(--syn-900);
+  --color-bg-editor: var(--syn-950);   /* SUNKEN — darker than chrome */
+
+  /* Surfaces */
+  --color-surface-primary: var(--syn-850);
+  --color-surface-secondary: var(--syn-800);
+  --color-surface-tertiary: var(--syn-700);
+  --color-surface-hover: rgba(255, 255, 255, 0.04);
+
+  /* Text — greys carry body copy; neon stays on accents */
+  --color-text-primary: var(--syn-100);
+  --color-text-secondary: var(--syn-200);
+  --color-text-tertiary: var(--syn-300);
+  --color-text-muted: #a08fc9;  /* 6.65:1 on --syn-900 (AA) */
+  --color-text-disabled: var(--syn-500);
+
+  /* Borders */
+  --color-border-primary: var(--syn-700);
+  --color-border-secondary: var(--syn-800);
+  --color-border-hover: var(--syn-600);
+  --color-border-focus: var(--syn-glow);
+
+  /* Interactive — neon primary on interactive surfaces only */
+  --color-interactive-primary: var(--syn-accent6);
+  --color-interactive-hover: var(--syn-accent7);
+  --color-interactive-active: var(--syn-accent8);
+  --color-interactive-text: var(--syn-glow);
+  --color-focus-ring: var(--syn-glow);
+  --color-interactive-rgb: 255 95 215;
+
+  /* Interactive on dark */
+  --color-text-interactive-on-dark: var(--syn-glow);
+  --color-text-interactive-on-dark-hover: var(--syn-accent6);
+  --color-text-interactive-on-dark-active: var(--syn-glow);
+  --color-text-interactive-on-dark-focus: var(--syn-glow);
+
+  /* Interactive surface tokens */
+  --color-surface-interactive: var(--syn-850);
+  --color-surface-interactive-hover: var(--syn-700);
+  --color-interactive-surface: rgba(255, 95, 215, 0.15);
+  --color-interactive-surface-hover: rgba(255, 95, 215, 0.25);
+
+  /* Interactive border tokens */
+  --color-border-interactive-subtle: rgba(255, 255, 255, 0.05);
+  --color-border-interactive: rgba(255, 255, 255, 0.08);
+  --color-interactive-border: rgba(255, 95, 215, 0.5);
+  --color-interactive-border-hover: rgba(255, 95, 215, 0.7);
+
+  /* Interactive text tokens */
+  --color-text-interactive-muted: #a08fc9;  /* 6.65:1 on --syn-900 (AA) */
+
+  /* Focus ring */
+  --color-focus-ring-subtle: rgba(255, 95, 215, 0.4);
+
+  /* Status */
+  --color-status-success: #5ee89a;
+  --color-status-success-hover: #3fd483;
+  --color-status-warning: #ffc857;
+  --color-status-warning-hover: #f0b43a;
+  --color-status-error: #ff5c7a;
+  --color-status-error-hover: #f03d60;
+  --color-status-info: #3de3ff;
+  --color-status-neutral: #8d79b5;
+
+  /* Context-Aware Text — neon fills take dark text (white fails AA on them) */
+  --color-text-on-primary: var(--syn-100);
+  --color-text-on-secondary: var(--syn-200);
+  --color-text-on-tertiary: var(--syn-200);
+  --color-text-on-surface: var(--syn-200);
+  --color-text-on-interactive: #14081f;
+  --color-text-on-status-success: #14081f;
+  --color-text-on-status-warning: #14081f;
+  --color-text-on-status-error: #14081f;
+  --color-text-on-status-info: #14081f;
+  --color-text-on-navigation: var(--syn-200);
+
+  /* Buttons */
+  --color-button-primary-bg: var(--syn-accent6);
+  --color-button-primary-hover: var(--syn-accent7);
+  --color-button-primary-text: #14081f;
+  --color-button-secondary-bg: var(--syn-700);
+  --color-button-secondary-hover: var(--syn-600);
+  --color-button-secondary-text: var(--syn-200);
+  --color-button-ghost-hover: var(--syn-800);
+  --color-button-ghost-text: var(--syn-300);
+
+  /* Cards */
+  --color-card-bg: var(--syn-850);
+  --color-card-border: var(--syn-700);
+  --color-card-nested-bg: var(--syn-700);
+
+  /* Forms */
+  --color-input-bg: var(--syn-950);
+  --color-input-border: var(--syn-600);
+  --color-input-focus: var(--syn-glow);
+  --color-input-text: var(--syn-100);
+  --color-input-placeholder: var(--syn-400);
+
+  /* Modal */
+  --color-modal-overlay: rgba(0, 0, 0, 0.6);
+  --color-modal-bg: var(--syn-850);
+
+  /* Navigation */
+  --color-surface-navigation: var(--syn-900);
+  --color-surface-navigation-hover: var(--syn-850);
+  --color-surface-navigation-active: var(--syn-700);
+  --color-surface-navigation-selected: rgba(255, 95, 215, 0.15);
+  --color-surface-navigation-selected-hover: rgba(255, 95, 215, 0.2);
+  --color-text-navigation-primary: var(--syn-200);
+  --color-text-navigation-secondary: var(--syn-300);
+  --color-text-navigation-muted: #a08fc9;  /* 6.65:1 on --syn-900 (AA) */
+  --color-text-navigation-selected: var(--syn-100);
+  --color-text-navigation-hover: var(--syn-100);
+  --color-text-navigation-section: #a08fc9;  /* 6.65:1 on --syn-900 (AA) */
+  --color-text-navigation-brand: var(--syn-300);
+  --color-border-navigation: var(--syn-700);
+  --color-divider-navigation: var(--syn-800);
+  --color-divider-navigation-subtle: rgba(255, 255, 255, 0.03);
+
+  /* Scrollbar */
+  --color-scrollbar-track: var(--syn-900);
+  --color-scrollbar-thumb: rgba(255, 255, 255, 0.15);
+  --color-scrollbar-thumb-hover: rgba(255, 255, 255, 0.30);
+
+  /* Tab indicator — UNDERLINE mode */
+  --tab-indicator-color: var(--syn-accent6);
+  --tab-indicator-height: 2px;
+
+  /* Terminal — every ANSI color ≥ 4.5:1 on --syn-950 */
+  --color-terminal-bg: var(--syn-950);
+  --color-terminal-fg: var(--syn-100);
+  --color-terminal-cursor: var(--syn-glow);
+  --color-terminal-selection-bg: rgba(255, 95, 215, 0.28);
+  --color-terminal-black: var(--syn-950);
+  --color-terminal-red: #ff5c7a;
+  --color-terminal-green: #5ee89a;
+  --color-terminal-yellow: #ffd166;
+  --color-terminal-blue: #7f9cff;
+  --color-terminal-magenta: #ff5fd7;
+  --color-terminal-cyan: #3de3ff;
+  --color-terminal-white: var(--syn-100);
+  --color-terminal-bright-black: var(--syn-400);
+  --color-terminal-bright-red: #ff8aa0;
+  --color-terminal-bright-green: #8ff5b8;
+  --color-terminal-bright-yellow: #ffe08a;
+  --color-terminal-bright-blue: #a6b8ff;
+  --color-terminal-bright-magenta: #ff8ee6;
+  --color-terminal-bright-cyan: #86efff;
+  --color-terminal-bright-white: #ffffff;
+}
+
+/* Acid Terminal Theme — charcoal-black, electric lime primary, amber secondary */
+:root.acid {
+  /* Backgrounds — TWO-TONE foundation */
+  --color-bg-primary: var(--acid-900);
+  --color-bg-secondary: var(--acid-850);
+  --color-bg-tertiary: var(--acid-700);
+  --color-bg-hover: var(--acid-700);
+  --color-bg-active: var(--acid-600);
+  --color-bg-chrome: var(--acid-900);
+  --color-bg-editor: var(--acid-950);   /* SUNKEN — darker than chrome */
+
+  /* Surfaces */
+  --color-surface-primary: var(--acid-850);
+  --color-surface-secondary: var(--acid-800);
+  --color-surface-tertiary: var(--acid-700);
+  --color-surface-hover: rgba(255, 255, 255, 0.04);
+
+  /* Text — greys carry body copy; neon stays on accents */
+  --color-text-primary: var(--acid-100);
+  --color-text-secondary: var(--acid-200);
+  --color-text-tertiary: var(--acid-300);
+  --color-text-muted: #8a9c8a;  /* 6.40:1 on --acid-900 (AA) */
+  --color-text-disabled: var(--acid-500);
+
+  /* Borders */
+  --color-border-primary: var(--acid-700);
+  --color-border-secondary: var(--acid-800);
+  --color-border-hover: var(--acid-600);
+  --color-border-focus: var(--acid-glow);
+
+  /* Interactive — neon primary on interactive surfaces only */
+  --color-interactive-primary: var(--acid-accent6);
+  --color-interactive-hover: var(--acid-accent7);
+  --color-interactive-active: var(--acid-accent8);
+  --color-interactive-text: var(--acid-glow);
+  --color-focus-ring: var(--acid-glow);
+  --color-interactive-rgb: 180 255 58;
+
+  /* Interactive on dark */
+  --color-text-interactive-on-dark: var(--acid-glow);
+  --color-text-interactive-on-dark-hover: var(--acid-accent6);
+  --color-text-interactive-on-dark-active: var(--acid-glow);
+  --color-text-interactive-on-dark-focus: var(--acid-glow);
+
+  /* Interactive surface tokens */
+  --color-surface-interactive: var(--acid-850);
+  --color-surface-interactive-hover: var(--acid-700);
+  --color-interactive-surface: rgba(180, 255, 58, 0.15);
+  --color-interactive-surface-hover: rgba(180, 255, 58, 0.25);
+
+  /* Interactive border tokens */
+  --color-border-interactive-subtle: rgba(255, 255, 255, 0.05);
+  --color-border-interactive: rgba(255, 255, 255, 0.08);
+  --color-interactive-border: rgba(180, 255, 58, 0.5);
+  --color-interactive-border-hover: rgba(180, 255, 58, 0.7);
+
+  /* Interactive text tokens */
+  --color-text-interactive-muted: #8a9c8a;  /* 6.40:1 on --acid-900 (AA) */
+
+  /* Focus ring */
+  --color-focus-ring-subtle: rgba(180, 255, 58, 0.4);
+
+  /* Status */
+  --color-status-success: #7ff26a;
+  --color-status-success-hover: #62dd4c;
+  --color-status-warning: #ffb020;
+  --color-status-warning-hover: #f09c00;
+  --color-status-error: #ff6363;
+  --color-status-error-hover: #ea4747;
+  --color-status-info: #5ee0d0;
+  --color-status-neutral: #778a77;
+
+  /* Context-Aware Text — neon fills take dark text (white fails AA on them) */
+  --color-text-on-primary: var(--acid-100);
+  --color-text-on-secondary: var(--acid-200);
+  --color-text-on-tertiary: var(--acid-200);
+  --color-text-on-surface: var(--acid-200);
+  --color-text-on-interactive: #0a0b0a;
+  --color-text-on-status-success: #0a0b0a;
+  --color-text-on-status-warning: #0a0b0a;
+  --color-text-on-status-error: #0a0b0a;
+  --color-text-on-status-info: #0a0b0a;
+  --color-text-on-navigation: var(--acid-200);
+
+  /* Buttons */
+  --color-button-primary-bg: var(--acid-accent6);
+  --color-button-primary-hover: var(--acid-accent7);
+  --color-button-primary-text: #0a0b0a;
+  --color-button-secondary-bg: var(--acid-700);
+  --color-button-secondary-hover: var(--acid-600);
+  --color-button-secondary-text: var(--acid-200);
+  --color-button-ghost-hover: var(--acid-800);
+  --color-button-ghost-text: var(--acid-300);
+
+  /* Cards */
+  --color-card-bg: var(--acid-850);
+  --color-card-border: var(--acid-700);
+  --color-card-nested-bg: var(--acid-700);
+
+  /* Forms */
+  --color-input-bg: var(--acid-950);
+  --color-input-border: var(--acid-600);
+  --color-input-focus: var(--acid-glow);
+  --color-input-text: var(--acid-100);
+  --color-input-placeholder: var(--acid-400);
+
+  /* Modal */
+  --color-modal-overlay: rgba(0, 0, 0, 0.6);
+  --color-modal-bg: var(--acid-850);
+
+  /* Navigation */
+  --color-surface-navigation: var(--acid-900);
+  --color-surface-navigation-hover: var(--acid-850);
+  --color-surface-navigation-active: var(--acid-700);
+  --color-surface-navigation-selected: rgba(180, 255, 58, 0.15);
+  --color-surface-navigation-selected-hover: rgba(180, 255, 58, 0.2);
+  --color-text-navigation-primary: var(--acid-200);
+  --color-text-navigation-secondary: var(--acid-300);
+  --color-text-navigation-muted: #8a9c8a;  /* 6.40:1 on --acid-900 (AA) */
+  --color-text-navigation-selected: var(--acid-100);
+  --color-text-navigation-hover: var(--acid-100);
+  --color-text-navigation-section: #8a9c8a;  /* 6.40:1 on --acid-900 (AA) */
+  --color-text-navigation-brand: var(--acid-300);
+  --color-border-navigation: var(--acid-700);
+  --color-divider-navigation: var(--acid-800);
+  --color-divider-navigation-subtle: rgba(255, 255, 255, 0.03);
+
+  /* Scrollbar */
+  --color-scrollbar-track: var(--acid-900);
+  --color-scrollbar-thumb: rgba(255, 255, 255, 0.15);
+  --color-scrollbar-thumb-hover: rgba(255, 255, 255, 0.30);
+
+  /* Tab indicator — UNDERLINE mode */
+  --tab-indicator-color: var(--acid-accent6);
+  --tab-indicator-height: 2px;
+
+  /* Terminal — every ANSI color ≥ 4.5:1 on --acid-950 */
+  --color-terminal-bg: var(--acid-950);
+  --color-terminal-fg: var(--acid-100);
+  --color-terminal-cursor: var(--acid-glow);
+  --color-terminal-selection-bg: rgba(180, 255, 58, 0.24);
+  --color-terminal-black: var(--acid-950);
+  --color-terminal-red: #ff6363;
+  --color-terminal-green: #7ff26a;
+  --color-terminal-yellow: #ffb020;
+  --color-terminal-blue: #7fb2ff;
+  --color-terminal-magenta: #d99cff;
+  --color-terminal-cyan: #5ee0d0;
+  --color-terminal-white: var(--acid-100);
+  --color-terminal-bright-black: var(--acid-400);
+  --color-terminal-bright-red: #ff8f8f;
+  --color-terminal-bright-green: #a8f797;
+  --color-terminal-bright-yellow: #ffc95c;
+  --color-terminal-bright-blue: #a6c9ff;
+  --color-terminal-bright-magenta: #e6bbff;
+  --color-terminal-bright-cyan: #8fece0;
+  --color-terminal-bright-white: #ffffff;
+}
+
+/* Tokyo Rain Theme — blue-black, signage pink primary, neon blue links, cool grey text */
+:root.tokyo-rain {
+  /* Backgrounds — TWO-TONE foundation */
+  --color-bg-primary: var(--rain-900);
+  --color-bg-secondary: var(--rain-850);
+  --color-bg-tertiary: var(--rain-700);
+  --color-bg-hover: var(--rain-700);
+  --color-bg-active: var(--rain-600);
+  --color-bg-chrome: var(--rain-900);
+  --color-bg-editor: var(--rain-950);   /* SUNKEN — darker than chrome */
+
+  /* Surfaces */
+  --color-surface-primary: var(--rain-850);
+  --color-surface-secondary: var(--rain-800);
+  --color-surface-tertiary: var(--rain-700);
+  --color-surface-hover: rgba(255, 255, 255, 0.04);
+
+  /* Text — greys carry body copy; neon stays on accents */
+  --color-text-primary: var(--rain-100);
+  --color-text-secondary: var(--rain-200);
+  --color-text-tertiary: var(--rain-300);
+  --color-text-muted: #8896b3;  /* 6.31:1 on --rain-900 (AA) */
+  --color-text-disabled: var(--rain-500);
+
+  /* Borders */
+  --color-border-primary: var(--rain-700);
+  --color-border-secondary: var(--rain-800);
+  --color-border-hover: var(--rain-600);
+  --color-border-focus: var(--rain-glow);
+
+  /* Interactive — neon primary on interactive surfaces only */
+  --color-interactive-primary: var(--rain-accent6);
+  --color-interactive-hover: var(--rain-accent7);
+  --color-interactive-active: var(--rain-accent8);
+  --color-interactive-text: var(--rain-glow);
+  --color-focus-ring: var(--rain-glow);
+  --color-interactive-rgb: 255 79 154;
+
+  /* Interactive on dark */
+  --color-text-interactive-on-dark: var(--rain-glow);
+  --color-text-interactive-on-dark-hover: var(--rain-accent6);
+  --color-text-interactive-on-dark-active: var(--rain-glow);
+  --color-text-interactive-on-dark-focus: var(--rain-glow);
+
+  /* Interactive surface tokens */
+  --color-surface-interactive: var(--rain-850);
+  --color-surface-interactive-hover: var(--rain-700);
+  --color-interactive-surface: rgba(255, 79, 154, 0.15);
+  --color-interactive-surface-hover: rgba(255, 79, 154, 0.25);
+
+  /* Interactive border tokens */
+  --color-border-interactive-subtle: rgba(255, 255, 255, 0.05);
+  --color-border-interactive: rgba(255, 255, 255, 0.08);
+  --color-interactive-border: rgba(255, 79, 154, 0.5);
+  --color-interactive-border-hover: rgba(255, 79, 154, 0.7);
+
+  /* Interactive text tokens */
+  --color-text-interactive-muted: #8896b3;  /* 6.31:1 on --rain-900 (AA) */
+
+  /* Focus ring */
+  --color-focus-ring-subtle: rgba(255, 79, 154, 0.4);
+
+  /* Status */
+  --color-status-success: #4ee0a3;
+  --color-status-success-hover: #31cb8c;
+  --color-status-warning: #ffc45c;
+  --color-status-warning-hover: #f0ad3a;
+  --color-status-error: #ff5f7a;
+  --color-status-error-hover: #f04160;
+  --color-status-info: #5cb3ff;
+  --color-status-neutral: #74839f;
+
+  /* Context-Aware Text — neon fills take dark text (white fails AA on them) */
+  --color-text-on-primary: var(--rain-100);
+  --color-text-on-secondary: var(--rain-200);
+  --color-text-on-tertiary: var(--rain-200);
+  --color-text-on-surface: var(--rain-200);
+  --color-text-on-interactive: #0d1120;
+  --color-text-on-status-success: #0d1120;
+  --color-text-on-status-warning: #0d1120;
+  --color-text-on-status-error: #0d1120;
+  --color-text-on-status-info: #0d1120;
+  --color-text-on-navigation: var(--rain-200);
+
+  /* Buttons */
+  --color-button-primary-bg: var(--rain-accent6);
+  --color-button-primary-hover: var(--rain-accent7);
+  --color-button-primary-text: #0d1120;
+  --color-button-secondary-bg: var(--rain-700);
+  --color-button-secondary-hover: var(--rain-600);
+  --color-button-secondary-text: var(--rain-200);
+  --color-button-ghost-hover: var(--rain-800);
+  --color-button-ghost-text: var(--rain-300);
+
+  /* Cards */
+  --color-card-bg: var(--rain-850);
+  --color-card-border: var(--rain-700);
+  --color-card-nested-bg: var(--rain-700);
+
+  /* Forms */
+  --color-input-bg: var(--rain-950);
+  --color-input-border: var(--rain-600);
+  --color-input-focus: var(--rain-glow);
+  --color-input-text: var(--rain-100);
+  --color-input-placeholder: var(--rain-400);
+
+  /* Modal */
+  --color-modal-overlay: rgba(0, 0, 0, 0.6);
+  --color-modal-bg: var(--rain-850);
+
+  /* Navigation */
+  --color-surface-navigation: var(--rain-900);
+  --color-surface-navigation-hover: var(--rain-850);
+  --color-surface-navigation-active: var(--rain-700);
+  --color-surface-navigation-selected: rgba(255, 79, 154, 0.15);
+  --color-surface-navigation-selected-hover: rgba(255, 79, 154, 0.2);
+  --color-text-navigation-primary: var(--rain-200);
+  --color-text-navigation-secondary: var(--rain-300);
+  --color-text-navigation-muted: #8896b3;  /* 6.31:1 on --rain-900 (AA) */
+  --color-text-navigation-selected: var(--rain-100);
+  --color-text-navigation-hover: var(--rain-100);
+  --color-text-navigation-section: #8896b3;  /* 6.31:1 on --rain-900 (AA) */
+  --color-text-navigation-brand: var(--rain-300);
+  --color-border-navigation: var(--rain-700);
+  --color-divider-navigation: var(--rain-800);
+  --color-divider-navigation-subtle: rgba(255, 255, 255, 0.03);
+
+  /* Scrollbar */
+  --color-scrollbar-track: var(--rain-900);
+  --color-scrollbar-thumb: rgba(255, 255, 255, 0.15);
+  --color-scrollbar-thumb-hover: rgba(255, 255, 255, 0.30);
+
+  /* Tab indicator — UNDERLINE mode */
+  --tab-indicator-color: var(--rain-accent6);
+  --tab-indicator-height: 2px;
+
+  /* Terminal — every ANSI color ≥ 4.5:1 on --rain-950 */
+  --color-terminal-bg: var(--rain-950);
+  --color-terminal-fg: var(--rain-100);
+  --color-terminal-cursor: var(--rain-glow);
+  --color-terminal-selection-bg: rgba(92, 179, 255, 0.28);
+  --color-terminal-black: var(--rain-950);
+  --color-terminal-red: #ff5f7a;
+  --color-terminal-green: #4ee0a3;
+  --color-terminal-yellow: #ffc45c;
+  --color-terminal-blue: #5cb3ff;
+  --color-terminal-magenta: #ff6fb0;
+  --color-terminal-cyan: #4fe0e6;
+  --color-terminal-white: var(--rain-100);
+  --color-terminal-bright-black: var(--rain-400);
+  --color-terminal-bright-red: #ff8da1;
+  --color-terminal-bright-green: #84ecbf;
+  --color-terminal-bright-yellow: #ffd68a;
+  --color-terminal-bright-blue: #8ecbff;
+  --color-terminal-bright-magenta: #ff9bc9;
+  --color-terminal-bright-cyan: #8aecf0;
+  --color-terminal-bright-white: #ffffff;
+}
+
+/* Folio Theme — paper & ink: warm cream stock, near-black ink, vermilion rubrication */
+:root.folio {
+  /* Backgrounds — page / sheet / margin tonal steps */
+  --color-bg-primary: var(--folio-paper);
+  --color-bg-secondary: var(--folio-chrome);
+  --color-bg-tertiary: var(--folio-hover);
+  --color-bg-hover: var(--folio-hover);
+  --color-bg-active: var(--folio-active);
+  --color-bg-chrome: var(--folio-chrome);
+  --color-bg-editor: var(--folio-sheet);   /* the sheet is the brightest surface */
+
+  /* Surfaces */
+  --color-surface-primary: var(--folio-sheet);
+  --color-surface-secondary: var(--folio-paper);
+  --color-surface-tertiary: var(--folio-chrome);
+  --color-surface-hover: rgba(31, 27, 23, 0.05);
+
+  /* Text — ink */
+  --color-text-primary: var(--folio-ink);
+  --color-text-secondary: var(--folio-ink-2);
+  --color-text-tertiary: var(--folio-ink-3);
+  --color-text-muted: var(--folio-ink-muted);
+  --color-text-disabled: var(--folio-ink-disabled);
+
+  /* Borders — faint rule lines */
+  --color-border-primary: var(--folio-rule);
+  --color-border-secondary: var(--folio-rule-soft);
+  --color-border-tertiary: var(--folio-rule-faint);
+  --color-border-hover: rgba(31, 27, 23, 0.24);
+  --color-border-focus: var(--folio-rubric);
+
+  /* Interactive — single rubrication accent */
+  --color-interactive: var(--folio-rubric);
+  --color-interactive-primary: var(--folio-rubric);
+  --color-interactive-hover: var(--folio-rubric-hover);
+  --color-interactive-active: var(--folio-rubric-active);
+  --color-interactive-text: var(--folio-rubric-text);
+  --color-focus-ring: var(--folio-rubric);
+  --color-interactive-rgb: 179 50 28;
+
+  /* Interactive on dark surfaces */
+  --color-text-interactive-on-dark: var(--folio-rubric-text);
+  --color-text-interactive-on-dark-hover: var(--folio-rubric-hover);
+  --color-text-interactive-on-dark-active: var(--folio-rubric-text);
+  --color-text-interactive-on-dark-focus: var(--folio-rubric-text);
+
+  /* Interactive surface tokens */
+  --color-surface-interactive: var(--folio-chrome);
+  --color-surface-interactive-hover: var(--folio-hover);
+  --color-interactive-surface: rgba(179, 50, 28, 0.10);
+  --color-interactive-surface-hover: rgba(179, 50, 28, 0.16);
+
+  /* Interactive border tokens */
+  --color-border-interactive-subtle: var(--folio-rule-soft);
+  --color-border-interactive: var(--folio-rule);
+  --color-interactive-border: var(--folio-rubric);
+  --color-interactive-border-hover: var(--folio-rubric-hover);
+
+  /* Interactive text tokens */
+  --color-text-interactive-muted: var(--folio-ink-muted);
+
+  /* Focus ring */
+  --color-focus-ring-subtle: rgba(179, 50, 28, 0.35);
+
+  /* Status — printed, low saturation */
+  --color-status-success: #3d7a3a;        /* 4.6:1 on paper */
+  --color-status-success-hover: #326530;
+  --color-status-warning: #8a5f10;        /* 5.0:1 on paper */
+  --color-status-warning-hover: #714d0c;
+  --color-status-error: var(--folio-rubric);
+  --color-status-error-hover: var(--folio-rubric-hover);
+  --color-status-info: var(--folio-rubric-text);
+  --color-status-neutral: var(--folio-ink-muted);
+
+  /* Context-Aware Text */
+  --color-text-on-primary: var(--folio-ink);
+  --color-text-on-secondary: var(--folio-ink);
+  --color-text-on-tertiary: var(--folio-ink-2);
+  --color-text-on-surface: var(--folio-ink);
+  --color-text-on-interactive: rgb(255 255 255);
+  --color-text-on-status-success: rgb(255 255 255);
+  --color-text-on-status-warning: rgb(255 255 255);
+  --color-text-on-status-error: rgb(255 255 255);
+  --color-text-on-status-info: rgb(255 255 255);
+  --color-text-on-navigation: var(--folio-ink);
+
+  /* Buttons */
+  --color-button-primary-bg: var(--folio-rubric);
+  --color-button-primary-hover: var(--folio-rubric-hover);
+  --color-button-primary-text: rgb(255 255 255);
+  --color-button-secondary-bg: var(--folio-chrome);
+  --color-button-secondary-hover: var(--folio-hover);
+  --color-button-secondary-text: var(--folio-ink);
+  --color-button-ghost-hover: var(--folio-hover);
+  --color-button-ghost-text: var(--folio-ink-2);
+
+  /* Cards */
+  --color-card-bg: var(--folio-sheet);
+  --color-card-border: var(--folio-rule);
+  --color-card-nested-bg: var(--folio-paper);
+
+  /* Forms */
+  --color-input-bg: var(--folio-sheet);
+  --color-input-border: var(--folio-rule);
+  --color-input-focus: var(--folio-rubric);
+  --color-input-text: var(--folio-ink);
+  --color-input-placeholder: var(--folio-ink-muted);
+
+  /* Modal */
+  --color-modal-overlay: rgba(31, 27, 23, 0.45);
+  --color-modal-bg: var(--folio-sheet);
+
+  /* Navigation — the margin */
+  --color-surface-navigation: var(--folio-chrome);
+  --color-surface-navigation-hover: var(--folio-hover);
+  --color-surface-navigation-active: var(--folio-active);
+  --color-surface-navigation-selected: rgba(179, 50, 28, 0.10);
+  --color-surface-navigation-selected-hover: rgba(179, 50, 28, 0.16);
+  --color-text-navigation-primary: var(--folio-ink);
+  --color-text-navigation-secondary: var(--folio-ink-2);
+  --color-text-navigation-muted: var(--folio-ink-muted);
+  --color-text-navigation-selected: var(--folio-ink);
+  --color-text-navigation-hover: var(--folio-ink);
+  --color-text-navigation-section: var(--folio-ink-muted);
+  --color-text-navigation-brand: var(--folio-ink-3);
+  --color-border-navigation: var(--folio-rule);
+  --color-divider-navigation: var(--folio-rule-soft);
+  --color-divider-navigation-subtle: var(--folio-rule-faint);
+
+  /* Scrollbar */
+  --color-scrollbar-track: var(--folio-paper);
+  --color-scrollbar-thumb: rgba(31, 27, 23, 0.18);
+  --color-scrollbar-thumb-hover: rgba(31, 27, 23, 0.32);
+
+  /* Tab indicator — a rubricated rule under the active tab */
+  --tab-indicator-color: var(--folio-rubric);
+  --tab-indicator-height: 2px;
+
+  /* Terminal — ink on the sheet; every colour ≥ 3:1, text ≥ 4.5:1 on --folio-sheet */
+  --color-terminal-bg: var(--folio-sheet);
+  --color-terminal-fg: var(--folio-ink);
+  --color-terminal-cursor: var(--folio-rubric);
+  --color-terminal-black: var(--folio-sheet);
+  --color-terminal-red: #a83324;
+  --color-terminal-green: #3f6d33;
+  --color-terminal-yellow: #805a10;
+  --color-terminal-blue: #2f5a86;
+  --color-terminal-magenta: #7a4478;
+  --color-terminal-cyan: #286864;
+  --color-terminal-white: var(--folio-ink-3);
+  --color-terminal-bright-black: var(--folio-ink-muted);
+  --color-terminal-bright-red: #8f2a1d;
+  --color-terminal-bright-green: #2f5a26;
+  --color-terminal-bright-yellow: #6b4a0a;
+  --color-terminal-bright-blue: #234870;
+  --color-terminal-bright-magenta: #623560;
+  --color-terminal-bright-cyan: #1c5350;
+  --color-terminal-bright-white: rgb(0 0 0);
+  --color-terminal-selection-bg: #b3321c33;
+}
+
+/* Newsprint Theme — cool grey-white stock, graphite ink, halftone greys, ink-blue accent */
+:root.newsprint {
+  /* Backgrounds — stock / sheet / halftone tonal steps */
+  --color-bg-primary: var(--news-paper);
+  --color-bg-secondary: var(--news-chrome);
+  --color-bg-tertiary: var(--news-hover);
+  --color-bg-hover: var(--news-hover);
+  --color-bg-active: var(--news-active);
+  --color-bg-chrome: var(--news-chrome);
+  --color-bg-editor: var(--news-sheet);
+
+  /* Surfaces */
+  --color-surface-primary: var(--news-sheet);
+  --color-surface-secondary: var(--news-paper);
+  --color-surface-tertiary: var(--news-chrome);
+  --color-surface-hover: rgba(36, 39, 43, 0.05);
+
+  /* Text — graphite */
+  --color-text-primary: var(--news-ink);
+  --color-text-secondary: var(--news-ink-2);
+  --color-text-tertiary: var(--news-ink-3);
+  --color-text-muted: var(--news-ink-muted);
+  --color-text-disabled: var(--news-ink-disabled);
+
+  /* Borders — column rules */
+  --color-border-primary: var(--news-rule);
+  --color-border-secondary: var(--news-rule-soft);
+  --color-border-tertiary: var(--news-rule-faint);
+  --color-border-hover: rgba(36, 39, 43, 0.26);
+  --color-border-focus: var(--news-blue);
+
+  /* Interactive — single ink-blue accent */
+  --color-interactive: var(--news-blue);
+  --color-interactive-primary: var(--news-blue);
+  --color-interactive-hover: var(--news-blue-hover);
+  --color-interactive-active: var(--news-blue-active);
+  --color-interactive-text: var(--news-blue-text);
+  --color-focus-ring: var(--news-blue);
+  --color-interactive-rgb: 31 78 140;
+
+  /* Interactive on dark surfaces */
+  --color-text-interactive-on-dark: var(--news-blue-text);
+  --color-text-interactive-on-dark-hover: var(--news-blue-hover);
+  --color-text-interactive-on-dark-active: var(--news-blue-text);
+  --color-text-interactive-on-dark-focus: var(--news-blue-text);
+
+  /* Interactive surface tokens */
+  --color-surface-interactive: var(--news-chrome);
+  --color-surface-interactive-hover: var(--news-hover);
+  --color-interactive-surface: rgba(31, 78, 140, 0.10);
+  --color-interactive-surface-hover: rgba(31, 78, 140, 0.16);
+
+  /* Interactive border tokens */
+  --color-border-interactive-subtle: var(--news-rule-soft);
+  --color-border-interactive: var(--news-rule);
+  --color-interactive-border: var(--news-blue);
+  --color-interactive-border-hover: var(--news-blue-hover);
+
+  /* Interactive text tokens */
+  --color-text-interactive-muted: var(--news-ink-muted);
+
+  /* Focus ring */
+  --color-focus-ring-subtle: rgba(31, 78, 140, 0.35);
+
+  /* Status — printed, low saturation */
+  --color-status-success: #2f6f3a;        /* 5.2:1 on stock */
+  --color-status-success-hover: #275c30;
+  --color-status-warning: #7d5a12;        /* 5.4:1 on stock */
+  --color-status-warning-hover: #66490e;
+  --color-status-error: #a83a3a;          /* 5.3:1 on stock */
+  --color-status-error-hover: #8c2f2f;
+  --color-status-info: var(--news-blue-text);
+  --color-status-neutral: var(--news-ink-muted);
+
+  /* Context-Aware Text */
+  --color-text-on-primary: var(--news-ink);
+  --color-text-on-secondary: var(--news-ink);
+  --color-text-on-tertiary: var(--news-ink-2);
+  --color-text-on-surface: var(--news-ink);
+  --color-text-on-interactive: rgb(255 255 255);
+  --color-text-on-status-success: rgb(255 255 255);
+  --color-text-on-status-warning: rgb(255 255 255);
+  --color-text-on-status-error: rgb(255 255 255);
+  --color-text-on-status-info: rgb(255 255 255);
+  --color-text-on-navigation: var(--news-ink);
+
+  /* Buttons */
+  --color-button-primary-bg: var(--news-blue);
+  --color-button-primary-hover: var(--news-blue-hover);
+  --color-button-primary-text: rgb(255 255 255);
+  --color-button-secondary-bg: var(--news-chrome);
+  --color-button-secondary-hover: var(--news-hover);
+  --color-button-secondary-text: var(--news-ink);
+  --color-button-ghost-hover: var(--news-hover);
+  --color-button-ghost-text: var(--news-ink-2);
+
+  /* Cards */
+  --color-card-bg: var(--news-sheet);
+  --color-card-border: var(--news-rule);
+  --color-card-nested-bg: var(--news-paper);
+
+  /* Forms */
+  --color-input-bg: var(--news-sheet);
+  --color-input-border: var(--news-rule);
+  --color-input-focus: var(--news-blue);
+  --color-input-text: var(--news-ink);
+  --color-input-placeholder: var(--news-ink-muted);
+
+  /* Modal */
+  --color-modal-overlay: rgba(36, 39, 43, 0.45);
+  --color-modal-bg: var(--news-sheet);
+
+  /* Navigation — halftone column */
+  --color-surface-navigation: var(--news-chrome);
+  --color-surface-navigation-hover: var(--news-hover);
+  --color-surface-navigation-active: var(--news-active);
+  --color-surface-navigation-selected: rgba(31, 78, 140, 0.10);
+  --color-surface-navigation-selected-hover: rgba(31, 78, 140, 0.16);
+  --color-text-navigation-primary: var(--news-ink);
+  --color-text-navigation-secondary: var(--news-ink-2);
+  --color-text-navigation-muted: var(--news-ink-muted);
+  --color-text-navigation-selected: var(--news-ink);
+  --color-text-navigation-hover: var(--news-ink);
+  --color-text-navigation-section: var(--news-ink-muted);
+  --color-text-navigation-brand: var(--news-ink-3);
+  --color-border-navigation: var(--news-rule);
+  --color-divider-navigation: var(--news-rule-soft);
+  --color-divider-navigation-subtle: var(--news-rule-faint);
+
+  /* Scrollbar */
+  --color-scrollbar-track: var(--news-paper);
+  --color-scrollbar-thumb: rgba(36, 39, 43, 0.18);
+  --color-scrollbar-thumb-hover: rgba(36, 39, 43, 0.32);
+
+  /* Tab indicator — ink-blue rule under the active tab */
+  --tab-indicator-color: var(--news-blue);
+  --tab-indicator-height: 2px;
+
+  /* Terminal — graphite on the sheet; every colour ≥ 3:1, text ≥ 4.5:1 on --news-sheet */
+  --color-terminal-bg: var(--news-sheet);
+  --color-terminal-fg: var(--news-ink);
+  --color-terminal-cursor: var(--news-blue);
+  --color-terminal-black: var(--news-sheet);
+  --color-terminal-red: #a83a3a;
+  --color-terminal-green: #3a7040;
+  --color-terminal-yellow: #7d5a12;
+  --color-terminal-blue: var(--news-blue);
+  --color-terminal-magenta: #6f4a86;
+  --color-terminal-cyan: #2a6a72;
+  --color-terminal-white: var(--news-ink-3);
+  --color-terminal-bright-black: var(--news-ink-muted);
+  --color-terminal-bright-red: #8c2f2f;
+  --color-terminal-bright-green: #2e5c33;
+  --color-terminal-bright-yellow: #66490e;
+  --color-terminal-bright-blue: #183f73;
+  --color-terminal-bright-magenta: #5a3b6d;
+  --color-terminal-bright-cyan: #20565c;
+  --color-terminal-bright-white: rgb(0 0 0);
+  --color-terminal-selection-bg: #1f4e8c33;
+}
+
+/* Walnut Theme — vellum & walnut: deep warm brown-black, parchment text, brass accent */
+:root.walnut {
+  /* Backgrounds — TWO-TONE foundation, sunken editor */
+  --color-bg-primary: var(--walnut-900);
+  --color-bg-secondary: var(--walnut-850);
+  --color-bg-tertiary: var(--walnut-700);
+  --color-bg-hover: var(--walnut-700);
+  --color-bg-active: var(--walnut-600);
+  --color-bg-chrome: var(--walnut-900);
+  --color-bg-editor: var(--walnut-950);   /* SUNKEN — darker than chrome */
+
+  /* Surfaces */
+  --color-surface-primary: var(--walnut-850);
+  --color-surface-secondary: var(--walnut-800);
+  --color-surface-tertiary: var(--walnut-700);
+  --color-surface-hover: rgba(237, 225, 205, 0.05);
+
+  /* Text — parchment */
+  --color-text-primary: var(--parchment-100);
+  --color-text-secondary: var(--parchment-200);
+  --color-text-tertiary: var(--parchment-300);
+  --color-text-muted: var(--walnut-200);   /* 7.0:1 on --walnut-900, 4.5:1 on --walnut-600 */
+  --color-text-disabled: var(--walnut-400);
+
+  /* Borders */
+  --color-border-primary: var(--walnut-600);
+  --color-border-secondary: var(--walnut-800);
+  --color-border-tertiary: var(--walnut-850);
+  --color-border-hover: var(--walnut-500);
+  --color-border-focus: var(--brass-500);
+
+  /* Interactive — single brass accent */
+  --color-interactive: var(--brass-500);
+  --color-interactive-primary: var(--brass-500);
+  --color-interactive-hover: var(--brass-400);
+  --color-interactive-active: var(--brass-600);
+  --color-interactive-text: var(--brass-text);
+  --color-focus-ring: var(--brass-500);
+  --color-interactive-rgb: 201 162 77;
+
+  /* Interactive on dark */
+  --color-text-interactive-on-dark: var(--brass-text);
+  --color-text-interactive-on-dark-hover: var(--brass-400);
+  --color-text-interactive-on-dark-active: var(--brass-text);
+  --color-text-interactive-on-dark-focus: var(--brass-text);
+
+  /* Interactive surface tokens */
+  --color-surface-interactive: var(--walnut-850);
+  --color-surface-interactive-hover: var(--walnut-700);
+  --color-interactive-surface: rgba(201, 162, 77, 0.14);
+  --color-interactive-surface-hover: rgba(201, 162, 77, 0.22);
+
+  /* Interactive border tokens */
+  --color-border-interactive-subtle: rgba(237, 225, 205, 0.06);
+  --color-border-interactive: rgba(237, 225, 205, 0.10);
+  --color-interactive-border: rgba(201, 162, 77, 0.55);
+  --color-interactive-border-hover: rgba(201, 162, 77, 0.75);
+
+  /* Interactive text tokens */
+  --color-text-interactive-muted: var(--walnut-200);
+
+  /* Focus ring */
+  --color-focus-ring-subtle: rgba(201, 162, 77, 0.4);
+
+  /* Status — muted pigments on walnut */
+  --color-status-success: #93b57a;
+  --color-status-success-hover: #a5c48d;
+  --color-status-warning: #d9b25f;
+  --color-status-warning-hover: #e3c079;
+  --color-status-error: #d8776c;
+  --color-status-error-hover: #e28c82;
+  --color-status-info: var(--brass-500);
+  --color-status-neutral: var(--walnut-300);
+
+  /* Context-Aware Text */
+  --color-text-on-primary: var(--parchment-100);
+  --color-text-on-secondary: var(--parchment-200);
+  --color-text-on-tertiary: var(--parchment-200);
+  --color-text-on-surface: var(--parchment-200);
+  --color-text-on-interactive: var(--walnut-900);   /* dark ink on brass — 9.4:1 */
+  --color-text-on-status-success: var(--walnut-900);
+  --color-text-on-status-warning: var(--walnut-900);
+  --color-text-on-status-error: var(--walnut-900);
+  --color-text-on-status-info: var(--walnut-900);
+  --color-text-on-navigation: var(--parchment-200);
+
+  /* Buttons */
+  --color-button-primary-bg: var(--brass-500);
+  --color-button-primary-hover: var(--brass-400);
+  --color-button-primary-text: var(--walnut-900);
+  --color-button-secondary-bg: var(--walnut-700);
+  --color-button-secondary-hover: var(--walnut-600);
+  --color-button-secondary-text: var(--parchment-100);
+  --color-button-ghost-hover: var(--walnut-800);
+  --color-button-ghost-text: var(--parchment-300);
+
+  /* Cards */
+  --color-card-bg: var(--walnut-850);
+  --color-card-border: var(--walnut-600);
+  --color-card-nested-bg: var(--walnut-800);
+
+  /* Forms */
+  --color-input-bg: var(--walnut-950);
+  --color-input-border: var(--walnut-500);
+  --color-input-focus: var(--brass-500);
+  --color-input-text: var(--parchment-100);
+  --color-input-placeholder: var(--walnut-200);
+
+  /* Modal */
+  --color-modal-overlay: rgba(0, 0, 0, 0.6);
+  --color-modal-bg: var(--walnut-850);
+
+  /* Navigation */
+  --color-surface-navigation: var(--walnut-900);
+  --color-surface-navigation-hover: var(--walnut-850);
+  --color-surface-navigation-active: var(--walnut-700);
+  --color-surface-navigation-selected: rgba(201, 162, 77, 0.14);
+  --color-surface-navigation-selected-hover: rgba(201, 162, 77, 0.2);
+  --color-text-navigation-primary: var(--parchment-200);
+  --color-text-navigation-secondary: var(--parchment-300);
+  --color-text-navigation-muted: var(--walnut-200);
+  --color-text-navigation-selected: var(--parchment-100);
+  --color-text-navigation-hover: var(--parchment-100);
+  --color-text-navigation-section: var(--walnut-200);
+  --color-text-navigation-brand: var(--parchment-300);
+  --color-border-navigation: var(--walnut-600);
+  --color-divider-navigation: var(--walnut-800);
+  --color-divider-navigation-subtle: rgba(237, 225, 205, 0.04);
+
+  /* Scrollbar */
+  --color-scrollbar-track: var(--walnut-900);
+  --color-scrollbar-thumb: rgba(237, 225, 205, 0.16);
+  --color-scrollbar-thumb-hover: rgba(237, 225, 205, 0.30);
+
+  /* Tab indicator — brass rule under the active tab */
+  --tab-indicator-color: var(--brass-500);
+  --tab-indicator-height: 2px;
+
+  /* Terminal — parchment on walnut; every colour ≥ 3:1, text ≥ 4.5:1 on --walnut-950 */
+  --color-terminal-bg: var(--walnut-950);
+  --color-terminal-fg: var(--parchment-100);
+  --color-terminal-cursor: var(--brass-500);
+  --color-terminal-black: var(--walnut-950);
+  --color-terminal-red: #d8776c;
+  --color-terminal-green: #98b67e;
+  --color-terminal-yellow: #d9b25f;
+  --color-terminal-blue: #8fa6bd;
+  --color-terminal-magenta: #c395b3;
+  --color-terminal-cyan: #83b3ab;
+  --color-terminal-white: var(--parchment-200);
+  --color-terminal-bright-black: var(--walnut-300);
+  --color-terminal-bright-red: #e6948a;
+  --color-terminal-bright-green: #b0ca99;
+  --color-terminal-bright-yellow: #e6c77e;
+  --color-terminal-bright-blue: #a9bccf;
+  --color-terminal-bright-magenta: #d4adc7;
+  --color-terminal-bright-cyan: #9fc9c1;
+  --color-terminal-bright-white: var(--parchment-50);
+  --color-terminal-selection-bg: #c9a24d40;
+}
+
+/* Amber CRT Theme — amber-phosphor monitor on black-brown glass, single amber hue */
+:root.amber-crt {
+  /* Backgrounds — chrome sits on the glass, editor/terminal are sunken */
+  --color-bg-primary: var(--crt-900);
+  --color-bg-secondary: var(--crt-850);
+  --color-bg-tertiary: var(--crt-700);
+  --color-bg-hover: var(--crt-700);
+  --color-bg-active: var(--crt-600);
+  --color-bg-chrome: var(--crt-900);
+  --color-bg-editor: var(--crt-950);
+
+  /* Surfaces */
+  --color-surface-primary: var(--crt-850);
+  --color-surface-secondary: var(--crt-800);
+  --color-surface-tertiary: var(--crt-700);
+  --color-surface-hover: rgba(255, 176, 0, 0.06);
+
+  /* Text — pale amber ramp */
+  --color-text-primary: var(--crt-100);
+  --color-text-secondary: var(--crt-200);
+  --color-text-tertiary: var(--crt-300);
+  --color-text-muted: var(--crt-400);        /* 5.0:1 on --crt-900, 4.8:1 on --crt-850 */
+  --color-text-disabled: var(--crt-500);
+
+  /* Borders */
+  --color-border-primary: var(--crt-700);
+  --color-border-secondary: var(--crt-800);
+  --color-border-hover: var(--crt-600);
+  --color-border-focus: var(--crt-amber);
+
+  /* Interactive — amber phosphor, dark text on the accent */
+  --color-interactive-primary: var(--crt-amber);
+  --color-interactive-hover: var(--crt-amber-bright);
+  --color-interactive-active: var(--crt-amber-deep);
+  --color-interactive-text: var(--crt-amber);
+  --color-focus-ring: var(--crt-amber);
+  --color-interactive-rgb: 255 176 0;
+
+  /* Interactive on dark */
+  --color-text-interactive-on-dark: var(--crt-amber);
+  --color-text-interactive-on-dark-hover: var(--crt-amber-bright);
+  --color-text-interactive-on-dark-active: var(--crt-amber-deep);
+  --color-text-interactive-on-dark-focus: var(--crt-amber);
+
+  /* Interactive surface tokens */
+  --color-surface-interactive: var(--crt-850);
+  --color-surface-interactive-hover: var(--crt-700);
+  --color-interactive-surface: rgba(255, 176, 0, 0.14);
+  --color-interactive-surface-hover: rgba(255, 176, 0, 0.22);
+
+  /* Interactive border tokens */
+  --color-border-interactive-subtle: rgba(255, 176, 0, 0.08);
+  --color-border-interactive: rgba(255, 176, 0, 0.14);
+  --color-interactive-border: rgba(255, 176, 0, 0.5);
+  --color-interactive-border-hover: rgba(255, 176, 0, 0.7);
+
+  /* Interactive text tokens */
+  --color-text-interactive-muted: var(--crt-400);
+
+  /* Focus ring */
+  --color-focus-ring-subtle: rgba(255, 176, 0, 0.4);
+
+  /* Status — warm-shifted, dark text on every status fill */
+  --color-status-success: #8fbf6a;
+  --color-status-success-hover: #a3cc80;
+  --color-status-warning: #ffcf4d;
+  --color-status-warning-hover: #ffda75;
+  --color-status-error: #ff6b4a;
+  --color-status-error-hover: #ff8a6e;
+  --color-status-info: var(--crt-amber);
+  --color-status-neutral: var(--crt-400);
+
+  /* Context-Aware Text */
+  --color-text-on-primary: var(--crt-100);
+  --color-text-on-secondary: var(--crt-200);
+  --color-text-on-tertiary: var(--crt-200);
+  --color-text-on-surface: var(--crt-200);
+  --color-text-on-interactive: var(--crt-900);
+  --color-text-on-status-success: var(--crt-900);
+  --color-text-on-status-warning: var(--crt-900);
+  --color-text-on-status-error: var(--crt-900);
+  --color-text-on-status-info: var(--crt-900);
+  --color-text-on-navigation: var(--crt-200);
+
+  /* Buttons */
+  --color-button-primary-bg: var(--crt-amber);
+  --color-button-primary-hover: var(--crt-amber-bright);
+  --color-button-primary-text: var(--crt-900);
+  --color-button-secondary-bg: var(--crt-700);
+  --color-button-secondary-hover: var(--crt-600);
+  --color-button-secondary-text: var(--crt-200);
+  --color-button-ghost-hover: var(--crt-800);
+  --color-button-ghost-text: var(--crt-300);
+
+  /* Cards */
+  --color-card-bg: var(--crt-850);
+  --color-card-border: var(--crt-700);
+  --color-card-nested-bg: var(--crt-700);
+
+  /* Forms */
+  --color-input-bg: var(--crt-950);
+  --color-input-border: var(--crt-600);
+  --color-input-focus: var(--crt-amber);
+  --color-input-text: var(--crt-100);
+  --color-input-placeholder: var(--crt-400);
+
+  /* Modal */
+  --color-modal-overlay: rgba(0, 0, 0, 0.65);
+  --color-modal-bg: var(--crt-850);
+
+  /* Navigation */
+  --color-surface-navigation: var(--crt-900);
+  --color-surface-navigation-hover: var(--crt-850);
+  --color-surface-navigation-active: var(--crt-700);
+  --color-surface-navigation-selected: rgba(255, 176, 0, 0.14);
+  --color-surface-navigation-selected-hover: rgba(255, 176, 0, 0.2);
+  --color-text-navigation-primary: var(--crt-200);
+  --color-text-navigation-secondary: var(--crt-300);
+  --color-text-navigation-muted: var(--crt-400);
+  --color-text-navigation-selected: var(--crt-100);
+  --color-text-navigation-hover: var(--crt-100);
+  --color-text-navigation-section: var(--crt-400);
+  --color-text-navigation-brand: var(--crt-300);
+  --color-border-navigation: var(--crt-700);
+  --color-divider-navigation: var(--crt-800);
+  --color-divider-navigation-subtle: rgba(255, 176, 0, 0.04);
+
+  /* Scrollbar */
+  --color-scrollbar-track: var(--crt-900);
+  --color-scrollbar-thumb: rgba(255, 176, 0, 0.18);
+  --color-scrollbar-thumb-hover: rgba(255, 176, 0, 0.32);
+
+  /* Tab indicator — amber underline */
+  --tab-indicator-color: var(--crt-amber);
+  --tab-indicator-height: 2px;
+
+  /* Terminal — amber phosphor on glass; blue/magenta/cyan collapse into the warm ramp */
+  --color-terminal-bg: var(--crt-950);
+  --color-terminal-fg: var(--crt-100);
+  --color-terminal-cursor: var(--crt-amber);
+  --color-terminal-black: var(--crt-950);
+  --color-terminal-red: #ff6b4a;
+  --color-terminal-green: #b8c65a;
+  --color-terminal-yellow: #ffcf4d;
+  --color-terminal-blue: #e0a040;
+  --color-terminal-magenta: #e39a86;
+  --color-terminal-cyan: #cbb98a;
+  --color-terminal-white: var(--crt-100);
+  --color-terminal-bright-black: var(--crt-400);
+  --color-terminal-bright-red: #ff8a6e;
+  --color-terminal-bright-green: #cdd97a;
+  --color-terminal-bright-yellow: #ffe08a;
+  --color-terminal-bright-blue: #f0b860;
+  --color-terminal-bright-magenta: #f0b0a0;
+  --color-terminal-bright-cyan: #e0d0a8;
+  --color-terminal-bright-white: #fff3d6;
+  --color-terminal-selection-bg: #ffb00040;
+}
+
+/* Teletype Theme — 1970s terminal on paper: warm off-white, brown ink, burnt-orange & olive accents */
+:root.teletype {
+  /* Backgrounds — paper primary, beige chrome */
+  --color-bg-primary: var(--tty-paper-100);
+  --color-bg-secondary: var(--tty-paper-200);
+  --color-bg-tertiary: var(--tty-paper-200);
+  --color-bg-hover: var(--tty-paper-300);
+  --color-bg-active: var(--tty-paper-400);
+  --color-bg-chrome: var(--tty-paper-200);
+  --color-bg-editor: var(--tty-paper-50);
+
+  /* Surfaces */
+  --color-surface-primary: var(--tty-paper-50);
+  --color-surface-secondary: var(--tty-paper-100);
+  --color-surface-tertiary: var(--tty-paper-200);
+  --color-surface-hover: var(--tty-paper-300);
+
+  /* Text — brown ink ramp */
+  --color-text-primary: var(--tty-ink-900);
+  --color-text-secondary: var(--tty-ink-700);   /* 7.4:1 on paper */
+  --color-text-tertiary: var(--tty-ink-600);    /* 6.5:1 on paper */
+  --color-text-muted: var(--tty-ink-500);       /* 5.7:1 on paper, 5.2:1 on chrome */
+  --color-text-disabled: var(--tty-ink-400);
+
+  /* Borders — visible ruled lines */
+  --color-border-primary: rgba(43, 33, 22, 0.16);
+  --color-border-secondary: rgba(43, 33, 22, 0.10);
+  --color-border-tertiary: rgba(43, 33, 22, 0.06);
+  --color-border-hover: rgba(43, 33, 22, 0.24);
+  --color-border-focus: var(--tty-orange-600);
+
+  /* Interactive — burnt orange */
+  --color-interactive: var(--tty-orange-600);
+  --color-interactive-primary: var(--tty-orange-600);
+  --color-interactive-hover: var(--tty-orange-700);
+  --color-interactive-active: var(--tty-orange-500);
+  --color-interactive-text: var(--tty-orange-text);
+  --color-interactive-rgb: 181 69 27;
+
+  /* Status — ink colours */
+  --color-status-success: var(--tty-olive);
+  --color-status-success-hover: #3d5a0a;
+  --color-status-warning: #8a5a00;
+  --color-status-warning-hover: #6e4700;
+  --color-status-error: #b3261e;
+  --color-status-error-hover: #8f1d17;
+  --color-status-info: var(--tty-orange-text);
+  --color-status-neutral: var(--tty-ink-500);
+
+  /* Special UI States */
+  --color-modal-overlay: rgba(43, 33, 22, 0.5);
+  --color-focus-ring: var(--tty-orange-600);   /* 4.8:1 on paper */
+
+  /* Interactive tokens */
+  --color-surface-interactive: var(--tty-paper-50);
+  --color-surface-interactive-hover: var(--tty-paper-200);
+  --color-interactive-surface: rgba(181, 69, 27, 0.12);
+  --color-interactive-surface-hover: rgba(181, 69, 27, 0.2);
+  --color-border-interactive-subtle: rgba(43, 33, 22, 0.08);
+  --color-border-interactive: rgba(43, 33, 22, 0.16);
+  --color-interactive-border: var(--tty-orange-600);
+  --color-interactive-border-hover: var(--tty-orange-700);
+  --color-text-interactive-muted: var(--tty-ink-500);
+  --color-focus-ring-subtle: rgba(181, 69, 27, 0.4);
+
+  /* Context-Aware Text */
+  --color-text-on-primary: var(--tty-ink-900);
+  --color-text-on-secondary: var(--tty-ink-900);
+  --color-text-on-tertiary: var(--tty-ink-700);
+  --color-text-on-surface: var(--tty-ink-900);
+  --color-text-on-interactive: rgb(255 255 255);   /* 5.5:1 on burnt orange */
+  --color-text-on-status-success: rgb(255 255 255);
+  --color-text-on-status-warning: rgb(255 255 255);
+  --color-text-on-status-error: rgb(255 255 255);
+  --color-text-on-status-info: rgb(255 255 255);
+  --color-text-on-navigation: var(--tty-ink-900);
+
+  /* Buttons */
+  --color-button-primary-bg: var(--tty-orange-600);
+  --color-button-primary-hover: var(--tty-orange-700);
+  --color-button-primary-text: rgb(255 255 255);
+  --color-button-secondary-bg: var(--tty-paper-200);
+  --color-button-secondary-hover: var(--tty-paper-300);
+  --color-button-secondary-text: var(--tty-ink-900);
+  --color-button-ghost-hover: var(--tty-paper-300);
+  --color-button-ghost-text: var(--tty-ink-700);
+
+  /* Cards */
+  --color-card-bg: var(--tty-paper-50);
+  --color-card-border: rgba(43, 33, 22, 0.16);
+  --color-card-nested-bg: var(--tty-paper-100);
+
+  /* Forms */
+  --color-input-bg: var(--tty-paper-50);
+  --color-input-border: rgba(43, 33, 22, 0.2);
+  --color-input-focus: var(--tty-orange-600);
+  --color-input-text: var(--tty-ink-900);
+  --color-input-placeholder: var(--tty-ink-500);
+
+  /* Modal */
+  --color-modal-bg: var(--tty-paper-50);
+
+  /* Navigation — beige rail */
+  --color-surface-navigation: var(--tty-paper-200);
+  --color-surface-navigation-hover: var(--tty-paper-300);
+  --color-surface-navigation-active: var(--tty-paper-400);
+  --color-surface-navigation-selected: rgba(181, 69, 27, 0.14);
+  --color-surface-navigation-selected-hover: rgba(181, 69, 27, 0.2);
+  --color-text-navigation-primary: var(--tty-ink-900);
+  --color-text-navigation-secondary: var(--tty-ink-700);
+  --color-text-navigation-muted: var(--tty-ink-500);      /* 5.2:1 on chrome */
+  --color-text-navigation-selected: var(--tty-ink-900);
+  --color-text-navigation-hover: var(--tty-ink-900);
+  --color-text-navigation-section: var(--tty-ink-600);    /* 5.9:1 on chrome */
+  --color-text-navigation-brand: var(--tty-ink-700);
+  --color-border-navigation: rgba(43, 33, 22, 0.14);
+  --color-divider-navigation: rgba(43, 33, 22, 0.10);
+  --color-divider-navigation-subtle: rgba(43, 33, 22, 0.06);
+
+  /* Scrollbar */
+  --color-scrollbar-track: var(--tty-paper-200);
+  --color-scrollbar-thumb: var(--tty-paper-400);
+  --color-scrollbar-thumb-hover: #b3a283;
+
+  /* Tab indicator — orange underline */
+  --tab-indicator-color: var(--tty-orange-600);
+  --tab-indicator-height: 2px;
+
+  /* Terminal — ink on paper (light-theme convention: black = paper, white = ink) */
+  --color-terminal-bg: #f3ecdc;
+  --color-terminal-fg: var(--tty-ink-900);
+  --color-terminal-cursor: var(--tty-orange-600);
+  --color-terminal-black: #f3ecdc;
+  --color-terminal-red: #b3261e;
+  --color-terminal-green: var(--tty-olive);
+  --color-terminal-yellow: #8a5a00;
+  --color-terminal-blue: #35597a;
+  --color-terminal-magenta: #8f3f71;
+  --color-terminal-cyan: #2a6f6a;
+  --color-terminal-white: var(--tty-ink-900);
+  --color-terminal-bright-black: var(--tty-ink-500);
+  --color-terminal-bright-red: #8f1d17;
+  --color-terminal-bright-green: #3d5a0a;
+  --color-terminal-bright-yellow: #6e4700;
+  --color-terminal-bright-blue: #244a6a;
+  --color-terminal-bright-magenta: #73305a;
+  --color-terminal-bright-cyan: #1f5955;
+  --color-terminal-bright-white: #1a120a;
+  --color-terminal-selection-bg: #b5451b40;
+}
+
+/* Dot Matrix Theme — monochrome-green LCD: deep olive-black, 4-step green ramp, one hot accent for errors */
+:root.dot-matrix {
+  /* Backgrounds */
+  --color-bg-primary: var(--lcd-900);
+  --color-bg-secondary: var(--lcd-850);
+  --color-bg-tertiary: var(--lcd-700);
+  --color-bg-hover: var(--lcd-700);
+  --color-bg-active: var(--lcd-600);
+  --color-bg-chrome: var(--lcd-900);
+  --color-bg-editor: var(--lcd-950);
+
+  /* Surfaces */
+  --color-surface-primary: var(--lcd-850);
+  --color-surface-secondary: var(--lcd-800);
+  --color-surface-tertiary: var(--lcd-700);
+  --color-surface-hover: rgba(155, 188, 15, 0.07);
+
+  /* Text — the 4-step green ramp */
+  --color-text-primary: var(--lcd-green-4);
+  --color-text-secondary: var(--lcd-green-3);
+  --color-text-tertiary: #9fbf58;              /* 8.9:1 on --lcd-900 */
+  --color-text-muted: var(--lcd-green-1);      /* 5.9:1 on --lcd-900, 5.5:1 on --lcd-850 */
+  --color-text-disabled: var(--lcd-500);
+
+  /* Borders */
+  --color-border-primary: var(--lcd-700);
+  --color-border-secondary: var(--lcd-800);
+  --color-border-hover: var(--lcd-600);
+  --color-border-focus: var(--lcd-green-2);
+
+  /* Interactive — LCD green, dark text on the accent */
+  --color-interactive-primary: var(--lcd-green-2);
+  --color-interactive-hover: var(--lcd-green-accent-hover);
+  --color-interactive-active: var(--lcd-green-accent-active);
+  --color-interactive-text: var(--lcd-green-text);
+  --color-focus-ring: var(--lcd-green-2);
+  --color-interactive-rgb: 139 172 15;
+
+  /* Interactive on dark */
+  --color-text-interactive-on-dark: var(--lcd-green-text);
+  --color-text-interactive-on-dark-hover: var(--lcd-green-accent-hover);
+  --color-text-interactive-on-dark-active: var(--lcd-green-text);
+  --color-text-interactive-on-dark-focus: var(--lcd-green-text);
+
+  /* Interactive surface tokens */
+  --color-surface-interactive: var(--lcd-850);
+  --color-surface-interactive-hover: var(--lcd-700);
+  --color-interactive-surface: rgba(139, 172, 15, 0.14);
+  --color-interactive-surface-hover: rgba(139, 172, 15, 0.22);
+
+  /* Interactive border tokens */
+  --color-border-interactive-subtle: rgba(155, 188, 15, 0.08);
+  --color-border-interactive: rgba(155, 188, 15, 0.14);
+  --color-interactive-border: rgba(139, 172, 15, 0.5);
+  --color-interactive-border-hover: rgba(139, 172, 15, 0.7);
+
+  /* Interactive text tokens */
+  --color-text-interactive-muted: var(--lcd-green-1);
+
+  /* Focus ring */
+  --color-focus-ring-subtle: rgba(139, 172, 15, 0.4);
+
+  /* Status — everything stays green except the hot error accent */
+  --color-status-success: var(--lcd-green-2);
+  --color-status-success-hover: var(--lcd-green-accent-hover);
+  --color-status-warning: #d9d15a;
+  --color-status-warning-hover: #e8e27a;
+  --color-status-error: var(--lcd-hot);
+  --color-status-error-hover: #ff8a9a;
+  --color-status-info: var(--lcd-green-text);
+  --color-status-neutral: var(--lcd-green-1);
+
+  /* Context-Aware Text */
+  --color-text-on-primary: var(--lcd-green-4);
+  --color-text-on-secondary: var(--lcd-green-3);
+  --color-text-on-tertiary: var(--lcd-green-3);
+  --color-text-on-surface: var(--lcd-green-3);
+  --color-text-on-interactive: var(--lcd-950);
+  --color-text-on-status-success: var(--lcd-950);
+  --color-text-on-status-warning: var(--lcd-950);
+  --color-text-on-status-error: var(--lcd-950);
+  --color-text-on-status-info: var(--lcd-950);
+  --color-text-on-navigation: var(--lcd-green-3);
+
+  /* Buttons */
+  --color-button-primary-bg: var(--lcd-green-2);
+  --color-button-primary-hover: var(--lcd-green-accent-hover);
+  --color-button-primary-text: var(--lcd-950);
+  --color-button-secondary-bg: var(--lcd-700);
+  --color-button-secondary-hover: var(--lcd-600);
+  --color-button-secondary-text: var(--lcd-green-3);
+  --color-button-ghost-hover: var(--lcd-800);
+  --color-button-ghost-text: #9fbf58;
+
+  /* Cards */
+  --color-card-bg: var(--lcd-850);
+  --color-card-border: var(--lcd-700);
+  --color-card-nested-bg: var(--lcd-700);
+
+  /* Forms */
+  --color-input-bg: var(--lcd-950);
+  --color-input-border: var(--lcd-600);
+  --color-input-focus: var(--lcd-green-2);
+  --color-input-text: var(--lcd-green-4);
+  --color-input-placeholder: var(--lcd-green-1);
+
+  /* Modal */
+  --color-modal-overlay: rgba(0, 0, 0, 0.65);
+  --color-modal-bg: var(--lcd-850);
+
+  /* Navigation */
+  --color-surface-navigation: var(--lcd-900);
+  --color-surface-navigation-hover: var(--lcd-850);
+  --color-surface-navigation-active: var(--lcd-700);
+  --color-surface-navigation-selected: rgba(139, 172, 15, 0.14);
+  --color-surface-navigation-selected-hover: rgba(139, 172, 15, 0.2);
+  --color-text-navigation-primary: var(--lcd-green-3);
+  --color-text-navigation-secondary: #9fbf58;
+  --color-text-navigation-muted: var(--lcd-green-1);
+  --color-text-navigation-selected: var(--lcd-green-4);
+  --color-text-navigation-hover: var(--lcd-green-4);
+  --color-text-navigation-section: var(--lcd-green-1);
+  --color-text-navigation-brand: #9fbf58;
+  --color-border-navigation: var(--lcd-700);
+  --color-divider-navigation: var(--lcd-800);
+  --color-divider-navigation-subtle: rgba(155, 188, 15, 0.04);
+
+  /* Scrollbar */
+  --color-scrollbar-track: var(--lcd-900);
+  --color-scrollbar-thumb: rgba(155, 188, 15, 0.18);
+  --color-scrollbar-thumb-hover: rgba(155, 188, 15, 0.32);
+
+  /* Tab indicator — green underline */
+  --tab-indicator-color: var(--lcd-green-2);
+  --tab-indicator-height: 2px;
+
+  /* Terminal — LCD greens; blue/cyan lean teal-mint, magenta is a desaturated sage-lilac, red is the hot accent */
+  --color-terminal-bg: var(--lcd-950);
+  --color-terminal-fg: var(--lcd-green-4);
+  --color-terminal-cursor: var(--lcd-green-accent-hover);
+  --color-terminal-black: var(--lcd-950);
+  --color-terminal-red: var(--lcd-hot);
+  --color-terminal-green: var(--lcd-green-accent-hover);
+  --color-terminal-yellow: #d9d15a;
+  --color-terminal-blue: #6fc0ad;
+  --color-terminal-magenta: #b3aac4;
+  --color-terminal-cyan: #8de0c8;
+  --color-terminal-white: var(--lcd-green-4);
+  --color-terminal-bright-black: var(--lcd-green-1);
+  --color-terminal-bright-red: #ff8a9a;
+  --color-terminal-bright-green: #b5d94a;
+  --color-terminal-bright-yellow: #e8e27a;
+  --color-terminal-bright-blue: #8fd6c4;
+  --color-terminal-bright-magenta: #ccc4dc;
+  --color-terminal-bright-cyan: #a8ecd8;
+  --color-terminal-bright-white: #f0f8dc;
+  --color-terminal-selection-bg: #9bbc0f40;
+}
+
+/* Haar Theme — cold pre-dawn sea fog: blue-white surfaces, ink text (light base) */
+:root.haar {
+  /* Backgrounds — fog bank (chrome) vs. clearing (editor) */
+  --color-bg-primary: var(--haar-100);
+  --color-bg-secondary: var(--haar-150);
+  --color-bg-tertiary: var(--haar-200);
+  --color-bg-hover: var(--haar-200);
+  --color-bg-active: var(--haar-300);
+  --color-bg-chrome: var(--haar-150);
+  --color-bg-editor: var(--haar-50);   /* brightest — the clearing */
+
+  /* Surfaces */
+  --color-surface-primary: var(--haar-50);
+  --color-surface-secondary: var(--haar-100);
+  --color-surface-tertiary: var(--haar-150);
+  --color-surface-hover: var(--haar-200);
+
+  /* Text — ink on fog */
+  --color-text-primary: var(--haar-800);
+  --color-text-secondary: var(--haar-700);
+  --color-text-tertiary: var(--haar-600);
+  --color-text-muted: #5b6874;  /* 4.95:1 on --haar-100 (AA) */
+  --color-text-disabled: var(--haar-400);
+
+  /* Borders — cold, visible like frost lines */
+  --color-border-primary: rgba(37, 45, 54, 0.16);
+  --color-border-secondary: rgba(37, 45, 54, 0.10);
+  --color-border-tertiary: rgba(37, 45, 54, 0.06);
+  --color-border-hover: rgba(37, 45, 54, 0.24);
+  --color-border-focus: var(--haar-steel-500);
+
+  /* Interactive — steel blue through fog */
+  --color-interactive: var(--haar-steel-500);
+  --color-interactive-primary: var(--haar-steel-500);
+  --color-interactive-hover: var(--haar-steel-600);
+  --color-interactive-active: var(--haar-steel-700);
+  --color-interactive-text: var(--haar-steel-700);
+  --color-focus-ring: var(--haar-steel-500);
+  --color-interactive-rgb: 79 109 138;
+
+  /* Interactive on dark (used by dark-surface accents inside a light theme) */
+  --color-text-interactive-on-dark: var(--haar-steel-300);
+  --color-text-interactive-on-dark-hover: var(--haar-steel-400);
+  --color-text-interactive-on-dark-active: var(--haar-steel-300);
+  --color-text-interactive-on-dark-focus: var(--haar-steel-300);
+
+  /* Interactive surface tokens */
+  --color-surface-interactive: var(--haar-100);
+  --color-surface-interactive-hover: var(--haar-150);
+  --color-interactive-surface: rgba(79, 109, 138, 0.14);
+  --color-interactive-surface-hover: rgba(79, 109, 138, 0.22);
+
+  /* Interactive border tokens */
+  --color-border-interactive-subtle: rgba(37, 45, 54, 0.08);
+  --color-border-interactive: rgba(37, 45, 54, 0.16);
+  --color-interactive-border: var(--haar-steel-500);
+  --color-interactive-border-hover: var(--haar-steel-600);
+
+  /* Interactive text tokens */
+  --color-text-interactive-muted: #5b6874;  /* 4.95:1 on --haar-100 (AA) */
+
+  /* Focus ring */
+  --color-focus-ring-subtle: rgba(79, 109, 138, 0.4);
+
+  /* Status — muted, photographic */
+  --color-status-success: #2f7a45;
+  --color-status-success-hover: #276638;
+  --color-status-warning: #85611a;
+  --color-status-warning-hover: #6f5013;
+  --color-status-error: #b23b3b;
+  --color-status-error-hover: #952f2f;
+  --color-status-info: var(--haar-steel-600);
+  --color-status-neutral: var(--haar-500);
+
+  /* Context-Aware Text */
+  --color-text-on-primary: var(--haar-800);
+  --color-text-on-secondary: var(--haar-800);
+  --color-text-on-tertiary: var(--haar-700);
+  --color-text-on-surface: var(--haar-800);
+  --color-text-on-interactive: rgb(255 255 255);
+  --color-text-on-status-success: rgb(255 255 255);
+  --color-text-on-status-warning: rgb(255 255 255);
+  --color-text-on-status-error: rgb(255 255 255);
+  --color-text-on-status-info: rgb(255 255 255);
+  --color-text-on-navigation: var(--haar-800);
+
+  /* Buttons */
+  --color-button-primary-bg: var(--haar-steel-500);
+  --color-button-primary-hover: var(--haar-steel-600);
+  --color-button-primary-text: rgb(255 255 255);
+  --color-button-secondary-bg: var(--haar-150);
+  --color-button-secondary-hover: var(--haar-200);
+  --color-button-secondary-text: var(--haar-800);
+  --color-button-ghost-hover: var(--haar-200);
+  --color-button-ghost-text: var(--haar-700);
+
+  /* Cards */
+  --color-card-bg: var(--haar-50);
+  --color-card-border: rgba(37, 45, 54, 0.14);
+  --color-card-nested-bg: var(--haar-100);
+
+  /* Forms */
+  --color-input-bg: var(--haar-50);
+  --color-input-border: rgba(37, 45, 54, 0.18);
+  --color-input-focus: var(--haar-steel-500);
+  --color-input-text: var(--haar-800);
+  --color-input-placeholder: #5b6874;
+
+  /* Modal */
+  --color-modal-overlay: rgba(21, 27, 33, 0.45);
+  --color-modal-bg: var(--haar-50);
+
+  /* Navigation — denser fog in the sidebar */
+  --color-surface-navigation: var(--haar-150);
+  --color-surface-navigation-hover: var(--haar-200);
+  --color-surface-navigation-active: var(--haar-300);
+  --color-surface-navigation-selected: rgba(79, 109, 138, 0.16);
+  --color-surface-navigation-selected-hover: rgba(79, 109, 138, 0.24);
+  --color-text-navigation-primary: var(--haar-800);
+  --color-text-navigation-secondary: var(--haar-700);
+  --color-text-navigation-muted: #57636f;  /* 4.9:1 on --haar-150 (AA) */
+  --color-text-navigation-selected: var(--haar-900);
+  --color-text-navigation-hover: var(--haar-900);
+  --color-text-navigation-section: #57636f;  /* 4.9:1 on --haar-150 (AA) */
+  --color-text-navigation-brand: var(--haar-600);
+  --color-border-navigation: rgba(37, 45, 54, 0.12);
+  --color-divider-navigation: rgba(37, 45, 54, 0.10);
+  --color-divider-navigation-subtle: rgba(37, 45, 54, 0.06);
+
+  /* Scrollbar */
+  --color-scrollbar-track: var(--haar-150);
+  --color-scrollbar-thumb: var(--haar-300);
+  --color-scrollbar-thumb-hover: var(--haar-400);
+
+  /* Tab indicator (fill mode) */
+  --tab-indicator-color: transparent;
+  --tab-indicator-height: 0px;
+
+  /* Terminal — ink on fog, desaturated ANSI (all >= 3:1, normal set >= 4.5:1) */
+  --color-terminal-bg: #e6ebef;
+  --color-terminal-fg: #1d252d;
+  --color-terminal-cursor: var(--haar-steel-600);
+  --color-terminal-black: #e6ebef;
+  --color-terminal-red: #a63b3b;
+  --color-terminal-green: #3b7448;
+  --color-terminal-yellow: #82611a;
+  --color-terminal-blue: #35618c;
+  --color-terminal-magenta: #7a4f8e;
+  --color-terminal-cyan: #24707a;
+  --color-terminal-white: #1d252d;
+  --color-terminal-bright-black: #5b6874;
+  --color-terminal-bright-red: #bd4a45;
+  --color-terminal-bright-green: #4a8b58;
+  --color-terminal-bright-yellow: #986f1e;
+  --color-terminal-bright-blue: #4373a5;
+  --color-terminal-bright-magenta: #8d60a2;
+  --color-terminal-bright-cyan: #2c8590;
+  --color-terminal-bright-white: #0b0f13;
+  --color-terminal-selection-bg: #4f6d8a40;
+}
+
+/* Abyss Theme — deep ocean: near-black navy, bioluminescent teal accent (dark base) */
+:root.abyss {
+  /* Backgrounds — TWO-TONE: navy chrome, deeper editor */
+  --color-bg-primary: var(--abyss-900);
+  --color-bg-secondary: var(--abyss-850);
+  --color-bg-tertiary: var(--abyss-700);
+  --color-bg-hover: var(--abyss-700);
+  --color-bg-active: var(--abyss-600);
+  --color-bg-chrome: var(--abyss-900);
+  --color-bg-editor: var(--abyss-950);   /* SUNKEN — the trench */
+
+  /* Surfaces */
+  --color-surface-primary: var(--abyss-850);
+  --color-surface-secondary: var(--abyss-800);
+  --color-surface-tertiary: var(--abyss-700);
+  --color-surface-hover: rgba(159, 227, 216, 0.05);
+
+  /* Text — cold water whites */
+  --color-text-primary: var(--abyss-100);
+  --color-text-secondary: var(--abyss-200);
+  --color-text-tertiary: var(--abyss-300);
+  --color-text-muted: #7897ab;  /* 6.2:1 on --abyss-900 (AA) */
+  --color-text-disabled: var(--abyss-500);
+
+  /* Borders — faint, lit by the accent */
+  --color-border-primary: rgba(159, 227, 216, 0.10);
+  --color-border-secondary: rgba(159, 227, 216, 0.06);
+  --color-border-hover: rgba(159, 227, 216, 0.16);
+  --color-border-focus: var(--abyss-glow-500);
+
+  /* Interactive — single bioluminescent teal accent */
+  --color-interactive-primary: var(--abyss-glow-500);
+  --color-interactive-hover: var(--abyss-glow-400);
+  --color-interactive-active: var(--abyss-glow-300);
+  --color-interactive-text: var(--abyss-glow-400);
+  --color-focus-ring: var(--abyss-glow-500);
+  --color-interactive-rgb: 77 184 171;
+
+  /* Interactive on dark */
+  --color-text-interactive-on-dark: var(--abyss-glow-400);
+  --color-text-interactive-on-dark-hover: var(--abyss-glow-300);
+  --color-text-interactive-on-dark-active: var(--abyss-glow-400);
+  --color-text-interactive-on-dark-focus: var(--abyss-glow-400);
+
+  /* Interactive surface tokens */
+  --color-surface-interactive: var(--abyss-850);
+  --color-surface-interactive-hover: var(--abyss-700);
+  --color-interactive-surface: rgba(77, 184, 171, 0.14);
+  --color-interactive-surface-hover: rgba(77, 184, 171, 0.24);
+
+  /* Interactive border tokens */
+  --color-border-interactive-subtle: rgba(159, 227, 216, 0.06);
+  --color-border-interactive: rgba(159, 227, 216, 0.10);
+  --color-interactive-border: rgba(77, 184, 171, 0.5);
+  --color-interactive-border-hover: rgba(77, 184, 171, 0.7);
+
+  /* Interactive text tokens */
+  --color-text-interactive-muted: #7897ab;  /* 6.2:1 on --abyss-900 (AA) */
+
+  /* Focus ring */
+  --color-focus-ring-subtle: rgba(77, 184, 171, 0.4);
+
+  /* Status — sea-life tones, dark text on fills */
+  --color-status-success: #6cbf8a;
+  --color-status-success-hover: #57a976;
+  --color-status-warning: #d9b567;
+  --color-status-warning-hover: #c4a052;
+  --color-status-error: #e07a6e;
+  --color-status-error-hover: #cc6559;
+  --color-status-info: var(--abyss-glow-400);
+  --color-status-neutral: var(--abyss-400);
+
+  /* Context-Aware Text */
+  --color-text-on-primary: var(--abyss-100);
+  --color-text-on-secondary: var(--abyss-200);
+  --color-text-on-tertiary: var(--abyss-200);
+  --color-text-on-surface: var(--abyss-200);
+  --color-text-on-interactive: var(--abyss-950);
+  --color-text-on-status-success: var(--abyss-950);
+  --color-text-on-status-warning: var(--abyss-950);
+  --color-text-on-status-error: var(--abyss-950);
+  --color-text-on-status-info: var(--abyss-950);
+  --color-text-on-navigation: var(--abyss-200);
+
+  /* Buttons — glowing teal fill carries ink text (8:1) */
+  --color-button-primary-bg: var(--abyss-glow-500);
+  --color-button-primary-hover: var(--abyss-glow-400);
+  --color-button-primary-text: var(--abyss-950);
+  --color-button-secondary-bg: var(--abyss-700);
+  --color-button-secondary-hover: var(--abyss-600);
+  --color-button-secondary-text: var(--abyss-100);
+  --color-button-ghost-hover: var(--abyss-800);
+  --color-button-ghost-text: var(--abyss-300);
+
+  /* Cards */
+  --color-card-bg: var(--abyss-850);
+  --color-card-border: rgba(159, 227, 216, 0.10);
+  --color-card-nested-bg: var(--abyss-800);
+
+  /* Forms */
+  --color-input-bg: var(--abyss-950);
+  --color-input-border: rgba(159, 227, 216, 0.14);
+  --color-input-focus: var(--abyss-glow-500);
+  --color-input-text: var(--abyss-100);
+  --color-input-placeholder: #7b9aae;  /* 6.7:1 on --abyss-950 (AA) */
+
+  /* Modal */
+  --color-modal-overlay: rgba(2, 6, 12, 0.7);
+  --color-modal-bg: var(--abyss-850);
+
+  /* Navigation */
+  --color-surface-navigation: var(--abyss-900);
+  --color-surface-navigation-hover: var(--abyss-850);
+  --color-surface-navigation-active: var(--abyss-700);
+  --color-surface-navigation-selected: rgba(77, 184, 171, 0.14);
+  --color-surface-navigation-selected-hover: rgba(77, 184, 171, 0.20);
+  --color-text-navigation-primary: var(--abyss-200);
+  --color-text-navigation-secondary: var(--abyss-300);
+  --color-text-navigation-muted: #7897ab;  /* 6.2:1 on --abyss-900 (AA) */
+  --color-text-navigation-selected: var(--abyss-100);
+  --color-text-navigation-hover: var(--abyss-100);
+  --color-text-navigation-section: #7897ab;  /* 6.2:1 on --abyss-900 (AA) */
+  --color-text-navigation-brand: var(--abyss-300);
+  --color-border-navigation: rgba(159, 227, 216, 0.08);
+  --color-divider-navigation: rgba(159, 227, 216, 0.06);
+  --color-divider-navigation-subtle: rgba(159, 227, 216, 0.03);
+
+  /* Scrollbar */
+  --color-scrollbar-track: var(--abyss-900);
+  --color-scrollbar-thumb: rgba(159, 227, 216, 0.14);
+  --color-scrollbar-thumb-hover: rgba(159, 227, 216, 0.28);
+
+  /* Tab indicator — UNDERLINE mode (glow line) */
+  --tab-indicator-color: var(--abyss-glow-500);
+  --tab-indicator-height: 2px;
+
+  /* Terminal — trench black, sea-life ANSI (all >= 3:1 on bg) */
+  --color-terminal-bg: var(--abyss-950);
+  --color-terminal-fg: var(--abyss-100);
+  --color-terminal-cursor: var(--abyss-glow-400);
+  --color-terminal-black: var(--abyss-950);
+  --color-terminal-red: #d9776b;
+  --color-terminal-green: #6dbf8d;
+  --color-terminal-yellow: #d6b56c;
+  --color-terminal-blue: #6ea3d4;
+  --color-terminal-magenta: #b391c8;
+  --color-terminal-cyan: #5fcabf;
+  --color-terminal-white: var(--abyss-100);
+  --color-terminal-bright-black: var(--abyss-400);
+  --color-terminal-bright-red: #ea9084;
+  --color-terminal-bright-green: #8dd3a6;
+  --color-terminal-bright-yellow: #e5c98a;
+  --color-terminal-bright-blue: #8ebae2;
+  --color-terminal-bright-magenta: #c9abd9;
+  --color-terminal-bright-cyan: #8ce0d6;
+  --color-terminal-bright-white: #f2f9fb;
+  --color-terminal-selection-bg: #4db8ab40;
+}
+
+/* Understory Theme — forest floor: moss greens, bark-brown chrome, lichen accent (dark base) */
+:root.understory {
+  /* Backgrounds — TWO-TONE: bark chrome, moss floor editor */
+  --color-bg-primary: var(--under-900);
+  --color-bg-secondary: var(--under-850);
+  --color-bg-tertiary: var(--under-700);
+  --color-bg-hover: var(--under-700);
+  --color-bg-active: var(--under-600);
+  --color-bg-chrome: var(--under-bark-850);   /* bark */
+  --color-bg-editor: var(--under-950);        /* SUNKEN — moss floor */
+
+  /* Surfaces */
+  --color-surface-primary: var(--under-850);
+  --color-surface-secondary: var(--under-800);
+  --color-surface-tertiary: var(--under-700);
+  --color-surface-hover: rgba(211, 221, 168, 0.05);
+
+  /* Text — pale lichen-cream */
+  --color-text-primary: var(--under-100);
+  --color-text-secondary: var(--under-200);
+  --color-text-tertiary: var(--under-300);
+  --color-text-muted: #85937a;  /* 5.5:1 on --under-900 (AA) */
+  --color-text-disabled: var(--under-500);
+
+  /* Borders — bark lines */
+  --color-border-primary: var(--under-bark-700);
+  --color-border-secondary: var(--under-bark-800);
+  --color-border-hover: var(--under-bark-600);
+  --color-border-focus: var(--under-lichen-500);
+
+  /* Interactive — single lichen accent */
+  --color-interactive-primary: var(--under-lichen-500);
+  --color-interactive-hover: var(--under-lichen-400);
+  --color-interactive-active: var(--under-lichen-300);
+  --color-interactive-text: var(--under-lichen-400);
+  --color-focus-ring: var(--under-lichen-500);
+  --color-interactive-rgb: 166 181 109;
+
+  /* Interactive on dark */
+  --color-text-interactive-on-dark: var(--under-lichen-400);
+  --color-text-interactive-on-dark-hover: var(--under-lichen-300);
+  --color-text-interactive-on-dark-active: var(--under-lichen-400);
+  --color-text-interactive-on-dark-focus: var(--under-lichen-400);
+
+  /* Interactive surface tokens */
+  --color-surface-interactive: var(--under-850);
+  --color-surface-interactive-hover: var(--under-700);
+  --color-interactive-surface: rgba(166, 181, 109, 0.14);
+  --color-interactive-surface-hover: rgba(166, 181, 109, 0.24);
+
+  /* Interactive border tokens */
+  --color-border-interactive-subtle: rgba(211, 221, 168, 0.06);
+  --color-border-interactive: rgba(211, 221, 168, 0.10);
+  --color-interactive-border: rgba(166, 181, 109, 0.5);
+  --color-interactive-border-hover: rgba(166, 181, 109, 0.7);
+
+  /* Interactive text tokens */
+  --color-text-interactive-muted: #85937a;  /* 5.5:1 on --under-900 (AA) */
+
+  /* Focus ring */
+  --color-focus-ring-subtle: rgba(166, 181, 109, 0.4);
+
+  /* Status — moss, lichen gold, rust; dark text on fills */
+  --color-status-success: #8bb56e;
+  --color-status-success-hover: #78a25c;
+  --color-status-warning: #d1b35c;
+  --color-status-warning-hover: #bd9f49;
+  --color-status-error: #d0705b;
+  --color-status-error-hover: #bb5c48;
+  --color-status-info: var(--under-lichen-400);
+  --color-status-neutral: var(--under-400);
+
+  /* Context-Aware Text */
+  --color-text-on-primary: var(--under-100);
+  --color-text-on-secondary: var(--under-200);
+  --color-text-on-tertiary: var(--under-200);
+  --color-text-on-surface: var(--under-200);
+  --color-text-on-interactive: var(--under-950);
+  --color-text-on-status-success: var(--under-950);
+  --color-text-on-status-warning: var(--under-950);
+  --color-text-on-status-error: var(--under-950);
+  --color-text-on-status-info: var(--under-950);
+  --color-text-on-navigation: var(--under-200);
+
+  /* Buttons — lichen fill carries moss-black text (9:1) */
+  --color-button-primary-bg: var(--under-lichen-500);
+  --color-button-primary-hover: var(--under-lichen-400);
+  --color-button-primary-text: var(--under-950);
+  --color-button-secondary-bg: var(--under-700);
+  --color-button-secondary-hover: var(--under-600);
+  --color-button-secondary-text: var(--under-100);
+  --color-button-ghost-hover: var(--under-800);
+  --color-button-ghost-text: var(--under-300);
+
+  /* Cards */
+  --color-card-bg: var(--under-850);
+  --color-card-border: var(--under-bark-700);
+  --color-card-nested-bg: var(--under-800);
+
+  /* Forms */
+  --color-input-bg: var(--under-950);
+  --color-input-border: var(--under-bark-600);
+  --color-input-focus: var(--under-lichen-500);
+  --color-input-text: var(--under-100);
+  --color-input-placeholder: #88967d;  /* 6.1:1 on --under-950 (AA) */
+
+  /* Modal */
+  --color-modal-overlay: rgba(6, 8, 5, 0.65);
+  --color-modal-bg: var(--under-850);
+
+  /* Navigation — bark sidebar */
+  --color-surface-navigation: var(--under-bark-850);
+  --color-surface-navigation-hover: var(--under-bark-800);
+  --color-surface-navigation-active: var(--under-bark-700);
+  --color-surface-navigation-selected: rgba(166, 181, 109, 0.14);
+  --color-surface-navigation-selected-hover: rgba(166, 181, 109, 0.20);
+  --color-text-navigation-primary: var(--under-200);
+  --color-text-navigation-secondary: var(--under-300);
+  --color-text-navigation-muted: #85937a;  /* 5.4:1 on --under-bark-850 (AA) */
+  --color-text-navigation-selected: var(--under-100);
+  --color-text-navigation-hover: var(--under-100);
+  --color-text-navigation-section: #85937a;  /* 5.4:1 on --under-bark-850 (AA) */
+  --color-text-navigation-brand: var(--under-300);
+  --color-border-navigation: var(--under-bark-700);
+  --color-divider-navigation: var(--under-bark-800);
+  --color-divider-navigation-subtle: rgba(211, 221, 168, 0.03);
+
+  /* Scrollbar */
+  --color-scrollbar-track: var(--under-900);
+  --color-scrollbar-thumb: rgba(211, 221, 168, 0.14);
+  --color-scrollbar-thumb-hover: rgba(211, 221, 168, 0.28);
+
+  /* Tab indicator — UNDERLINE mode (lichen line) */
+  --tab-indicator-color: var(--under-lichen-500);
+  --tab-indicator-height: 2px;
+
+  /* Terminal — moss floor, woodland ANSI (all >= 3:1 on bg) */
+  --color-terminal-bg: var(--under-950);
+  --color-terminal-fg: var(--under-100);
+  --color-terminal-cursor: var(--under-lichen-400);
+  --color-terminal-black: var(--under-950);
+  --color-terminal-red: #d0705b;
+  --color-terminal-green: #8bb56e;
+  --color-terminal-yellow: #cdb35c;
+  --color-terminal-blue: #7d9fb3;
+  --color-terminal-magenta: #b48ea6;
+  --color-terminal-cyan: #78b3a2;
+  --color-terminal-white: var(--under-100);
+  --color-terminal-bright-black: var(--under-400);
+  --color-terminal-bright-red: #e08b78;
+  --color-terminal-bright-green: #a6cb8a;
+  --color-terminal-bright-yellow: #dcc57e;
+  --color-terminal-bright-blue: #9ab7c8;
+  --color-terminal-bright-magenta: #c9a9bd;
+  --color-terminal-bright-cyan: #98c9ba;
+  --color-terminal-bright-white: #f3f5ec;
+  --color-terminal-selection-bg: #a6b56d40;
+}
+
 /* Light Rounded — inherits light tokens, overrides shell/chrome behavior */
 :root.light-rounded {
   --color-bg-chrome: var(--gh-light-50);
@@ -1729,6 +3951,522 @@
   --color-surface-navigation: var(--gh-light-50);
   --color-surface-navigation-hover: var(--gh-light-100);
   --color-surface-navigation-active: rgb(220 230 236);
+}
+
+/* ==========================================================================
+   Accessibility-first themes
+   colorblind-safe  — dark; every semantic color is Okabe-Ito
+   low-fatigue      — warm sepia-dark for hours-long sessions
+   high-legibility  — light; 7:1+ body text, color only for state
+   ========================================================================== */
+
+/* Colorblind Safe — dark theme whose semantic colors (success/warn/error/info,
+   diff add/remove, terminal ANSI) come from the Okabe-Ito palette so they stay
+   distinguishable under protanopia, deuteranopia and tritanopia. */
+:root.colorblind-safe {
+  /* Backgrounds */
+  --color-bg-primary: var(--cbs-900);
+  --color-bg-secondary: var(--cbs-850);
+  --color-bg-tertiary: var(--cbs-700);
+  --color-bg-hover: var(--cbs-700);
+  --color-bg-active: var(--cbs-600);
+  --color-bg-chrome: var(--cbs-900);
+  --color-bg-editor: var(--cbs-950);   /* sunken editor/terminal */
+
+  /* Surfaces */
+  --color-surface-primary: var(--cbs-850);
+  --color-surface-secondary: var(--cbs-800);
+  --color-surface-tertiary: var(--cbs-700);
+  --color-surface-hover: rgba(255, 255, 255, 0.05);
+
+  /* Text */
+  --color-text-primary: var(--cbs-100);
+  --color-text-secondary: var(--cbs-200);
+  --color-text-tertiary: var(--cbs-300);
+  --color-text-muted: #8c97a4;   /* 6.1:1 on --cbs-900, 5.7:1 on --cbs-850 */
+  --color-text-disabled: var(--cbs-500);
+
+  /* Borders */
+  --color-border-primary: var(--cbs-700);
+  --color-border-secondary: var(--cbs-800);
+  --color-border-hover: var(--cbs-600);
+  --color-border-focus: var(--okabe-sky);
+
+  /* Interactive — Okabe-Ito blue for filled controls, sky blue for text/rings */
+  --color-interactive-primary: var(--okabe-blue);
+  --color-interactive-hover: #005f96;
+  --color-interactive-active: #004f7d;
+  --color-interactive-text: var(--okabe-sky);
+  --color-focus-ring: var(--okabe-sky);
+  --color-interactive-rgb: 86 180 233;
+
+  --color-text-interactive-on-dark: var(--okabe-sky);
+  --color-text-interactive-on-dark-hover: var(--okabe-sky-bright);
+  --color-text-interactive-on-dark-active: var(--okabe-sky);
+  --color-text-interactive-on-dark-focus: var(--okabe-sky);
+
+  --color-surface-interactive: var(--cbs-850);
+  --color-surface-interactive-hover: var(--cbs-700);
+  --color-interactive-surface: rgba(86, 180, 233, 0.15);
+  --color-interactive-surface-hover: rgba(86, 180, 233, 0.25);
+
+  --color-border-interactive-subtle: rgba(255, 255, 255, 0.05);
+  --color-border-interactive: rgba(255, 255, 255, 0.08);
+  --color-interactive-border: rgba(86, 180, 233, 0.5);
+  --color-interactive-border-hover: rgba(86, 180, 233, 0.7);
+
+  --color-text-interactive-muted: #8c97a4;   /* 6.1:1 on --cbs-900 */
+  /* Painted focus ring (Select trigger, tabs, settings rows) — 0.85 alpha so it
+     clears 3:1 (WCAG 2.4.11/1.4.11) instead of the 0.4 wash other themes use */
+  --color-focus-ring-subtle: rgba(86, 180, 233, 0.85);
+
+  /* Status — Okabe-Ito, exact values. Chips use black text (white fails on
+     bluish green and vermillion). */
+  --color-status-success: var(--okabe-green);
+  --color-status-success-hover: #00875f;
+  --color-status-warning: var(--okabe-orange);
+  --color-status-warning-hover: #c98a00;
+  --color-status-error: var(--okabe-vermillion);
+  --color-status-error-hover: #b85100;
+  --color-status-info: var(--okabe-sky);
+  --color-status-neutral: #8c97a4;
+
+  /* Context-aware text */
+  --color-text-on-primary: var(--cbs-100);
+  --color-text-on-secondary: var(--cbs-200);
+  --color-text-on-tertiary: var(--cbs-200);
+  --color-text-on-surface: var(--cbs-200);
+  --color-text-on-interactive: rgb(255 255 255);
+  --color-text-on-status-success: rgb(0 0 0);
+  --color-text-on-status-warning: rgb(0 0 0);
+  --color-text-on-status-error: rgb(0 0 0);
+  --color-text-on-status-info: rgb(0 0 0);
+  --color-text-on-navigation: var(--cbs-200);
+
+  /* Buttons */
+  --color-button-primary-bg: var(--okabe-blue);
+  --color-button-primary-hover: #005f96;
+  --color-button-primary-text: rgb(255 255 255);
+  --color-button-secondary-bg: var(--cbs-700);
+  --color-button-secondary-hover: var(--cbs-600);
+  --color-button-secondary-text: var(--cbs-100);
+  --color-button-ghost-hover: var(--cbs-800);
+  --color-button-ghost-text: var(--cbs-300);
+
+  /* Cards */
+  --color-card-bg: var(--cbs-850);
+  --color-card-border: var(--cbs-700);
+  --color-card-nested-bg: var(--cbs-800);
+
+  /* Forms — input border clears 3:1 (WCAG 1.4.11) so the field boundary is
+     perceivable without relying on color */
+  --color-input-bg: var(--cbs-950);
+  --color-input-border: var(--cbs-500);
+  --color-input-focus: var(--okabe-sky);
+  --color-input-text: var(--cbs-100);
+  --color-input-placeholder: #8c97a4;
+
+  /* Modal */
+  --color-modal-overlay: rgba(0, 0, 0, 0.65);
+  --color-modal-bg: var(--cbs-850);
+
+  /* Navigation */
+  --color-surface-navigation: var(--cbs-900);
+  --color-surface-navigation-hover: var(--cbs-850);
+  --color-surface-navigation-active: var(--cbs-700);
+  --color-surface-navigation-selected: rgba(86, 180, 233, 0.16);
+  --color-surface-navigation-selected-hover: rgba(86, 180, 233, 0.22);
+  --color-text-navigation-primary: var(--cbs-200);
+  --color-text-navigation-secondary: var(--cbs-300);
+  --color-text-navigation-muted: #8c97a4;
+  --color-text-navigation-selected: var(--cbs-100);
+  --color-text-navigation-hover: var(--cbs-100);
+  --color-text-navigation-section: #8c97a4;
+  --color-text-navigation-brand: var(--cbs-300);
+  --color-border-navigation: var(--cbs-700);
+  --color-divider-navigation: var(--cbs-800);
+  --color-divider-navigation-subtle: rgba(255, 255, 255, 0.04);
+
+  /* Scrollbar — thumb clears 3:1 against the track */
+  --color-scrollbar-track: var(--cbs-900);
+  --color-scrollbar-thumb: var(--cbs-500);
+  --color-scrollbar-thumb-hover: var(--cbs-400);
+
+  /* Tab indicator — underline in sky blue */
+  --tab-indicator-color: var(--okabe-sky);
+  --tab-indicator-height: 2px;
+
+  /* Diff view (git-diff-view) — bluish green (add) vs vermillion (remove) mixed
+     over the editor bg at 26% / 40% / 52%. 26% is the lowest content tint whose
+     add/remove pair keeps ΔE ≥ 15 under protanopia (see check-theme-contrast). */
+  --color-diff-add-bg: #08332b;
+  --color-diff-del-bg: #40230d;
+  --color-diff-add-gutter: #074839;
+  --color-diff-del-gutter: #5c2e0b;
+  --color-diff-add-highlight: #055944;
+  --color-diff-del-highlight: #743809;
+  --color-diff-hunk-bg: #172934;
+  --color-diff-hunk-gutter: #234357;
+
+  /* Terminal — Okabe-Ito ANSI mapping:
+     red→vermillion, green→bluish green, yellow→yellow, blue→blue (lifted),
+     magenta→reddish purple, cyan→sky blue. Cursor is Okabe yellow so it never
+     shares a hue with links or selection. */
+  --color-terminal-bg: var(--cbs-950);
+  --color-terminal-fg: var(--cbs-100);
+  --color-terminal-cursor: var(--okabe-yellow);
+  --color-terminal-black: var(--cbs-950);
+  --color-terminal-red: var(--okabe-vermillion);
+  --color-terminal-green: var(--okabe-green-lift);
+  --color-terminal-yellow: var(--okabe-yellow);
+  --color-terminal-blue: var(--okabe-blue-lift);
+  --color-terminal-magenta: var(--okabe-purple);
+  --color-terminal-cyan: var(--okabe-sky-lift);
+  --color-terminal-white: var(--cbs-200);
+  --color-terminal-bright-black: var(--cbs-400);
+  --color-terminal-bright-red: var(--okabe-vermillion-bright);
+  --color-terminal-bright-green: var(--okabe-green-bright);
+  --color-terminal-bright-yellow: var(--okabe-yellow-bright);
+  --color-terminal-bright-blue: var(--okabe-blue-bright);
+  --color-terminal-bright-magenta: var(--okabe-purple-bright);
+  --color-terminal-bright-cyan: var(--okabe-sky-bright);
+  --color-terminal-bright-white: rgb(255 255 255);
+}
+
+/* Low Fatigue — warm sepia-dark for hours of reading: mid-dark backgrounds,
+   parchment text (never pure white), a honey-gold accent and a desaturated,
+   low-blue palette. Text stays ≥ 4.5:1 but avoids the 18:1 glare of black/white. */
+:root.low-fatigue {
+  /* Backgrounds */
+  --color-bg-primary: var(--lf-900);
+  --color-bg-secondary: var(--lf-850);
+  --color-bg-tertiary: var(--lf-700);
+  --color-bg-hover: var(--lf-700);
+  --color-bg-active: var(--lf-600);
+  --color-bg-chrome: var(--lf-900);
+  --color-bg-editor: var(--lf-950);   /* sunken editor/terminal */
+
+  /* Surfaces */
+  --color-surface-primary: var(--lf-850);
+  --color-surface-secondary: var(--lf-800);
+  --color-surface-tertiary: var(--lf-700);
+  --color-surface-hover: rgba(240, 232, 216, 0.05);
+
+  /* Text — warm parchment ramp */
+  --color-text-primary: var(--lf-100);
+  --color-text-secondary: var(--lf-200);
+  --color-text-tertiary: var(--lf-300);
+  --color-text-muted: #a09079;   /* 5.1:1 on --lf-900, 4.6:1 on --lf-850 */
+  --color-text-disabled: var(--lf-500);
+
+  /* Borders */
+  --color-border-primary: var(--lf-700);
+  --color-border-secondary: var(--lf-800);
+  --color-border-hover: var(--lf-600);
+  --color-border-focus: var(--lf-gold);
+
+  /* Interactive — honey gold, dark text on filled controls (no white anywhere) */
+  --color-interactive-primary: var(--lf-gold);
+  --color-interactive-hover: var(--lf-gold-hover);
+  --color-interactive-active: var(--lf-gold-active);
+  --color-interactive-text: var(--lf-gold-text);
+  --color-focus-ring: var(--lf-gold);
+  --color-interactive-rgb: 209 165 74;
+
+  --color-text-interactive-on-dark: var(--lf-gold-text);
+  --color-text-interactive-on-dark-hover: var(--lf-gold-hover);
+  --color-text-interactive-on-dark-active: var(--lf-gold-text);
+  --color-text-interactive-on-dark-focus: var(--lf-gold-text);
+
+  --color-surface-interactive: var(--lf-850);
+  --color-surface-interactive-hover: var(--lf-700);
+  --color-interactive-surface: rgba(209, 165, 74, 0.15);
+  --color-interactive-surface-hover: rgba(209, 165, 74, 0.25);
+
+  --color-border-interactive-subtle: rgba(240, 232, 216, 0.07);
+  --color-border-interactive: rgba(240, 232, 216, 0.12);
+  --color-interactive-border: rgba(209, 165, 74, 0.5);
+  --color-interactive-border-hover: rgba(209, 165, 74, 0.7);
+
+  --color-text-interactive-muted: #a09079;   /* 5.1:1 on --lf-900 */
+  --color-focus-ring-subtle: rgba(209, 165, 74, 0.85);   /* painted focus ring ≥ 3:1 */
+
+  /* Status — desaturated warm set: sage / burnt orange / soft brick / dusty teal.
+     Chips use dark text so no pure white ever lands on a saturated fill. */
+  --color-status-success: #a8c487;
+  --color-status-success-hover: #94b272;
+  --color-status-warning: #e08b47;
+  --color-status-warning-hover: #cf7a36;
+  --color-status-error: #d4715c;
+  --color-status-error-hover: #c4634f;
+  --color-status-info: #8fb1b8;
+  --color-status-neutral: #a09079;
+
+  /* Context-aware text */
+  --color-text-on-primary: var(--lf-100);
+  --color-text-on-secondary: var(--lf-200);
+  --color-text-on-tertiary: var(--lf-200);
+  --color-text-on-surface: var(--lf-200);
+  --color-text-on-interactive: var(--lf-950);
+  --color-text-on-status-success: var(--lf-950);
+  --color-text-on-status-warning: var(--lf-950);
+  --color-text-on-status-error: var(--lf-950);
+  --color-text-on-status-info: var(--lf-950);
+  --color-text-on-navigation: var(--lf-200);
+
+  /* Buttons */
+  --color-button-primary-bg: var(--lf-gold);
+  --color-button-primary-hover: var(--lf-gold-hover);
+  --color-button-primary-text: var(--lf-950);
+  --color-button-secondary-bg: var(--lf-700);
+  --color-button-secondary-hover: var(--lf-600);
+  --color-button-secondary-text: var(--lf-100);
+  --color-button-ghost-hover: var(--lf-800);
+  --color-button-ghost-text: var(--lf-300);
+
+  /* Cards */
+  --color-card-bg: var(--lf-850);
+  --color-card-border: var(--lf-700);
+  --color-card-nested-bg: var(--lf-800);
+
+  /* Forms */
+  --color-input-bg: var(--lf-950);
+  --color-input-border: #7a6b5c;   /* 3.3:1 on --lf-950 (WCAG 1.4.11) */
+  --color-input-focus: var(--lf-gold);
+  --color-input-text: var(--lf-100);
+  --color-input-placeholder: #a09079;
+
+  /* Modal */
+  --color-modal-overlay: rgba(20, 16, 12, 0.6);
+  --color-modal-bg: var(--lf-850);
+
+  /* Navigation */
+  --color-surface-navigation: var(--lf-900);
+  --color-surface-navigation-hover: var(--lf-850);
+  --color-surface-navigation-active: var(--lf-700);
+  --color-surface-navigation-selected: rgba(209, 165, 74, 0.16);
+  --color-surface-navigation-selected-hover: rgba(209, 165, 74, 0.22);
+  --color-text-navigation-primary: var(--lf-200);
+  --color-text-navigation-secondary: var(--lf-300);
+  --color-text-navigation-muted: #a09079;
+  --color-text-navigation-selected: var(--lf-100);
+  --color-text-navigation-hover: var(--lf-100);
+  --color-text-navigation-section: #a09079;
+  --color-text-navigation-brand: var(--lf-300);
+  --color-border-navigation: var(--lf-700);
+  --color-divider-navigation: var(--lf-800);
+  --color-divider-navigation-subtle: rgba(240, 232, 216, 0.04);
+
+  /* Scrollbar */
+  --color-scrollbar-track: var(--lf-900);
+  --color-scrollbar-thumb: #7a6b5c;   /* 3.1:1 on the track */
+  --color-scrollbar-thumb-hover: var(--lf-400);
+
+  /* Tab indicator — gold underline */
+  --tab-indicator-color: var(--lf-gold);
+  --tab-indicator-height: 2px;
+
+  /* Diff view — sage (add) vs soft brick (remove) over the editor bg */
+  --color-diff-add-bg: #3a3d2d;
+  --color-diff-del-bg: #432c25;
+  --color-diff-add-gutter: #50583f;
+  --color-diff-del-gutter: #603a30;
+  --color-diff-add-highlight: #616c4d;
+  --color-diff-del-highlight: #764438;
+  --color-diff-hunk-bg: #313331;
+  --color-diff-hunk-gutter: #434b4b;
+
+  /* Terminal — warm, muted, every color ≥ 4.5:1 on the sunken background;
+     "blue" is a desaturated steel so blue-light stays low; bright white is
+     parchment, not #fff */
+  --color-terminal-bg: var(--lf-950);
+  --color-terminal-fg: var(--lf-100);
+  --color-terminal-cursor: var(--lf-gold);
+  --color-terminal-black: var(--lf-950);
+  --color-terminal-red: #d4715c;
+  --color-terminal-green: #a8c487;
+  --color-terminal-yellow: #d1a54a;
+  --color-terminal-blue: #8fa4bd;
+  --color-terminal-magenta: #c493a8;
+  --color-terminal-cyan: #86b3ab;
+  --color-terminal-white: var(--lf-200);
+  --color-terminal-bright-black: #9c8c74;
+  --color-terminal-bright-red: #e5978a;
+  --color-terminal-bright-green: #b7cf95;
+  --color-terminal-bright-yellow: #e2be74;
+  --color-terminal-bright-blue: #a9bacf;
+  --color-terminal-bright-magenta: #d6adc0;
+  --color-terminal-bright-cyan: #a3c9c1;
+  --color-terminal-bright-white: var(--lf-50);
+}
+
+/* High Legibility — light theme built for maximal text contrast: body text
+   ≥ 7:1 (AAA), 3:1+ borders and focus rings, and no color anywhere except to
+   signal state (links/focus/selection in one blue; success/warning/error in
+   dark, AAA-clearing tones). Composes on the `light` base class. */
+:root.high-legibility {
+  /* Backgrounds */
+  --color-bg-primary: var(--hl-white);
+  --color-bg-secondary: var(--hl-50);
+  --color-bg-tertiary: var(--hl-100);
+  --color-bg-hover: var(--hl-100);
+  --color-bg-active: var(--hl-200);
+  --color-bg-chrome: var(--hl-50);
+  --color-bg-editor: var(--hl-white);
+
+  /* Surfaces */
+  --color-surface-primary: var(--hl-white);
+  --color-surface-secondary: var(--hl-50);
+  --color-surface-tertiary: var(--hl-100);
+  --color-surface-hover: var(--hl-100);
+
+  /* Text — every step ≥ 7:1 on white except disabled */
+  --color-text-primary: var(--hl-900);
+  --color-text-secondary: var(--hl-800);
+  --color-text-tertiary: var(--hl-700);
+  --color-text-muted: var(--hl-600);
+  --color-text-disabled: var(--hl-400);
+
+  /* Borders — solid grays; primary/input borders clear 3:1 (1.4.11) */
+  --color-border-primary: var(--hl-500);
+  --color-border-secondary: #a8a8a8;
+  --color-border-tertiary: var(--hl-300);
+  --color-border-hover: var(--hl-600);
+  --color-border-focus: var(--hl-blue);
+
+  /* Interactive — one blue, 8.2:1 on white */
+  --color-interactive: var(--hl-blue);
+  --color-interactive-primary: var(--hl-blue);
+  --color-interactive-hover: var(--hl-blue-hover);
+  --color-interactive-active: var(--hl-blue-active);
+  --color-interactive-text: var(--hl-blue);
+  --color-interactive-rgb: 30 64 175;
+  --color-focus-ring: var(--hl-blue);
+
+  --color-text-interactive-on-dark: var(--hl-blue);
+  --color-text-interactive-on-dark-hover: var(--hl-blue-hover);
+  --color-text-interactive-on-dark-active: var(--hl-blue);
+  --color-text-interactive-on-dark-focus: var(--hl-blue);
+
+  --color-surface-interactive: var(--hl-50);
+  --color-surface-interactive-hover: var(--hl-100);
+  --color-interactive-surface: var(--hl-blue-tint);
+  --color-interactive-surface-hover: #d0d8f0;
+  --color-border-interactive-subtle: #a8a8a8;
+  --color-border-interactive: var(--hl-500);
+  --color-interactive-border: var(--hl-blue);
+  --color-interactive-border-hover: var(--hl-blue-hover);
+  --color-text-interactive-muted: var(--hl-600);
+  --color-focus-ring-subtle: var(--hl-blue);   /* painted focus ring, opaque — 8.7:1 */
+
+  /* Status — dark tones that clear 7:1 as text on white; white text on fills */
+  --color-status-success: var(--hl-green);
+  --color-status-success-hover: #084a1f;
+  --color-status-warning: var(--hl-amber);
+  --color-status-warning-hover: #603b00;
+  --color-status-error: var(--hl-red);
+  --color-status-error-hover: #850f15;
+  --color-status-info: var(--hl-blue);
+  --color-status-neutral: var(--hl-600);
+
+  /* Context-aware text */
+  --color-text-on-primary: var(--hl-900);
+  --color-text-on-secondary: var(--hl-900);
+  --color-text-on-tertiary: var(--hl-800);
+  --color-text-on-surface: var(--hl-900);
+  --color-text-on-interactive: var(--hl-white);
+  --color-text-on-status-success: var(--hl-white);
+  --color-text-on-status-warning: var(--hl-white);
+  --color-text-on-status-error: var(--hl-white);
+  --color-text-on-status-info: var(--hl-white);
+  --color-text-on-navigation: var(--hl-900);
+
+  /* Buttons */
+  --color-button-primary-bg: var(--hl-blue);
+  --color-button-primary-hover: var(--hl-blue-hover);
+  --color-button-primary-text: var(--hl-white);
+  --color-button-secondary-bg: var(--hl-white);
+  --color-button-secondary-hover: var(--hl-100);
+  --color-button-secondary-text: var(--hl-900);
+  --color-button-ghost-hover: var(--hl-100);
+  --color-button-ghost-text: var(--hl-800);
+
+  /* Cards */
+  --color-card-bg: var(--hl-white);
+  --color-card-border: var(--hl-500);
+  --color-card-nested-bg: var(--hl-50);
+
+  /* Forms */
+  --color-input-bg: var(--hl-white);
+  --color-input-border: var(--hl-500);
+  --color-input-focus: var(--hl-blue);
+  --color-input-text: var(--hl-900);
+  --color-input-placeholder: var(--hl-600);
+
+  /* Modal */
+  --color-modal-overlay: rgba(17, 17, 17, 0.55);
+  --color-modal-bg: var(--hl-white);
+
+  /* Navigation — selection is a blue tint + black text, no other color */
+  --color-surface-navigation: var(--hl-50);
+  --color-surface-navigation-hover: var(--hl-100);
+  --color-surface-navigation-active: var(--hl-200);
+  --color-surface-navigation-selected: var(--hl-blue-tint);
+  --color-surface-navigation-selected-hover: #d0d8f0;
+  --color-text-navigation-primary: var(--hl-900);
+  --color-text-navigation-secondary: var(--hl-800);
+  --color-text-navigation-muted: var(--hl-600);
+  --color-text-navigation-selected: var(--hl-900);
+  --color-text-navigation-hover: var(--hl-900);
+  --color-text-navigation-section: var(--hl-600);
+  --color-text-navigation-brand: var(--hl-700);
+  --color-border-navigation: #a8a8a8;
+  --color-divider-navigation: #a8a8a8;
+  --color-divider-navigation-subtle: var(--hl-300);
+
+  /* Scrollbar — thumb ≥ 3:1 on track */
+  --color-scrollbar-track: var(--hl-50);
+  --color-scrollbar-thumb: var(--hl-500);
+  --color-scrollbar-thumb-hover: var(--hl-600);
+
+  /* Tab indicator — blue underline */
+  --tab-indicator-color: var(--hl-blue);
+  --tab-indicator-height: 2px;
+
+  /* Diff view — stronger tints than the light default; gutter numbers stay ≥ 7:1 */
+  --color-diff-add-bg: #d3f2da;
+  --color-diff-del-bg: #fbdcdc;
+  --color-diff-add-gutter: #a9e3b6;
+  --color-diff-del-gutter: #f4b9b9;
+  --color-diff-add-highlight: #8fd6a1;
+  --color-diff-del-highlight: #f2a3a3;
+  --color-diff-hunk-bg: #e4e8f5;
+  --color-diff-hunk-gutter: #c8d1ee;
+
+  /* Terminal — black on white; ANSI colors are the darkest value of each hue
+     that stays distinguishable from its bright sibling, all ≥ 4.5:1 on white
+     (normal set ≥ 7:1). ANSI "white" is dark gray so light-on-light output
+     stays readable, matching the existing light theme. */
+  --color-terminal-bg: var(--hl-white);
+  --color-terminal-fg: rgb(0 0 0);
+  --color-terminal-cursor: var(--hl-blue);
+  --color-terminal-selection-bg: #1e40af40;
+  --color-terminal-black: rgb(0 0 0);
+  --color-terminal-red: var(--hl-red);
+  --color-terminal-green: var(--hl-green);
+  --color-terminal-yellow: var(--hl-amber);
+  --color-terminal-blue: var(--hl-blue);
+  --color-terminal-magenta: #7a1f7d;
+  --color-terminal-cyan: #005c6b;
+  --color-terminal-white: var(--hl-700);
+  --color-terminal-bright-black: var(--hl-600);
+  --color-terminal-bright-red: #c1272d;
+  --color-terminal-bright-green: #0f7a35;
+  --color-terminal-bright-yellow: #8a5a00;
+  --color-terminal-bright-blue: var(--hl-blue-active);
+  --color-terminal-bright-magenta: #952b98;
+  --color-terminal-bright-cyan: #007486;
+  --color-terminal-bright-white: rgb(0 0 0);
 }
 
 /* ==========================================================================
@@ -1827,4 +4565,124 @@
   --color-text-interactive-muted: #b59888;
   --color-text-navigation-muted: #b59888;
   --color-text-navigation-section: #b59888;
+}
+
+/* Synthwave */
+:root.high-contrast.synthwave {
+  --color-text-muted: #bcaee0;              /* 9.39:1 on --syn-900 */
+  --color-text-interactive-muted: #bcaee0;
+  --color-text-navigation-muted: #bcaee0;
+  --color-text-navigation-section: #bcaee0;
+}
+
+/* Acid Terminal */
+:root.high-contrast.acid {
+  --color-text-muted: #a9b9a9;              /* 9.07:1 on --acid-900 */
+  --color-text-interactive-muted: #a9b9a9;
+  --color-text-navigation-muted: #a9b9a9;
+  --color-text-navigation-section: #a9b9a9;
+}
+
+/* Tokyo Rain */
+:root.high-contrast.tokyo-rain {
+  --color-text-muted: #a7b3cb;              /* 8.90:1 on --rain-900 */
+  --color-text-interactive-muted: #a7b3cb;
+  --color-text-navigation-muted: #a7b3cb;
+  --color-text-navigation-section: #a7b3cb;
+}
+
+/* Folio */
+:root.high-contrast.folio {
+  --color-text-muted: #4f4740;              /* 8.0:1 on --folio-paper */
+  --color-text-interactive-muted: #4f4740;
+  --color-text-navigation-muted: #4f4740;
+  --color-text-navigation-section: #4f4740;
+}
+
+/* Newsprint */
+:root.high-contrast.newsprint {
+  --color-text-muted: #4a5056;              /* 7.3:1 on --news-paper */
+  --color-text-interactive-muted: #4a5056;
+  --color-text-navigation-muted: #4a5056;
+  --color-text-navigation-section: #4a5056;
+}
+
+/* Walnut */
+:root.high-contrast.walnut {
+  --color-text-muted: #bba992;              /* 7.9:1 on --walnut-900 */
+  --color-text-interactive-muted: #bba992;
+  --color-text-navigation-muted: #bba992;
+  --color-text-navigation-section: #bba992;
+}
+
+/* Amber CRT */
+:root.high-contrast.amber-crt {
+  --color-text-muted: #c09a42;              /* 7.2:1 on --crt-900 */
+  --color-text-interactive-muted: #c09a42;
+  --color-text-navigation-muted: #c09a42;
+  --color-text-navigation-section: #c09a42;
+}
+
+/* Teletype */
+:root.high-contrast.teletype {
+  --color-text-muted: #5c4c37;              /* 7.2:1 on --tty-paper-100 */
+  --color-text-interactive-muted: #5c4c37;
+  --color-text-navigation-muted: #5c4c37;
+  --color-text-navigation-section: #5c4c37;
+}
+
+/* Dot Matrix */
+:root.high-contrast.dot-matrix {
+  --color-text-muted: #8fac5c;              /* 7.3:1 on --lcd-900 */
+  --color-text-interactive-muted: #8fac5c;
+  --color-text-navigation-muted: #8fac5c;
+  --color-text-navigation-section: #8fac5c;
+}
+
+/* Haar */
+:root.high-contrast.haar {
+  --color-text-muted: #414b55;              /* 7.7:1 on --haar-100 */
+  --color-text-interactive-muted: #414b55;
+  --color-text-navigation-muted: #414b55;   /* 7.1:1 on --haar-150 */
+  --color-text-navigation-section: #414b55;
+}
+
+/* Abyss */
+:root.high-contrast.abyss {
+  --color-text-muted: #8aa7ba;              /* 7.5:1 on --abyss-900 */
+  --color-text-interactive-muted: #8aa7ba;
+  --color-text-navigation-muted: #8aa7ba;
+  --color-text-navigation-section: #8aa7ba;
+}
+
+/* Understory */
+:root.high-contrast.understory {
+  --color-text-muted: #a8b59b;              /* 8.3:1 on --under-900 */
+  --color-text-interactive-muted: #a8b59b;
+  --color-text-navigation-muted: #a8b59b;   /* 8.1:1 on --under-bark-850 */
+  --color-text-navigation-section: #a8b59b;
+}
+
+/* Colorblind Safe */
+:root.high-contrast.colorblind-safe {
+  --color-text-muted: #a4aeba;              /* 8.1:1 on --cbs-900 */
+  --color-text-interactive-muted: #a4aeba;
+  --color-text-navigation-muted: #a4aeba;
+  --color-text-navigation-section: #a4aeba;
+}
+
+/* Low Fatigue */
+:root.high-contrast.low-fatigue {
+  --color-text-muted: #bbab93;              /* 7.0:1 on --lf-900 */
+  --color-text-interactive-muted: #bbab93;
+  --color-text-navigation-muted: #bbab93;
+  --color-text-navigation-section: #bbab93;
+}
+
+/* High Legibility — already AAA; the toggle pushes muted text to ~10:1 */
+:root.high-contrast.high-legibility {
+  --color-text-muted: #404040;              /* 10.4:1 on white */
+  --color-text-interactive-muted: #404040;
+  --color-text-navigation-muted: #404040;
+  --color-text-navigation-section: #404040;
 }

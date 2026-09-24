@@ -1,10 +1,11 @@
-import type { CloudVmConfig } from '../../../shared/types/cloud';
+import type { LeaderboardConfig } from '../../../shared/types/leaderboard';
 import type { RemoteDaemonConfig } from '../../../shared/types/remoteDaemon';
 import type { PaneChatAgent } from '../../../shared/types/paneChat';
 import type { VoiceTranscriptionMode } from '../../../shared/types/voiceTranscription';
 import type { WorktreeFileSyncEntry } from '../../../shared/types/worktreeFileSync';
+import type { AppearanceMode, DarkTheme, LightTheme, Theme } from '../../../shared/types/appearance';
 
-export interface TerminalShortcut {
+interface TerminalShortcut {
   id: string;
   label: string;
   key: string;
@@ -12,12 +13,12 @@ export interface TerminalShortcut {
   enabled: boolean;
 }
 
-export interface CustomCommand {
+interface CustomCommand {
   name: string;
   command: string;
 }
 
-export type TerminalPowerMode = 'performance' | 'batterySaver';
+type TerminalPowerMode = 'performance' | 'batterySaver';
 
 export interface AnalyticsIdentity {
   distinctId: string;
@@ -30,20 +31,6 @@ export interface AnalyticsIdentity {
   webAttributionPresent?: boolean;
   isFirstLaunch?: boolean;
   previousVersion?: string | null;
-  githubUsername?: string;
-  githubEmail?: string;
-  gitEmail?: string;
-  gitEmailHash?: string;
-  gitUserName?: string;
-}
-
-export interface AnalyticsConfig {
-  enabled: boolean;
-  posthogApiKey?: string;
-  posthogHost?: string;
-  installId?: string;
-  distinctId?: string;
-  identitySource?: AnalyticsIdentity['identitySource'];
   githubUsername?: string;
   githubEmail?: string;
   gitEmail?: string;
@@ -81,7 +68,10 @@ export interface AppConfig {
   stravuApiKey?: string;
   stravuServerUrl?: string;
   // Theme preference
-  theme?: 'light' | 'light-rounded' | 'dark' | 'oled' | 'dusk' | 'dusk-oled' | 'forge' | 'ember' | 'aurora' | 'night-owl' | 'night-owl-oled' | 'terracotta';
+  appearanceMode?: AppearanceMode;
+  theme?: Theme;
+  systemLightTheme?: LightTheme;
+  systemDarkTheme?: DarkTheme;
   // Opt-in high contrast mode: raises muted chrome text to AAA and the terminal's
   // minimumContrastRatio so dim CLI output stays legible
   highContrast?: boolean;
@@ -125,10 +115,22 @@ export interface AppConfig {
   // Use interactive mode for Claude CLI (persistent process with stdin instead of spawn-per-message)
   useInteractiveMode?: boolean;
   // Route PTY spawns through an isolated ptyHost UtilityProcess for crash isolation.
-  // Off by default. Requires app restart; the supervisor is forked once at `app.whenReady`.
+  // On by default on Windows. Requires app restart; the supervisor is forked once at `app.whenReady`.
   usePtyHost?: boolean;
   // PostHog analytics settings
-  analytics?: AnalyticsConfig;
+  analytics?: {
+    enabled: boolean;
+    posthogApiKey?: string;
+    posthogHost?: string;
+    installId?: string;
+    distinctId?: string;
+    identitySource?: AnalyticsIdentity['identitySource'];
+    githubUsername?: string;
+    githubEmail?: string;
+    gitEmail?: string;
+    gitEmailHash?: string;
+    gitUserName?: string;
+  };
   // User-defined custom commands for the Add Tool picker
   customCommands?: CustomCommand[];
   // Terminal shortcuts — hotkey-triggered clipboard paste snippets
@@ -137,18 +139,20 @@ export interface AppConfig {
   keyboardShortcutsEnabled?: boolean;
   // Whether the Command Palette shortcut remains active when other shortcuts are disabled
   commandPaletteShortcutEnabled?: boolean;
+  // Whether the terminal answers kitty keyboard protocol requests (CSI = | ? | > | < u)
+  kittyKeyboardEnabled?: boolean;
   // Worktree file sync — files/dirs to copy from main repo into new worktrees
   worktreeFileSync?: WorktreeFileSyncEntry[];
   // Preferred shell for Windows terminals
   preferredShell?: 'auto' | 'gitbash' | 'powershell' | 'pwsh' | 'cmd';
   // Terminal rendering/power behavior
   terminalPowerMode?: TerminalPowerMode;
-  // Cloud VM settings
-  cloud?: CloudVmConfig;
   // Self-hosted remote daemon settings and saved client profiles
   remoteDaemon?: RemoteDaemonConfig;
   terminalFontFamily?: string;
   terminalFontSize?: number;
+  // Leaderboard opt-in and cached state
+  leaderboard?: LeaderboardConfig;
 }
 
 export interface UpdateConfigRequest {
@@ -169,7 +173,10 @@ export interface UpdateConfigRequest {
   keepAwakeWhileSessionsActive?: boolean;
   stravuApiKey?: string;
   stravuServerUrl?: string;
-  theme?: 'light' | 'light-rounded' | 'dark' | 'oled' | 'dusk' | 'dusk-oled' | 'forge' | 'ember' | 'aurora' | 'night-owl' | 'night-owl-oled' | 'terracotta';
+  appearanceMode?: AppearanceMode;
+  theme?: Theme;
+  systemLightTheme?: LightTheme;
+  systemDarkTheme?: DarkTheme;
   highContrast?: boolean;
   uiScale?: number;
   notifications?: {
@@ -199,10 +206,10 @@ export interface UpdateConfigRequest {
   // Use interactive mode for Claude CLI (persistent process with stdin instead of spawn-per-message)
   useInteractiveMode?: boolean;
   // Route PTY spawns through an isolated ptyHost UtilityProcess for crash isolation.
-  // Off by default. Requires app restart to take effect.
+  // On by default on Windows. Requires app restart to take effect.
   usePtyHost?: boolean;
   // PostHog analytics settings
-  analytics?: AnalyticsConfig;
+  analytics?: AppConfig['analytics'];
   // User-defined custom commands for the Add Tool picker
   customCommands?: CustomCommand[];
   // Terminal shortcuts — hotkey-triggered clipboard paste snippets
@@ -211,14 +218,14 @@ export interface UpdateConfigRequest {
   keyboardShortcutsEnabled?: boolean;
   // Whether the Command Palette shortcut remains active when other shortcuts are disabled
   commandPaletteShortcutEnabled?: boolean;
+  // Whether the terminal answers kitty keyboard protocol requests (CSI = | ? | > | < u)
+  kittyKeyboardEnabled?: boolean;
   // Worktree file sync — files/dirs to copy from main repo into new worktrees
   worktreeFileSync?: WorktreeFileSyncEntry[];
   // Preferred shell for Windows terminals
   preferredShell?: 'auto' | 'gitbash' | 'powershell' | 'pwsh' | 'cmd';
   // Terminal rendering/power behavior
   terminalPowerMode?: TerminalPowerMode;
-  // Cloud VM settings
-  cloud?: CloudVmConfig;
   // Self-hosted remote daemon settings and saved client profiles
   remoteDaemon?: RemoteDaemonConfig;
   terminalFontFamily?: string;

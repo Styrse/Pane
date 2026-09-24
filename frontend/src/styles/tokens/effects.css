@@ -22,6 +22,7 @@
   /* Border Widths */
   --border-0: 0;
   --border-1: 1px;
+  --border-hairline: 1px;   /* the only chrome border width */
   --border-2: 2px;
   --border-4: 4px;
   --border-8: 8px;
@@ -97,6 +98,36 @@
   --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
   --ease-back-out: cubic-bezier(0.175, 0.885, 0.32, 1.275);
   --ease-dropdown: cubic-bezier(0.25, 0.46, 0.45, 0.94);
+
+  /* Interface motion curves. The built-in easings above are too weak to read as
+     deliberate at the durations Pane can afford, so anything that enters, leaves
+     or reveals uses these: they dump most of their distance in the first third,
+     which is what makes a short animation feel like a fast response rather than
+     a slow one. Ease-in is deliberately absent from this set — it delays the
+     frames the user is watching. */
+  --ease-out-strong: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out-strong: cubic-bezier(0.77, 0, 0.175, 1);
+  /* Edge-anchored surfaces — the PWA's nav drawer and create-pane sheet — travel
+     a whole screen edge rather than a few pixels, and `--ease-out-strong` spends
+     that distance so fast it reads as a snap. This curve holds a little more of
+     the travel in the tail, which is what makes a large surface feel like it was
+     pulled into place instead of thrown. Only for things crossing a full edge. */
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+
+  /* Motion durations. Pane sits on the critical path of someone's flow, so each
+     of these is a ceiling rather than a target and the shorter option wins every
+     tie. Surfaces reached by keyboard hundreds of times a day get none of them:
+     they do not animate at all. */
+  --duration-press: 90ms;           /* pointer down — has to feel instant */
+  --duration-press-release: 160ms;  /* and settle back on release */
+  --duration-enter: 160ms;          /* menus, popovers, small overlays */
+  --duration-reveal: 180ms;         /* sidebar and terminal rail width changes */
+  --duration-modal: 200ms;          /* dialogs */
+  --duration-sheet: 240ms;          /* drawers and sheets crossing a screen edge */
+  /* Sheets and drawers leave faster than they arrive. The entrance is worth its
+     240ms because it tells you where the surface came from; on the way out you
+     have already decided and the only job left is to get out of the way. */
+  --duration-sheet-exit: 160ms;
   
   /* Z-Index Scale */
   --z-0: 0;
@@ -148,9 +179,6 @@
   --button-shadow: var(--shadow-none);    /* no button shadow */
   --button-shadow-hover: var(--shadow-none);
   --card-shadow: var(--shadow-xs);        /* subtle shadow on cards only */
-  --app-shell-radius: var(--radius-xl);
-  --panel-shell-radius: var(--radius-lg);
-  --panel-shell-shadow: var(--shadow-xs);
 }
 
 /* Forge Theme — specific radii, NO shadows (IntelliJ-inspired) */
@@ -164,9 +192,6 @@
   --card-shadow: var(--shadow-none);      /* NO shadows — depth via bg color only */
   --modal-shadow: var(--shadow-none);
   --dropdown-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);  /* exception: dropdowns need depth */
-  --app-shell-radius: 0.625rem;
-  --panel-shell-radius: 0.5rem;
-  --panel-shell-shadow: var(--shadow-none);
 }
 
 /* Ember Theme — soft editorial panels */
@@ -177,9 +202,6 @@
   --button-shadow: var(--shadow-none);
   --button-shadow-hover: var(--shadow-none);
   --card-shadow: var(--shadow-sm);
-  --app-shell-radius: var(--radius-xl);
-  --panel-shell-radius: var(--radius-lg);
-  --panel-shell-shadow: var(--shadow-sm);
 }
 
 /* Aurora Theme — glassy rounded shells */
@@ -190,9 +212,36 @@
   --button-shadow: var(--shadow-none);
   --button-shadow-hover: var(--shadow-none);
   --card-shadow: var(--shadow-sm);
-  --app-shell-radius: var(--radius-2xl);
-  --panel-shell-radius: var(--radius-xl);
-  --panel-shell-shadow: var(--shadow-sm);
+}
+
+/* Synthwave Theme — soft rounded shells, magenta glow lives here only */
+:root.synthwave {
+  --button-radius: var(--radius-md);
+  --card-radius: var(--radius-lg);
+  --input-radius: var(--radius-md);
+  --button-shadow: var(--shadow-none);
+  --button-shadow-hover: var(--shadow-none);
+  --card-shadow: var(--shadow-xs);
+}
+
+/* Acid Terminal Theme — tight radii, lime hairline glow */
+:root.acid {
+  --button-radius: var(--radius-default);
+  --card-radius: var(--radius-md);
+  --input-radius: var(--radius-default);
+  --button-shadow: var(--shadow-none);
+  --button-shadow-hover: var(--shadow-none);
+  --card-shadow: var(--shadow-none);
+}
+
+/* Tokyo Rain Theme — rounded shells, cool blue rain glow */
+:root.tokyo-rain {
+  --button-radius: var(--radius-lg);
+  --card-radius: var(--radius-xl);
+  --input-radius: var(--radius-lg);
+  --button-shadow: var(--shadow-none);
+  --button-shadow-hover: var(--shadow-none);
+  --card-shadow: var(--shadow-sm);
 }
 
 /* Light Rounded — Forge-like rounded light shells */
@@ -203,7 +252,137 @@
   --button-shadow: var(--shadow-none);
   --button-shadow-hover: var(--shadow-none);
   --card-shadow: var(--shadow-sm);
-  --app-shell-radius: var(--radius-2xl);
-  --panel-shell-radius: var(--radius-xl);
-  --panel-shell-shadow: var(--shadow-sm);
+}
+
+/* Folio / Newsprint / Walnut deliberately keep the flat, edge-to-edge shell
+   treatment of the base light/dark themes (no --app-shell-radius /
+   --panel-shell-* islands, no index.css shell borders): a printed sheet is
+   one surface with rule lines, not a stack of cards. */
+
+/* Folio — set type: crisp corners, no drop shadows, depth from tonal steps only */
+:root.folio {
+  --button-radius: var(--radius-sm);
+  --card-radius: var(--radius-default);
+  --input-radius: var(--radius-sm);
+  --modal-radius: var(--radius-md);
+  --button-shadow: var(--shadow-none);
+  --button-shadow-hover: var(--shadow-none);
+  --card-shadow: var(--shadow-none);
+  --dropdown-shadow: 0 6px 18px rgba(31, 27, 23, 0.14);
+}
+
+/* Newsprint — column rules, square-ish corners, no drop shadows */
+:root.newsprint {
+  --button-radius: var(--radius-sm);
+  --card-radius: var(--radius-default);
+  --input-radius: var(--radius-sm);
+  --modal-radius: var(--radius-md);
+  --button-shadow: var(--shadow-none);
+  --button-shadow-hover: var(--shadow-none);
+  --card-shadow: var(--shadow-none);
+  --dropdown-shadow: 0 6px 18px rgba(36, 39, 43, 0.16);
+}
+
+/* Walnut — soft-bound: gentle radius, shallow shadows */
+:root.walnut {
+  --button-radius: var(--radius-md);
+  --card-radius: var(--radius-lg);
+  --input-radius: var(--radius-md);
+  --button-shadow: var(--shadow-none);
+  --button-shadow-hover: var(--shadow-none);
+  --card-shadow: var(--shadow-xs);
+  --dropdown-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+}
+
+/* Amber CRT — soft bezel radii, warm phosphor glow instead of drop shadows */
+:root.amber-crt {
+  --button-radius: var(--radius-md);
+  --card-radius: var(--radius-lg);
+  --input-radius: var(--radius-md);
+  --button-shadow: var(--shadow-none);
+  --button-shadow-hover: var(--shadow-none);
+  --card-shadow: var(--shadow-none);
+}
+
+/* Teletype — Braun-style rounded shells, quiet paper shadows */
+:root.teletype {
+  --button-radius: var(--radius-lg);
+  --card-radius: var(--radius-xl);
+  --input-radius: var(--radius-lg);
+  --button-shadow: var(--shadow-none);
+  --button-shadow-hover: var(--shadow-none);
+  --card-shadow: var(--shadow-sm);
+}
+
+/* Dot Matrix — tight pixel radii, no shadows (LCD has no depth) */
+:root.dot-matrix {
+  --button-radius: var(--radius-sm);
+  --card-radius: var(--radius-default);
+  --input-radius: var(--radius-sm);
+  --modal-radius: var(--radius-default);
+  --button-shadow: var(--shadow-none);
+  --button-shadow-hover: var(--shadow-none);
+  --card-shadow: var(--shadow-none);
+  --modal-shadow: var(--shadow-none);
+}
+
+/* Haar — soft fog radii, whisper shadows */
+:root.haar {
+  --button-radius: var(--radius-lg);
+  --card-radius: var(--radius-xl);
+  --input-radius: var(--radius-lg);
+  --button-shadow: var(--shadow-none);
+  --button-shadow-hover: var(--shadow-none);
+  --card-shadow: var(--shadow-sm);
+}
+
+/* Abyss — deep, rounded shells with pressure-depth shadows */
+:root.abyss {
+  --button-radius: var(--radius-lg);
+  --card-radius: var(--radius-xl);
+  --input-radius: var(--radius-md);
+  --button-shadow: var(--shadow-none);
+  --button-shadow-hover: var(--shadow-none);
+  --card-shadow: var(--shadow-sm);
+}
+
+/* Understory — organic radii, matte surfaces */
+:root.understory {
+  --button-radius: var(--radius-lg);
+  --card-radius: var(--radius-xl);
+  --input-radius: var(--radius-md);
+  --button-shadow: var(--shadow-none);
+  --button-shadow-hover: var(--shadow-none);
+  --card-shadow: var(--shadow-xs);
+}
+
+/* Colorblind Safe — clean rounded shells, no button shadows */
+:root.colorblind-safe {
+  --button-radius: var(--radius-md);
+  --card-radius: var(--radius-lg);
+  --input-radius: var(--radius-md);
+  --button-shadow: var(--shadow-none);
+  --button-shadow-hover: var(--shadow-none);
+  --card-shadow: var(--shadow-xs);
+}
+
+/* Low Fatigue — soft radii, minimal shadows (nothing sharp for long sessions) */
+:root.low-fatigue {
+  --button-radius: var(--radius-lg);
+  --card-radius: var(--radius-xl);
+  --input-radius: var(--radius-md);
+  --button-shadow: var(--shadow-none);
+  --button-shadow-hover: var(--shadow-none);
+  --card-shadow: var(--shadow-xs);
+}
+
+/* High Legibility — modest radii, flat surfaces; edges come from borders, not shadows */
+:root.high-legibility {
+  --button-radius: var(--radius-md);
+  --card-radius: var(--radius-lg);
+  --input-radius: var(--radius-md);
+  --button-shadow: var(--shadow-none);
+  --button-shadow-hover: var(--shadow-none);
+  --card-shadow: var(--shadow-none);
+  --modal-shadow: var(--shadow-lg);
 }

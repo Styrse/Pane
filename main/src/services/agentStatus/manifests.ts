@@ -38,6 +38,24 @@ export const CLAUDE_MANIFEST: AgentManifest = {
       lineRegex: [/^\s*\/btw(?:\s|$)/, /esc to close\s*$/i],
     },
     {
+      id: 'high_effort_thinking_working',
+      state: 'working',
+      priority: 976,
+      region: 'bottom_non_empty_lines(5)',
+      visibleWorking: true,
+      lineRegex: [/^\s*·\s+.+…\s+\([^)]*\bthinking\b[^)]*\)\s*$/iu, /esc to interrupt/i],
+    },
+    {
+      id: 'api_retry_working',
+      state: 'working',
+      priority: 977,
+      region: 'bottom_non_empty_lines(6)',
+      visibleWorking: true,
+      lineRegex: [
+        /(?:Retrying in \d+s?\s*·\s*attempt \d+\/\d+)|(?:(?:API error|Connection (?:lost|dropped)[^·\n]*)\s*·\s*Retrying)/iu,
+      ],
+    },
+    {
       id: 'transcript_viewer',
       state: 'unknown',
       priority: 1000,
@@ -280,9 +298,71 @@ export const GENERIC_MANIFEST: AgentManifest = {
   ],
 };
 
-const MANIFESTS_BY_AGENT: Record<string, AgentManifest> = {
+/*
+ * Distilled from real cursor-agent 2026.08.11-e8db854 screens. Cursor renders
+ * inline (no alternate screen) and is fully quiescent when idle; its OSC 0
+ * title becomes the chat name after the first exchange, so titles carry no
+ * status signal and are deliberately unused here.
+ */
+export const CURSOR_MANIFEST: AgentManifest = {
+  id: 'cursor',
+  rules: [
+    {
+      id: 'workspace_trust_prompt',
+      state: 'blocked',
+      priority: 1000,
+      region: 'whole_recent',
+      visibleBlocker: true,
+      contains: ['workspace trust required', 'do you trust the contents of this directory?'],
+    },
+    {
+      id: 'live_approval_prompt',
+      state: 'blocked',
+      priority: 900,
+      region: 'after_last_horizontal_rule',
+      visibleBlocker: true,
+      contains: ['run this command?'],
+      any: [{ contains: ['run (once) (y)'] }, { contains: ['esc or n'] }],
+    },
+    {
+      id: 'spinner_status_line',
+      state: 'working',
+      priority: 500,
+      region: 'bottom_non_empty_lines(8)',
+      visibleWorking: true,
+      lineRegex: [/^\s*[⠀-⣿][⠀-⣿\s]*\s*(Working|Running|Loading conversation)\b/],
+    },
+    {
+      id: 'interruptible_composer',
+      state: 'working',
+      priority: 450,
+      region: 'bottom_non_empty_lines(4)',
+      visibleWorking: true,
+      contains: ['ctrl+c to stop'],
+    },
+    {
+      id: 'idle_composer',
+      state: 'idle',
+      priority: 300,
+      region: 'bottom_non_empty_lines(4)',
+      visibleIdle: true,
+      any: [
+        { contains: ['plan, search, build anything'] },
+        { contains: ['add a follow-up'] },
+      ],
+      not: [{ contains: ['ctrl+c to stop'] }],
+    },
+  ],
+};
+
+interface AgentManifestLookup {
+  [agent: string]: AgentManifest;
+}
+
+const MANIFESTS_BY_AGENT: AgentManifestLookup = {
   claude: CLAUDE_MANIFEST,
   codex: CODEX_MANIFEST,
+  cursor: CURSOR_MANIFEST,
 };
 
 /**

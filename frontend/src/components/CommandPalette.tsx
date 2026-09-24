@@ -14,7 +14,10 @@ interface CommandPaletteProps {
 }
 
 type ListItem =
-  | { type: 'header'; category: string }
+  // A category renders one header per availability pass, so the pass belongs
+  // to the header's identity — otherwise the two passes produce duplicate
+  // React keys and the list DOM corrupts while typing.
+  | { type: 'header'; category: string; disabled: boolean }
   | { type: 'command'; hotkey: HotkeyDefinition; flatIndex: number; disabled: boolean; disabledReason: string | null };
 
 export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
@@ -93,6 +96,10 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
       onClose={onClose}
       initialFocusRef={inputRef}
       size="md"
+      // Cmd+Shift+P is a hundred-times-a-day reflex. Anything between the
+      // keystroke and a focused input reads as the app being slow, not as
+      // polish, so the palette does not animate in.
+      instant
       showCloseButton={false}
       className="!max-h-[min(500px,80vh)]"
     >
@@ -136,12 +143,14 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
         ) : (
           listItems.map((item) => {
             if (item.type === 'header') {
+              // SAFETY: Header categories are produced from the typed hotkey registry keys.
+              const category = item.category as HotkeyDefinition['category'];
               return (
                 <div
-                  key={`header-${item.category}`}
+                  key={`header-${item.category}-${item.disabled ? 'unavailable' : 'available'}`}
                   className="px-4 pt-3 pb-1 text-xs font-medium text-text-tertiary uppercase tracking-wider"
                 >
-                  {CATEGORY_LABELS[item.category as HotkeyDefinition['category']] ?? item.category}
+                  {CATEGORY_LABELS[category] ?? item.category}
                 </div>
               );
             }
@@ -157,7 +166,10 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
                 aria-disabled={item.disabled}
                 tabIndex={-1}
                 className={cn(
-                  'w-full flex items-center justify-between px-4 py-2 text-sm transition-colors',
+                  // No transition on the row highlight either: it moves on every
+                  // arrow key, and a 150ms cross-fade means the selection is
+                  // always trailing the key you already pressed.
+                  'w-full flex items-center justify-between px-4 py-2 text-sm',
                   item.disabled
                     ? 'text-text-tertiary opacity-60 cursor-not-allowed'
                     : 'cursor-pointer',
@@ -225,7 +237,7 @@ function buildListItems(results: HotkeyDefinition[]) {
     const hotkeys = grouped[category];
     const filteredHotkeys = hotkeys?.filter((item) => item.disabled === disabled);
     if (!filteredHotkeys?.length) return;
-    listItems.push({ type: 'header', category });
+    listItems.push({ type: 'header', category, disabled });
     for (const item of filteredHotkeys) {
       listItems.push({ type: 'command', ...item, flatIndex });
       flatIndex++;

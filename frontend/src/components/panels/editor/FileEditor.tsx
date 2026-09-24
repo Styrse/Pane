@@ -1,23 +1,20 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import Editor from '@monaco-editor/react';
-import type * as monaco from 'monaco-editor';
-import { ChevronRight, ChevronDown, File, Folder, RefreshCw, Plus, Trash2, FolderPlus, Search, X, Eye, Code, Copy, FolderOpen, Pencil, Clipboard, ClipboardPaste, CopyPlus } from 'lucide-react';
+import { ChevronRight, ChevronDown, File, Folder, RefreshCw, Plus, Trash2, FolderPlus, Search, X, Eye, Copy, FolderOpen, Pencil, Clipboard, ClipboardPaste, CopyPlus } from 'lucide-react';
 import { useTree } from '@headless-tree/react';
 import { asyncDataLoaderFeature, selectionFeature, hotkeysCoreFeature, expandAllFeature } from '@headless-tree/core';
 import type { ItemInstance } from '@headless-tree/core';
-import { MonacoErrorBoundary } from '../../MonacoErrorBoundary';
-import { useTheme } from '../../../contexts/ThemeContext';
-import { debounce } from '../../../utils/debounce';
-import { MarkdownPreview } from '../../MarkdownPreview';
-import { NotebookPreview } from './NotebookPreview';
-import { useResizablePanel } from '../../../hooks/useResizablePanel';
+import { useCommittedRef } from '../../../hooks/useCommittedRef';
 import { ExplorerPanelState } from '../../../../../shared/types/panels';
 import { isMac, isWindows } from '../../../utils/platformUtils';
 import { formatKeyDisplay } from '../../../utils/hotkeyUtils';
 import { TerminalPopover, PopoverButton } from '../../terminal/TerminalPopover';
 import { areKeyboardShortcutsEnabled, useConfigStore } from '../../../stores/configStore';
 import { LiveRegion } from '../../ui/LiveRegion';
-
+import { boundary, decodeBoundary } from '../../../../../shared/validation/boundaryDecoder';
+import { isHtmlFile } from './htmlFile';
+import { previewHtmlFileInBrowser } from './previewHtmlFile';
+import { editorPanelState, openFileInEditor } from '../../../services/openFileInEditor';
+import { usePanelStore } from '../../../stores/panelStore';
 interface FileItem {
   name: string;
   path: string;
@@ -28,40 +25,48 @@ interface FileItem {
 
 const ROOT_ID = '\0root';
 const MAX_FILE_SIZE = 15 * 1024 * 1024; // 15MB
-const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'ico', 'bmp']);
-const PDF_EXTENSIONS = new Set(['pdf']);
+
+function containsEventTarget(container: Node, target: EventTarget | null): boolean {
+  return target instanceof Node && container.contains(target);
+}
 
 interface HeadlessFileTreeProps {
   sessionId: string;
   onFileSelect: (file: FileItem | null) => void;
+  /** Double-click: open the file pinned (VS Code semantics). */
+  onFileOpen?: (file: FileItem) => void;
   onFileCreateSelect?: (filePath: string) => void;
   selectedPath: string | null;
   initialExpandedDirs?: string[];
   initialSearchQuery?: string;
   initialShowSearch?: boolean;
   onTreeStateChange?: (state: { expandedDirs: string[]; searchQuery: string; showSearch: boolean }) => void;
+  onHtmlPreview: (filePath: string) => void;
+  /** Window-level shortcuts (⌘F, rename, delete, clipboard) only while the tree is the visible panel. */
+  shortcutsActive?: boolean;
 }
 
 function HeadlessFileTree({
   sessionId,
   onFileSelect,
+  onFileOpen,
   onFileCreateSelect,
   selectedPath,
   initialExpandedDirs,
   initialSearchQuery,
   initialShowSearch,
   onTreeStateChange,
+  onHtmlPreview,
+  shortcutsActive = true,
 }: HeadlessFileTreeProps) {
   // Cache stores loaded directory contents. Key = dirPath, Value = FileItem[].
   const filesCacheRef = useRef(new Map<string, FileItem[]>());
 
   // Refs for values used in dataLoader (avoids stale closures)
-  const sessionIdRef = useRef(sessionId);
-  sessionIdRef.current = sessionId;
+  const sessionIdRef = useCommittedRef(sessionId);
 
   const [error, setError] = useState<string | null>(null);
-  const setErrorRef = useRef(setError);
-  setErrorRef.current = setError;
+  const setErrorRef = useCommittedRef(setError);
   const [searchQuery, setSearchQuery] = useState(initialSearchQuery || '');
   const [showSearch, setShowSearch] = useState(initialShowSearch || false);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -147,7 +152,7 @@ function HeadlessFileTree({
       }
       return [];
     },
-  }), []); // Empty deps — uses refs internally
+  }), [sessionIdRef, setErrorRef]);
 
   const tree = useTree<FileItem>({
     rootItemId: ROOT_ID,
@@ -381,7 +386,7 @@ function HeadlessFileTree({
         return;
       }
 
-      const newPath = result.path as string;
+      const newPath = decodeBoundary(result.path, boundary.string);
       refreshAfterPathsChanged([file.path, newPath]);
       setSelectedItems([newPath]);
       if (selectedPath === file.path) {
@@ -405,7 +410,7 @@ function HeadlessFileTree({
         return;
       }
 
-      refreshAfterPathsChanged([file.path, result.path as string]);
+      refreshAfterPathsChanged([file.path, decodeBoundary(result.path, boundary.string)]);
     } catch (err) {
       console.error('Failed to duplicate:', err);
       setError(err instanceof Error ? err.message : 'Failed to duplicate item');
@@ -524,6 +529,7 @@ function HeadlessFileTree({
       const reader = new FileReader();
       reader.onload = async () => {
         try {
+          // SAFETY: readAsDataURL completes with a string result before onload fires.
           const base64 = (reader.result as string).split(',')[1]; // Strip data URL prefix
           const result = await window.electronAPI.invoke('file:write-binary', {
             sessionId: sessionIdRef.current,
@@ -543,7 +549,7 @@ function HeadlessFileTree({
       reader.onerror = () => resolve({ success: false, name: file.name, error: 'Failed to read file' });
       reader.readAsDataURL(file);
     });
-  }, []);
+  }, [sessionIdRef]);
 
   const handleMoveToDirectory = useCallback(async (files: FileItem[], targetDir: string) => {
     const movingFiles = files.filter(file => file.path !== targetDir && !targetDir.startsWith(`${file.path}/`));
@@ -618,7 +624,7 @@ function HeadlessFileTree({
 
   const handleDragLeave = useCallback((e: React.DragEvent) => {
     e.preventDefault();
-    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+    if (!containsEventTarget(e.currentTarget, e.relatedTarget)) {
       setIsDragOver(false);
     }
   }, []);
@@ -643,7 +649,7 @@ function HeadlessFileTree({
     const internalPayload = e.dataTransfer.getData('application/x-pane-file-paths');
     if (internalPayload) {
       try {
-        const paths = JSON.parse(internalPayload) as string[];
+        const paths = decodeBoundary(JSON.parse(internalPayload), boundary.array(boundary.string));
         const files = paths
           .map(filePath => tree.getItemInstance(filePath)?.getItemData())
           .filter((item): item is FileItem => !!item);
@@ -699,8 +705,9 @@ function HeadlessFileTree({
 
   // Keyboard shortcuts
   useEffect(() => {
+    if (!shortcutsActive) return;
     const handleKeyDown = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement | null;
+      const target = e.target instanceof HTMLElement ? e.target : null;
       const isEditingText = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || !!target?.isContentEditable;
       if (isEditingText && e.key !== 'Escape') return;
 
@@ -754,7 +761,7 @@ function HeadlessFileTree({
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [searchQuery, showNewItemDialog, contextMenu, keyboardShortcutsEnabled, selectedItems, tree, startRename, handleDelete, clipboard, handlePaste]);
+  }, [shortcutsActive, searchQuery, showNewItemDialog, contextMenu, keyboardShortcutsEnabled, selectedItems, tree, startRename, handleDelete, clipboard, handlePaste]);
 
   return (
     <div
@@ -869,33 +876,48 @@ function HeadlessFileTree({
       {searchQuery && (
         <div className="flex-1 overflow-auto">
           {getFilteredFiles().map(file => (
-            <button
-              type="button"
+            <div
               key={file.path}
-              disabled={file.isDirectory}
-              className={`flex w-full items-center px-2 py-1 text-left hover:bg-surface-hover group disabled:cursor-default ${
+              className={`flex w-full items-center hover:bg-surface-hover group ${
                 selectedPath === file.path ? 'bg-interactive' : ''
               }`}
-              style={{ paddingLeft: '8px' }}
-              onClick={() => onFileSelect(file)}
               onContextMenu={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
                 setContextMenu({ x: e.clientX, y: e.clientY, file });
               }}
             >
-              {file.isDirectory ? (
-                <Folder className="w-4 h-4 mr-2 text-interactive flex-shrink-0" />
-              ) : (
-                <File className="w-4 h-4 mr-2 text-text-tertiary flex-shrink-0" />
+              <button
+                type="button"
+                disabled={file.isDirectory}
+                className="flex min-w-0 flex-1 items-center px-2 py-1 text-left disabled:cursor-default"
+                onClick={() => onFileSelect(file)}
+                onDoubleClick={() => onFileOpen?.(file)}
+              >
+                {file.isDirectory ? (
+                  <Folder className="w-4 h-4 mr-2 text-interactive flex-shrink-0" />
+                ) : (
+                  <File className="w-4 h-4 mr-2 text-text-tertiary flex-shrink-0" />
+                )}
+                <span className="flex-1 text-sm truncate text-text-primary">
+                  {highlightText(file.name, searchQuery)}
+                </span>
+                <span className="text-xs text-text-tertiary ml-2 truncate max-w-[120px]">
+                  {file.path}
+                </span>
+              </button>
+              {!file.isDirectory && isHtmlFile(file.path) && (
+                <button
+                  type="button"
+                  onClick={() => onHtmlPreview(file.path)}
+                  className="p-1 mr-1 hover:bg-surface-hover rounded text-text-tertiary hover:text-text-primary"
+                  title={`Preview ${file.name}`}
+                  aria-label={`Preview ${file.name}`}
+                >
+                  <Eye className="w-3 h-3" />
+                </button>
               )}
-              <span className="flex-1 text-sm truncate text-text-primary">
-                {highlightText(file.name, searchQuery)}
-              </span>
-              <span className="text-xs text-text-tertiary ml-2 truncate max-w-[120px]">
-                {file.path}
-              </span>
-            </button>
+            </div>
           ))}
           {getFilteredFiles().length === 0 && (
             <div className="p-4 text-text-secondary text-sm">No matching files</div>
@@ -917,7 +939,7 @@ function HeadlessFileTree({
           e.dataTransfer.dropEffect = e.dataTransfer.types.includes('application/x-pane-file-paths') ? 'move' : 'copy';
         }}
         onDragLeave={(e) => {
-          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragOverPath(null);
+          if (!containsEventTarget(e.currentTarget, e.relatedTarget)) setDragOverPath(null);
         }}
         onDrop={(e) => handleInternalDrop(e, '')}
       >
@@ -964,7 +986,7 @@ function HeadlessFileTree({
                 e.dataTransfer.dropEffect = e.dataTransfer.types.includes('application/x-pane-file-paths') ? 'move' : 'copy';
               }}
               onDragLeave={(e) => {
-                if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragOverPath(null);
+                if (!containsEventTarget(e.currentTarget, e.relatedTarget)) setDragOverPath(null);
               }}
               onDrop={(e) => {
                 if (!isFolder) return;
@@ -997,7 +1019,10 @@ function HeadlessFileTree({
                   }
                 }
               }}
-              onDoubleClick={(e) => e.preventDefault()}
+              onDoubleClick={(e) => {
+                e.preventDefault();
+                if (!isFolder) onFileOpen?.(data);
+              }}
               onContextMenu={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
@@ -1059,6 +1084,20 @@ function HeadlessFileTree({
                   title="Refresh folder"
                 >
                   <RefreshCw className="w-3 h-3" />
+                </button>
+              )}
+              {!isFolder && isHtmlFile(data.path) && renamingPath !== data.path && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onHtmlPreview(data.path);
+                  }}
+                  className="opacity-0 group-hover:opacity-100 focus:opacity-100 p-1 hover:bg-surface-hover rounded text-text-tertiary hover:text-text-primary"
+                  title={`Preview ${data.name}`}
+                  aria-label={`Preview ${data.name}`}
+                >
+                  <Eye className="w-3 h-3" />
                 </button>
               )}
               <button
@@ -1170,639 +1209,83 @@ function HeadlessFileTree({
 
 interface FileEditorProps {
   sessionId: string;
-  initialFilePath?: string;
   initialState?: ExplorerPanelState;
-  onFileChange?: (filePath: string | undefined, isDirty: boolean) => void;
   onStateChange?: (state: Partial<ExplorerPanelState>) => void;
+  /** False while the tree is mounted but hidden: its window-level shortcuts stay off. */
+  shortcutsActive?: boolean;
 }
 
-export function FileEditor({ 
-  sessionId, 
-  initialFilePath,
-  initialState,
-  onFileChange,
-  onStateChange 
-}: FileEditorProps) {
-  console.log('[FileEditor] Mounting with:', {
-    sessionId,
-    initialFilePath,
-    initialState,
-    hasOnStateChange: !!onStateChange
-  });
-  
-  const [selectedFile, setSelectedFile] = useState<FileItem | null>(null);
-  const [fileContent, setFileContent] = useState<string>('');
-  const [originalContent, setOriginalContent] = useState<string>('');
-  const [loading, setLoading] = useState(false);
+/**
+ * The Files inspector: a file tree whose clicks open center editor tabs.
+ * Single-click previews, double-click pins (VS Code semantics); the row of
+ * the active editor tab's file is highlighted.
+ */
+export function FileEditor({ sessionId, initialState, onStateChange, shortcutsActive = true }: FileEditorProps) {
   const [error, setError] = useState<string | null>(null);
-  const [viewMode, setViewMode] = useState<'edit' | 'preview'>('edit');
-  const [gitStatus, setGitStatus] = useState<'clean' | 'modified' | 'untracked'>('clean');
-  const [binaryBlobUrl, setBinaryBlobUrl] = useState<string | null>(null);
-  const binaryBlobUrlRef = useRef<string | null>(null);
-  const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
-  const monacoRef = useRef<typeof monaco | null>(null);
-  const pendingEditorFocusPathRef = useRef<string | null>(null);
+  const pendingFocusPathRef = useRef<string | null>(null);
 
-  // Keep ref in sync and clean up blob URLs to prevent memory leaks
-  useEffect(() => {
-    binaryBlobUrlRef.current = binaryBlobUrl;
-    return () => {
-      if (binaryBlobUrl) URL.revokeObjectURL(binaryBlobUrl);
-    };
-  }, [binaryBlobUrl]);
-
-  const { theme } = useTheme();
-  const isDarkMode = theme !== 'light' && theme !== 'light-rounded';
-  const hasUnsavedChanges = fileContent !== originalContent;
-  
-  // Wrap onResize callback to avoid recreating
-  const handleTreeResize = useCallback((width: number) => {
-    console.log('[FileEditor] Tree resized to:', width);
-    if (onStateChange) {
-      onStateChange({ fileTreeWidth: width });
-    }
-  }, [onStateChange]);
-  
-  // Add resizable hook for file tree column
-  const { width: fileTreeWidth, startResize } = useResizablePanel({
-    defaultWidth: initialState?.fileTreeWidth || 256,  // Use saved width or default
-    minWidth: 200,
-    maxWidth: 400,
-    storageKey: 'pane-file-tree-width',
-    onResize: handleTreeResize
+  const activeEditorPath = usePanelStore((state) => {
+    const activeId = state.activePanels[sessionId];
+    const active = (state.panels[sessionId] || []).find((panel) => panel.id === activeId);
+    return active ? editorPanelState(active)?.filePath ?? null : null;
   });
-  
-  // Check if this is a markdown file
-  const isMarkdownFile = useMemo(() => {
-    if (!selectedFile) return false;
-    const ext = selectedFile.path.split('.').pop()?.toLowerCase();
-    return ext === 'md' || ext === 'markdown';
-  }, [selectedFile]);
 
-  // Check if this is a notebook file
-  const isNotebookFile = useMemo(() => {
-    if (!selectedFile) return false;
-    const ext = selectedFile.path.split('.').pop()?.toLowerCase();
-    return ext === 'ipynb';
-  }, [selectedFile]);
-
-  const isImageFile = useMemo(() => {
-    if (!selectedFile) return false;
-    const ext = selectedFile.path.split('.').pop()?.toLowerCase() || '';
-    return IMAGE_EXTENSIONS.has(ext);
-  }, [selectedFile]);
-
-  const isPdfFile = useMemo(() => {
-    if (!selectedFile) return false;
-    const ext = selectedFile.path.split('.').pop()?.toLowerCase() || '';
-    return PDF_EXTENSIONS.has(ext);
-  }, [selectedFile]);
-
-  const isBinaryPreview = isImageFile || isPdfFile;
-
-  const loadFile = useCallback(async (file: FileItem | null) => {
+  const openFile = useCallback(async (file: FileItem | null, pin: boolean) => {
     if (!file || file.isDirectory) return;
-
-    setLoading(true);
     setError(null);
-    setGitStatus('clean');
     try {
-      // Binary file detection — render as image/PDF preview instead of Monaco
-      const ext = file.path.split('.').pop()?.toLowerCase() || '';
-      const isImage = IMAGE_EXTENSIONS.has(ext);
-      const isPdf = PDF_EXTENSIONS.has(ext);
-
-      if (isImage || isPdf) {
-        const result = await window.electronAPI.invoke('file:read-binary', {
-          sessionId,
-          filePath: file.path,
-        });
-        if (result.success && result.contentBase64) {
-          // Revoke previous blob URL via ref (avoids stale closure from useCallback)
-          if (binaryBlobUrlRef.current) URL.revokeObjectURL(binaryBlobUrlRef.current);
-
-          const mimeType = isImage
-            ? `image/${ext === 'jpg' ? 'jpeg' : ext === 'ico' ? 'x-icon' : ext}`
-            : 'application/pdf';
-          const byteChars = atob(result.contentBase64);
-          const byteArray = new Uint8Array(byteChars.length);
-          for (let i = 0; i < byteChars.length; i++) {
-            byteArray[i] = byteChars.charCodeAt(i);
-          }
-          const blob = new Blob([byteArray], { type: mimeType });
-          setBinaryBlobUrl(URL.createObjectURL(blob));
-          setFileContent('');
-          setOriginalContent('');
-        } else {
-          // Binary read failed — show error instead of blank/stale preview
-          setBinaryBlobUrl(null);
-          setError(result.error || 'Failed to load binary file');
-        }
-        setSelectedFile(file);
-        setViewMode('edit');
-        setLoading(false);
-        onFileChange?.(file.path, false);
-        onStateChange?.({ filePath: file.path });
-
-        // Check git status for binary files too
-        window.electronAPI.invoke('git:file-status', sessionId, file.path).then((statusResult: { success: boolean; data?: { status: 'clean' | 'modified' | 'untracked' } }) => {
-          if (statusResult.success && statusResult.data) {
-            setGitStatus(statusResult.data.status);
-          }
-        });
-        return;
+      await openFileInEditor({ sessionId, filePath: file.path, pin });
+      if (pendingFocusPathRef.current === file.path) {
+        pendingFocusPathRef.current = null;
+        window.dispatchEvent(new CustomEvent('editor-panel:reveal', {
+          detail: { filePath: file.path, cursorPosition: { line: 1, column: 1 } },
+        }));
       }
-
-      const result = await window.electronAPI.invoke('file:read', {
-        sessionId,
-        filePath: file.path
-      });
-
-      if (result.success) {
-        setBinaryBlobUrl(null);
-        setFileContent(result.content);
-        setOriginalContent(result.content);
-        setSelectedFile(file);
-        setViewMode('edit'); // Reset to edit mode when opening a new file
-        if (pendingEditorFocusPathRef.current === file.path) {
-          window.setTimeout(() => editorRef.current?.focus(), 100);
-        }
-        
-        // Notify parent about file change
-        if (onFileChange) {
-          onFileChange(file.path, false);
-        }
-        
-        // After loading new file, we need to restore its position
-        // This happens in handleEditorMount when editor re-renders
-        // But we also need to tell parent the file path changed
-        if (onStateChange) {
-          onStateChange({ 
-            filePath: file.path,
-            isDirty: false 
-          });
-        }
-        
-        // If we have saved position for this file, restore it
-        // The actual restoration happens in handleEditorMount
-        // but we need to trigger a re-render with the right state
-        if (editorRef.current && initialState?.filePath === file.path) {
-          const monacoEditor = editorRef.current;
-          
-          // Restore cursor position
-          if (initialState.cursorPosition && monacoEditor.setPosition) {
-            const { line, column } = initialState.cursorPosition;
-            setTimeout(() => {
-              monacoEditor.setPosition({
-                lineNumber: line,
-                column: column
-              });
-              monacoEditor.revealPositionInCenter({
-                lineNumber: line,
-                column: column
-              });
-            }, 50);
-          }
-          
-          // Restore scroll position
-          if (initialState.scrollPosition !== undefined && monacoEditor.setScrollTop) {
-            const scrollPos = initialState.scrollPosition;
-            setTimeout(() => {
-              monacoEditor.setScrollTop(scrollPos);
-            }, 100);
-          }
-        }
-
-        // Check git status for this file
-        window.electronAPI.invoke('git:file-status', sessionId, file.path).then((statusResult: { success: boolean; data?: { status: 'clean' | 'modified' | 'untracked' } }) => {
-          if (statusResult.success && statusResult.data) {
-            setGitStatus(statusResult.data.status);
-          }
-        });
-      } else {
-        setError(result.error);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load file');
-    } finally {
-      setLoading(false);
+    } catch (openError) {
+      setError(openError instanceof Error ? openError.message : 'Failed to open file');
     }
-  }, [sessionId, onFileChange, onStateChange, initialState, binaryBlobUrlRef]);
+  }, [sessionId]);
 
-  const selectedFilePath = selectedFile?.path;
+  const handleFileSelect = useCallback((file: FileItem | null) => { void openFile(file, false); }, [openFile]);
+  const handleFileOpen = useCallback((file: FileItem) => { void openFile(file, true); }, [openFile]);
 
-  useEffect(() => {
-    if (!selectedFilePath || pendingEditorFocusPathRef.current !== selectedFilePath) return;
-    const focusTimer = window.setTimeout(() => {
-      editorRef.current?.focus();
-      pendingEditorFocusPathRef.current = null;
-    }, 100);
-    return () => window.clearTimeout(focusTimer);
-  }, [selectedFilePath]);
-
-
-  const handleEditorMount = (editor: monaco.editor.IStandaloneCodeEditor, monacoInstance: typeof monaco) => {
-    editorRef.current = editor;
-    monacoRef.current = monacoInstance;
-    
-    // Now we have properly typed Monaco editor
-    const monacoEditor = editor;
-    
-    // Track cursor position changes with debouncing
-    const saveCursorPosition = debounce((position: { lineNumber: number; column: number }) => {
-      if (onStateChange) {
-        onStateChange({
-          cursorPosition: {
-            line: position.lineNumber,
-            column: position.column
-          }
-        });
-      }
-    }, 500); // Debounce cursor position saves
-    
-    // Track scroll position changes with debouncing
-    const saveScrollPosition = debounce((scrollTop: number) => {
-      if (onStateChange) {
-        onStateChange({
-          scrollPosition: scrollTop
-        });
-      }
-    }, 500); // Debounce scroll position saves
-    
-    // Listen for cursor position changes
-    monacoEditor.onDidChangeCursorPosition?.((e: monaco.editor.ICursorPositionChangedEvent) => {
-      saveCursorPosition(e.position);
-    });
-    
-    // Listen for scroll position changes
-    monacoEditor.onDidScrollChange?.((e: { scrollTop?: number; scrollLeft?: number }) => {
-      if (e.scrollTop !== undefined) {
-        saveScrollPosition(e.scrollTop);
-      }
-    });
-    
-    // Restore cursor and scroll position if available
-    if (initialState?.cursorPosition && monacoEditor.setPosition) {
-      const { line, column } = initialState.cursorPosition;
-      setTimeout(() => {
-        monacoEditor.setPosition({
-          lineNumber: line,
-          column: column
-        });
-        monacoEditor.revealPositionInCenter({
-          lineNumber: line,
-          column: column
-        });
-      }, 50); // Small delay to ensure editor is ready
+  const previewHtmlFile = useCallback(async (filePath: string) => {
+    setError(null);
+    try {
+      await previewHtmlFileInBrowser(sessionId, filePath);
+    } catch (previewError) {
+      setError(previewError instanceof Error ? previewError.message : 'Failed to preview HTML file');
     }
-    
-    if (initialState?.scrollPosition !== undefined && monacoEditor.setScrollTop) {
-      // Delay to ensure editor is fully rendered and content is loaded
-      const scrollPos = initialState.scrollPosition;
-      setTimeout(() => {
-        monacoEditor.setScrollTop(scrollPos);
-      }, 100);
-    }
-  };
+  }, [sessionId]);
 
-  const handleEditorChange = (value: string | undefined) => {
-    setFileContent(value || '');
-    
-    // Notify parent about dirty state
-    if (onFileChange && selectedFile) {
-      const isDirty = (value || '') !== originalContent;
-      onFileChange(selectedFile.path, isDirty);
-    }
-  };
-
-  // Auto-save functionality
-  const autoSave = useCallback(
-    debounce(async () => {
-      if (!selectedFile || selectedFile.isDirectory || fileContent === originalContent) return;
-      
-      try {
-        const result = await window.electronAPI.invoke('file:write', {
-          sessionId,
-          filePath: selectedFile.path,
-          content: fileContent
-        });
-        
-        if (result.success) {
-          setOriginalContent(fileContent);
-
-          // Notify parent that file is saved
-          if (onFileChange && selectedFile) {
-            onFileChange(selectedFile.path, false);
-          }
-
-          // Emit file saved event
-          if (onStateChange) {
-            onStateChange({
-              filePath: selectedFile.path,
-              isDirty: false
-            });
-          }
-
-          // Re-check git status after save
-          window.electronAPI.invoke('git:file-status', sessionId, selectedFile.path).then((statusResult: { success: boolean; data?: { status: 'clean' | 'modified' | 'untracked' } }) => {
-            if (statusResult.success && statusResult.data) {
-              setGitStatus(statusResult.data.status);
-            }
-          });
-        } else {
-          setError(result.error);
-        }
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to auto-save file');
-      }
-    }, 1000), // Auto-save after 1 second of inactivity
-    [sessionId, selectedFile, fileContent, originalContent, onFileChange, onStateChange]
-  );
-
-  // Trigger auto-save when content changes
-  useEffect(() => {
-    if (fileContent !== originalContent && selectedFile && !selectedFile.isDirectory) {
-      autoSave();
-    }
-  }, [fileContent, originalContent, selectedFile, autoSave]);
-
-  // Re-check git status when git operations complete (e.g. commit from diff panel or terminal)
-  useEffect(() => {
-    if (!selectedFile) return;
-    const handlePanelEvent = (event: CustomEvent) => {
-      const { type } = event.detail || {};
-      if (type === 'git:operation_completed' || type === 'diff:refreshed' || type === 'terminal:command_executed' || type === 'files:changed') {
-        window.electronAPI.invoke('git:file-status', sessionId, selectedFile.path).then((statusResult: { success: boolean; data?: { status: 'clean' | 'modified' | 'untracked' } }) => {
-          if (statusResult.success && statusResult.data) {
-            setGitStatus(statusResult.data.status);
-          }
-        });
-      }
-    };
-    window.addEventListener('panel:event', handlePanelEvent as EventListener);
-    return () => window.removeEventListener('panel:event', handlePanelEvent as EventListener);
-  }, [selectedFile, sessionId]);
-  
-  // Load initial file if provided
-  useEffect(() => {
-    if (initialFilePath && !selectedFile) {
-      const file: FileItem = {
-        name: initialFilePath.split('/').pop() || '',
-        path: initialFilePath,
-        isDirectory: false
-      };
-      loadFile(file);
-    }
-  }, [initialFilePath, selectedFile, loadFile]);
-
-  // Memoize the tree state change handler to prevent infinite loops
   const handleTreeStateChange = useCallback((treeState: { expandedDirs: string[]; searchQuery: string; showSearch: boolean }) => {
-    console.log('[FileEditor] handleTreeStateChange called with:', treeState);
-    if (onStateChange) {
-      console.log('[FileEditor] Calling onStateChange');
-      onStateChange({
-        expandedDirs: treeState.expandedDirs,
-        searchQuery: treeState.searchQuery,
-        showSearch: treeState.showSearch
-      });
-    } else {
-      console.log('[FileEditor] No onStateChange callback');
-    }
+    onStateChange?.(treeState);
   }, [onStateChange]);
-  
-  // Cleanup effect for Monaco editor models
-  useEffect(() => {
-    return () => {
-      // Cleanup Monaco editor models when component unmounts or file changes
-      try {
-        if (editorRef.current && typeof editorRef.current === 'object' && editorRef.current !== null && 'getModel' in editorRef.current) {
-          const editor = editorRef.current as { getModel: () => unknown, dispose?: () => void };
-          const model = editor.getModel();
-          if (model && typeof model === 'object' && model !== null && 'dispose' in model) {
-            const typedModel = model as { dispose: () => void };
-            console.log('[FileEditor] Disposing Monaco model');
-            typedModel.dispose();
-          }
-        }
-      } catch (error) {
-        console.warn('[FileEditor] Error during Monaco cleanup:', error);
-      }
-    };
-  }, [selectedFile?.path]); // Run cleanup when file changes
 
   return (
-    <div className="h-full w-full min-w-0 flex overflow-hidden">
-      <div 
-        className="bg-surface-secondary border-r border-border-primary relative flex-shrink-0 max-w-[45%]"
-        style={{ width: `${fileTreeWidth}px` }}
-      >
+    <div className="pane-explorer-tree h-full w-full min-w-0 flex flex-col overflow-hidden bg-surface-secondary">
+      {error && (
+        <div role="alert" className="px-3 py-1.5 bg-status-error/20 text-status-error text-xs">
+          {error}
+        </div>
+      )}
+      <div className="flex-1 min-h-0">
         <HeadlessFileTree
           sessionId={sessionId}
-          onFileSelect={loadFile}
+          onFileSelect={handleFileSelect}
+          onFileOpen={handleFileOpen}
           onFileCreateSelect={(filePath) => {
-            pendingEditorFocusPathRef.current = filePath;
+            pendingFocusPathRef.current = filePath;
           }}
-          selectedPath={selectedFile?.path || null}
+          selectedPath={activeEditorPath}
           initialExpandedDirs={initialState?.expandedDirs}
           initialSearchQuery={initialState?.searchQuery}
           initialShowSearch={initialState?.showSearch}
           onTreeStateChange={handleTreeStateChange}
+          onHtmlPreview={previewHtmlFile}
+          shortcutsActive={shortcutsActive}
         />
-        
-        {/* Resize handle */}
-        <div
-          className="absolute top-0 right-0 w-1 h-full cursor-col-resize group z-10"
-          onMouseDown={startResize}
-        >
-          {/* Larger grab area */}
-          <div className="absolute -left-2 -right-2 top-0 bottom-0" />
-        </div>
-      </div>
-      <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
-        {selectedFile ? (
-          <>
-            <div className="flex items-center justify-between px-4 py-2 bg-surface-secondary border-b border-border-primary">
-              <div className="flex min-w-0 items-center gap-2">
-                <File className="w-4 h-4 text-text-tertiary" />
-                <span className="min-w-0 truncate text-sm text-text-primary">
-                  {selectedFile.path}
-                  {hasUnsavedChanges && <span className="text-status-warning ml-2">●</span>}
-                </span>
-                {gitStatus !== 'clean' && (
-                  <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${
-                    gitStatus === 'untracked'
-                      ? 'bg-status-success text-text-on-status-success'
-                      : 'bg-interactive text-text-on-interactive'
-                  }`}>
-                    {gitStatus === 'untracked' ? 'U' : 'M'}
-                  </span>
-                )}
-              </div>
-              <div className="flex flex-shrink-0 items-center gap-2">
-                {/* Preview Toggle for Markdown/Notebook Files */}
-                {!isBinaryPreview && (isMarkdownFile || isNotebookFile) && (
-                  <div className="flex items-center rounded-lg border border-border-primary bg-surface-tertiary">
-                    <button
-                      onClick={() => setViewMode('edit')}
-                      className={`px-2 py-1 text-xs font-medium rounded-l-lg transition-colors flex items-center gap-1 ${
-                        viewMode === 'edit'
-                          ? 'bg-interactive text-text-on-interactive'
-                          : 'text-text-secondary hover:bg-surface-hover'
-                      }`}
-                      title="Edit mode"
-                    >
-                      <Code className="w-3 h-3" />
-                      Edit
-                    </button>
-                    <button
-                      onClick={() => setViewMode('preview')}
-                      className={`px-2 py-1 text-xs font-medium rounded-r-lg transition-colors flex items-center gap-1 ${
-                        viewMode === 'preview'
-                          ? 'bg-interactive text-text-on-interactive'
-                          : 'text-text-secondary hover:bg-surface-hover'
-                      }`}
-                      title="Preview mode"
-                    >
-                      <Eye className="w-3 h-3" />
-                      Preview
-                    </button>
-                  </div>
-                )}
-                {!isBinaryPreview && (
-                  <div className="flex items-center gap-2 text-sm">
-                    {hasUnsavedChanges ? (
-                      <>
-                        <div className="w-2 h-2 bg-status-warning rounded-full animate-pulse" />
-                        <span className="text-status-warning">Auto-saving...</span>
-                      </>
-                    ) : (
-                      <>
-                        <div className="w-2 h-2 bg-status-success rounded-full" />
-                        <span className="text-status-success">All changes saved</span>
-                      </>
-                    )}
-                  </div>
-                )}
-              </div>
-            </div>
-            {error && (
-              <div role="alert" className="px-4 py-2 bg-status-error/20 text-status-error text-sm">
-                Error: {error}
-              </div>
-            )}
-            <div className="flex-1 min-w-0 overflow-hidden">
-              {viewMode === 'preview' && isMarkdownFile ? (
-                <div className="h-full overflow-auto bg-bg-primary">
-                  <MarkdownPreview
-                    content={fileContent}
-                    className="min-h-full"
-                    id={`file-editor-preview-${sessionId}-${selectedFile.path.replace(/[^a-zA-Z0-9]/g, '-')}`}
-                  />
-                </div>
-              ) : viewMode === 'preview' && isNotebookFile ? (
-                <div className="h-full overflow-auto bg-bg-primary">
-                  <NotebookPreview
-                    content={fileContent}
-                    className="min-h-full"
-                  />
-                </div>
-              ) : isBinaryPreview && !binaryBlobUrl && !error ? (
-                <div className="flex items-center justify-center h-full bg-surface-primary">
-                  <div className="animate-pulse flex flex-col items-center gap-3">
-                    <div className="w-48 h-48 bg-surface-tertiary rounded" />
-                    <div className="w-32 h-3 bg-surface-tertiary rounded" />
-                  </div>
-                </div>
-              ) : isImageFile && binaryBlobUrl ? (
-                <div className="flex items-center justify-center h-full bg-surface-primary p-4 overflow-auto">
-                  <img
-                    src={binaryBlobUrl}
-                    alt={selectedFile?.path.split('/').pop() || 'Image'}
-                    className="max-w-full max-h-full object-contain rounded"
-                  />
-                </div>
-              ) : isPdfFile && binaryBlobUrl ? (
-                <object
-                  data={binaryBlobUrl}
-                  type="application/pdf"
-                  className="w-full h-full"
-                >
-                  <div className="flex items-center justify-center h-full text-text-secondary">
-                    PDF preview not available.
-                  </div>
-                </object>
-              ) : (
-                <MonacoErrorBoundary>
-                  <Editor
-                    theme={isDarkMode ? 'vs-dark' : 'light'}
-                    value={fileContent}
-                    onChange={handleEditorChange}
-                    onMount={handleEditorMount}
-                    options={{
-                      minimap: { enabled: true },
-                      fontSize: 14,
-                      wordWrap: 'on',
-                      automaticLayout: true,
-                    }}
-                    language={getLanguageFromPath(selectedFile.path)}
-                  />
-                </MonacoErrorBoundary>
-              )}
-            </div>
-          </>
-        ) : (
-          <div className="flex-1 flex items-center justify-center text-text-secondary">
-            {loading ? 'Loading...' : 'Select a file to edit'}
-          </div>
-        )}
       </div>
     </div>
   );
-}
-
-function getLanguageFromPath(filePath: string): string {
-  const ext = filePath.split('.').pop()?.toLowerCase();
-  const languageMap: Record<string, string> = {
-    js: 'javascript',
-    jsx: 'javascript',
-    ts: 'typescript',
-    tsx: 'typescript',
-    json: 'json',
-    ipynb: 'json',
-    md: 'markdown',
-    py: 'python',
-    rb: 'ruby',
-    go: 'go',
-    rs: 'rust',
-    cpp: 'cpp',
-    c: 'c',
-    h: 'c',
-    hpp: 'cpp',
-    java: 'java',
-    cs: 'csharp',
-    php: 'php',
-    html: 'html',
-    css: 'css',
-    scss: 'scss',
-    sass: 'sass',
-    less: 'less',
-    xml: 'xml',
-    yaml: 'yaml',
-    yml: 'yaml',
-    toml: 'toml',
-    ini: 'ini',
-    sh: 'shell',
-    bash: 'shell',
-    zsh: 'shell',
-    fish: 'shell',
-    ps1: 'powershell',
-    dockerfile: 'dockerfile',
-    makefile: 'makefile',
-    sql: 'sql',
-    graphql: 'graphql',
-    vue: 'vue',
-    svelte: 'svelte',
-  };
-  
-  return languageMap[ext || ''] || 'plaintext';
 }

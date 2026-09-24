@@ -3,6 +3,7 @@ import type { Terminal } from '@xterm/xterm';
 import type { LinkProviderConfig } from '../linkProviders/types';
 import { registerAllLinkProviders } from '../linkProviders';
 import { panelApi } from '../../../services/panelApi';
+import { openFileInEditor } from '../../../services/openFileInEditor';
 import { usePanelStore } from '../../../stores/panelStore';
 import { useConfigStore } from '../../../stores/configStore';
 import type { BrowserPanelState, ToolPanel } from '../../../../../shared/types/panels';
@@ -154,28 +155,16 @@ export function useTerminalLinks(terminal: Terminal | null, config: UseTerminalL
     });
 
     if (exists) {
-      // Create an Explorer panel with the file path
-      const filename = path.split(/[/\\]/).pop() || 'Editor';
-      const newPanel = await panelApi.createPanel({
+      await openFileInEditor({
         sessionId: config.sessionId,
-        type: 'explorer',
-        title: filename,
-        initialState: {
-          customState: {
-            filePath: path,
-            cursorPosition: line ? { line, column: 1 } : undefined,
-          },
-        },
+        filePath: path,
+        pin: true,
+        cursorPosition: line ? { line, column: 1 } : undefined,
       });
-
-      // Add to store and set as active
-      addPanel(newPanel);
-      setActivePanelInStore(config.sessionId, newPanel.id);
-      await panelApi.setActivePanel(config.sessionId, newPanel.id);
     }
 
     setFilePopover((prev) => ({ ...prev, visible: false }));
-  }, [filePopover, config.sessionId, addPanel, setActivePanelInStore]);
+  }, [filePopover, config.sessionId]);
 
   const handleShowInExplorer = useCallback(async () => {
     const { path } = filePopover;
@@ -208,7 +197,8 @@ export function useTerminalLinks(terminal: Terminal | null, config: UseTerminalL
 
     let browserPanel: ToolPanel;
     if (existingPanel) {
-      const existingCustomState = (existingPanel.state.customState ?? {}) as BrowserPanelState & Record<string, unknown>;
+      // SAFETY: The panel type discriminator determines the corresponding custom-state shape.
+      const existingCustomState = (existingPanel.state.customState ?? {}) as BrowserPanelState;
       browserPanel = {
         ...existingPanel,
         state: {

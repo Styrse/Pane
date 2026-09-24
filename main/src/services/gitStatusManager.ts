@@ -1,3 +1,4 @@
+import { HOME_GIT_SCAN_WARNING, isHomeDirectory } from '../utils/gitScanSafety';
 import { EventEmitter } from 'events';
 import type { Logger } from '../utils/logger';
 import type { GitStatus } from '../types/session';
@@ -10,6 +11,16 @@ import { GitStatusLogger } from './gitStatusLogger';
 import { GitFileWatcher } from './gitFileWatcher';
 import { fastCheckWorkingDirectory, fastGetAheadBehind, fastGetDiffStats } from './gitPlumbingCommands';
 import { escapeShellArg } from '../utils/shellEscape';
+import { boundary, decodeBoundary } from '../../../shared/validation/boundaryDecoder';
+
+const githubPrListSchema = boundary.array(boundary.object({
+  number: boundary.optional(boundary.number),
+  url: boundary.optional(boundary.string),
+  title: boundary.optional(boundary.string),
+  state: boundary.optional(boundary.string),
+  isDraft: boundary.optional(boundary.boolean),
+  body: boundary.optional(boundary.string),
+}));
 
 interface GitStatusCache {
   [sessionId: string]: {
@@ -32,6 +43,18 @@ type PrLookupResult =
   | { ok: false };
 
 const PR_FIELDS = ['prNumber', 'prUrl', 'prTitle', 'prState', 'prIsDraft', 'prBody'] as const;
+
+interface GitStatusManagerDependencies {
+  fastCheckWorkingDirectory: typeof fastCheckWorkingDirectory;
+  fastGetAheadBehind: typeof fastGetAheadBehind;
+  fastGetDiffStats: typeof fastGetDiffStats;
+}
+
+const defaultGitStatusManagerDependencies: GitStatusManagerDependencies = {
+  fastCheckWorkingDirectory,
+  fastGetAheadBehind,
+  fastGetDiffStats,
+};
 
 export class GitStatusManager extends EventEmitter {
   private cache: GitStatusCache = {};
@@ -79,7 +102,8 @@ export class GitStatusManager extends EventEmitter {
     private worktreeManager: WorktreeManager,
     private gitDiffManager: GitDiffManager,
     private logger?: Logger,
-    private databaseService?: DatabaseService
+    private databaseService?: DatabaseService,
+    private readonly dependencies: GitStatusManagerDependencies = defaultGitStatusManagerDependencies,
   ) {
     super();
     // Increase max listeners to prevent warnings when many components listen to git status events
@@ -115,7 +139,7 @@ export class GitStatusManager extends EventEmitter {
         this.logger?.info(`[GitStatus] Hydrated ${cachedStatuses.length} cached git statuses`);
       }
     } catch (error) {
-      this.logger?.error('[GitStatus] Failed to hydrate persisted git status cache:', error as Error);
+      this.logger?.error('[GitStatus] Failed to hydrate persisted git status cache:', error instanceof Error ? error : new Error(String(error)));
     }
   }
 
@@ -123,7 +147,7 @@ export class GitStatusManager extends EventEmitter {
     try {
       this.databaseService?.saveSessionGitStatusCache(sessionId, status, lastChecked);
     } catch (error) {
-      this.logger?.error(`[GitStatus] Failed to persist status cache for ${sessionId}:`, error as Error);
+      this.logger?.error(`[GitStatus] Failed to persist status cache for ${sessionId}:`, error instanceof Error ? error : new Error(String(error)));
     }
   }
 
@@ -165,11 +189,11 @@ export class GitStatusManager extends EventEmitter {
       if (session?.worktreePath) {
         const ctx = this.sessionManager.getProjectContext(sessionId);
         this.fileWatcher.setExecutionContext(ctx?.commandRunner, ctx?.pathResolver);
-        this.fileWatcher.startWatching(sessionId, session.worktreePath);
+        await this.fileWatcher.startWatching(sessionId, session.worktreePath);
         this.logger?.info(`[GitStatus] Started file watching for session ${sessionId}`);
       }
     } catch (error) {
-      this.logger?.error(`[GitStatus] Failed to start file watching for session ${sessionId}:`, error as Error);
+      this.logger?.error(`[GitStatus] Failed to start file watching for session ${sessionId}:`, error instanceof Error ? error : new Error(String(error)));
     }
   }
   
@@ -289,7 +313,7 @@ export class GitStatusManager extends EventEmitter {
         })
       ));
     } catch (error) {
-      this.logger?.error(`[GitStatus] Failed to refresh git status for project ${projectId}:`, error as Error);
+      this.logger?.error(`[GitStatus] Failed to refresh git status for project ${projectId}:`, error instanceof Error ? error : new Error(String(error)));
     }
   }
 
@@ -311,13 +335,13 @@ export class GitStatusManager extends EventEmitter {
         } else {
           // Other sessions may now be behind main
           const cached = this.cache[session.id];
-          if (cached && session.worktreePath) {
+          if (cached && session.worktreePath && !isHomeDirectory(session.worktreePath)) {
             try {
               // Quick check for new ahead/behind status
               const ctx = this.sessionManager.getProjectContext(session.id);
               if (ctx) {
                 const comparisonBranch = await this.worktreeManager.getSessionComparisonBranch(session, ctx);
-                const { ahead, behind } = fastGetAheadBehind(session.worktreePath, comparisonBranch, ctx.commandRunner.wslContext);
+                const { ahead, behind } = await this.dependencies.fastGetAheadBehind(session.worktreePath, comparisonBranch, ctx.commandRunner.wslContext);
                 
                 const updatedStatus = { ...cached.status };
                 updatedStatus.ahead = ahead;
@@ -340,7 +364,7 @@ export class GitStatusManager extends EventEmitter {
       
       this.logger?.info(`[GitStatus] Updated all sessions in project ${projectId} after main branch update`);
     } catch (error) {
-      this.logger?.error(`[GitStatus] Error updating project statuses after main update:`, error as Error);
+      this.logger?.error(`[GitStatus] Error updating project statuses after main update:`, error instanceof Error ? error : new Error(String(error)));
       // Fall back to refreshing all
       await this.refreshGitStatusForProject(projectId);
     }
@@ -361,7 +385,7 @@ export class GitStatusManager extends EventEmitter {
       }
 
       const session = await this.sessionManager.getSession(sessionId);
-      if (!session || !session.worktreePath) {
+      if (!session || !session.worktreePath || isHomeDirectory(session.worktreePath)) {
         return;
       }
 
@@ -380,7 +404,7 @@ export class GitStatusManager extends EventEmitter {
         // hasUncommittedChanges might be true if there were conflicts
         // We'll do a quick check for uncommitted changes
         try {
-          const quickStatus = fastCheckWorkingDirectory(session.worktreePath, ctx.commandRunner.wslContext);
+          const quickStatus = await this.dependencies.fastCheckWorkingDirectory(session.worktreePath, ctx.commandRunner.wslContext);
           updatedStatus.hasUncommittedChanges = quickStatus.hasModified || quickStatus.hasStaged;
           updatedStatus.hasUntrackedFiles = quickStatus.hasUntracked;
           // Update state based on conflicts
@@ -390,7 +414,7 @@ export class GitStatusManager extends EventEmitter {
 
           if (updatedStatus.hasUncommittedChanges) {
             // Get updated diff stats
-            const quickStats = fastGetDiffStats(session.worktreePath, ctx.commandRunner.wslContext);
+            const quickStats = await this.dependencies.fastGetDiffStats(session.worktreePath, ctx.commandRunner.wslContext);
             updatedStatus.additions = quickStats.additions;
             updatedStatus.deletions = quickStats.deletions;
             updatedStatus.filesChanged = quickStats.filesChanged;
@@ -424,7 +448,7 @@ export class GitStatusManager extends EventEmitter {
       
       this.logger?.info(`[GitStatus] Updated status after ${rebaseType} rebase for session ${sessionId}`);
     } catch (error) {
-      this.logger?.error(`[GitStatus] Error updating status after rebase for session ${sessionId}:`, error as Error);
+      this.logger?.error(`[GitStatus] Error updating status after rebase for session ${sessionId}:`, error instanceof Error ? error : new Error(String(error)));
       // Fall back to full refresh on error
       await this.refreshSessionGitStatus(sessionId, false);
     }
@@ -553,7 +577,7 @@ export class GitStatusManager extends EventEmitter {
               }
             }
           } catch (error) {
-            this.logger?.error(`[GitStatus] Error fetching status for session ${sessionId}:`, error as Error);
+            this.logger?.error(`[GitStatus] Error fetching status for session ${sessionId}:`, error instanceof Error ? error : new Error(String(error)));
           }
         })
       );
@@ -601,7 +625,7 @@ export class GitStatusManager extends EventEmitter {
         projectPath,
         { timeout: 5000 }
       );
-      const prs = JSON.parse(result.stdout.trim() || '[]') as Array<{ number?: number; url?: string; title?: string; state?: string; isDraft?: boolean; body?: string }>;
+      const prs = decodeBoundary(JSON.parse(result.stdout.trim() || '[]'), githubPrListSchema);
       const pr = prs[0];
       const entry = {
         prNumber: pr?.number,
@@ -646,7 +670,7 @@ export class GitStatusManager extends EventEmitter {
     const ctx = this.sessionManager.getProjectContext(sessionId);
     if (!ctx) return;
 
-    const branchName = this.getCurrentBranchName(session.worktreePath, ctx.commandRunner);
+    const branchName = await this.getCurrentBranchName(session.worktreePath, ctx.commandRunner);
     if (!branchName) return;
 
     const cacheKey = `${project.path}:${branchName}`;
@@ -656,9 +680,9 @@ export class GitStatusManager extends EventEmitter {
     }
   }
 
-  private getCurrentBranchName(worktreePath: string, commandRunner: CommandRunner): string | null {
+  private async getCurrentBranchName(worktreePath: string, commandRunner: CommandRunner): Promise<string | null> {
     try {
-      const branchName = commandRunner.exec('git branch --show-current', worktreePath, { silent: true }).trim();
+      const branchName = (await commandRunner.execAsync('git branch --show-current', worktreePath, { silent: true })).stdout.trim();
       if (branchName) return branchName;
     } catch {
       // Fall back to the worktree folder name below.
@@ -694,7 +718,7 @@ export class GitStatusManager extends EventEmitter {
     const ctx = this.sessionManager.getProjectContext(sessionId);
     if (!ctx) return;
 
-    const branchName = this.getCurrentBranchName(session.worktreePath, ctx.commandRunner);
+    const branchName = await this.getCurrentBranchName(session.worktreePath, ctx.commandRunner);
     if (!branchName) return;
 
     const prResult = await this.fetchPrForSessionResult(branchName, project.path, ctx.commandRunner);
@@ -781,7 +805,7 @@ export class GitStatusManager extends EventEmitter {
       
       this.gitLogger.logPollComplete(successCount, errorCount);
     } catch (error) {
-      this.logger?.error('[GitStatus] Critical error during refresh:', error as Error);
+      this.logger?.error('[GitStatus] Critical error during refresh:', error instanceof Error ? error : new Error(String(error)));
     }
   }
 
@@ -829,6 +853,7 @@ export class GitStatusManager extends EventEmitter {
    * Returns true if status is different from cached, false if unchanged
    */
   private async hasGitStatusChanged(sessionId: string, worktreePath: string): Promise<boolean> {
+    if (isHomeDirectory(worktreePath)) return true;
     const cached = this.cache[sessionId];
     if (!cached) return true;
     
@@ -836,7 +861,7 @@ export class GitStatusManager extends EventEmitter {
       const ctx = this.sessionManager.getProjectContext(sessionId);
 
       // Quick check using plumbing commands
-      const quickStatus = fastCheckWorkingDirectory(worktreePath, ctx?.commandRunner.wslContext);
+      const quickStatus = await this.dependencies.fastCheckWorkingDirectory(worktreePath, ctx?.commandRunner.wslContext);
 
       // Compare with cached status
       const cachedHasChanges = cached.status.hasUncommittedChanges || cached.status.hasUntrackedFiles;
@@ -854,7 +879,7 @@ export class GitStatusManager extends EventEmitter {
           const comparisonBranch = session
             ? await this.worktreeManager.getSessionComparisonBranch(session, ctx)
             : await this.worktreeManager.getProjectMainBranch(ctx.project.path, ctx.commandRunner);
-          const { ahead, behind } = fastGetAheadBehind(worktreePath, comparisonBranch, ctx.commandRunner.wslContext);
+          const { ahead, behind } = await this.dependencies.fastGetAheadBehind(worktreePath, comparisonBranch, ctx.commandRunner.wslContext);
 
           if ((cached.status.ahead || 0) !== ahead || (cached.status.behind || 0) !== behind) {
             return true;
@@ -875,18 +900,22 @@ export class GitStatusManager extends EventEmitter {
   private async fetchGitStatus(sessionId: string): Promise<GitStatus | null> {
     // Create abort controller for this operation
     const abortController = new AbortController();
+    this.abortControllers.get(sessionId)?.abort();
     this.abortControllers.set(sessionId, abortController);
     
     try {
       const session = await this.sessionManager.getSession(sessionId);
       if (!session || !session.worktreePath) {
-        this.abortControllers.delete(sessionId);
         return null;
       }
       
+      if (isHomeDirectory(session.worktreePath)) {
+        this.logger?.warn(`[GitStatus] ${HOME_GIT_SCAN_WARNING}`);
+        return { state: 'unknown', lastChecked: new Date().toISOString() };
+      }
+
       // Check if operation was cancelled
       if (abortController.signal.aborted) {
-        this.abortControllers.delete(sessionId);
         return null;
       }
       
@@ -898,7 +927,7 @@ export class GitStatusManager extends EventEmitter {
       }
 
       // Use fast plumbing commands for initial checks
-      const quickStatus = fastCheckWorkingDirectory(session.worktreePath, ctx.commandRunner.wslContext);
+      const quickStatus = await this.dependencies.fastCheckWorkingDirectory(session.worktreePath, ctx.commandRunner.wslContext);
       const hasUncommittedChanges = quickStatus.hasModified || quickStatus.hasStaged;
       const hasUntrackedFiles = quickStatus.hasUntracked;
       const hasMergeConflicts = quickStatus.hasConflicts;
@@ -907,7 +936,7 @@ export class GitStatusManager extends EventEmitter {
       let uncommittedDiff = { stats: { filesChanged: 0, additions: 0, deletions: 0 } };
       if (hasUncommittedChanges) {
         // Use fast diff stats instead of full diff capture when possible
-        const quickStats = fastGetDiffStats(session.worktreePath, ctx.commandRunner.wslContext);
+        const quickStats = await this.dependencies.fastGetDiffStats(session.worktreePath, ctx.commandRunner.wslContext);
         uncommittedDiff = {
           stats: {
             filesChanged: quickStats.filesChanged,
@@ -919,7 +948,7 @@ export class GitStatusManager extends EventEmitter {
 
       // Get ahead/behind status using fast plumbing command
       const comparisonBranch = await this.worktreeManager.getSessionComparisonBranch(session, ctx);
-      const { ahead, behind } = fastGetAheadBehind(session.worktreePath, comparisonBranch, ctx.commandRunner.wslContext);
+      const { ahead, behind } = await this.dependencies.fastGetAheadBehind(session.worktreePath, comparisonBranch, ctx.commandRunner.wslContext);
 
       // Get total additions/deletions for all commits in the branch (compared to comparison branch)
       let totalCommitAdditions = 0;
@@ -928,7 +957,7 @@ export class GitStatusManager extends EventEmitter {
       if (ahead > 0) {
         // Use git diff --shortstat for commit statistics
         try {
-          const statLine = ctx.commandRunner.exec(`git diff --shortstat ${comparisonBranch}...HEAD`, session.worktreePath, { silent: true }).trim();
+          const statLine = (await ctx.commandRunner.execAsync(`git diff --shortstat ${comparisonBranch}...HEAD`, session.worktreePath, { silent: true })).stdout.trim();
           if (statLine) {
             const filesMatch = statLine.match(/(\d+) files? changed/);
             const additionsMatch = statLine.match(/(\d+) insertions?\(\+\)/);
@@ -976,7 +1005,7 @@ export class GitStatusManager extends EventEmitter {
       // Get total number of commits in the branch
       let totalCommits = ahead;
       try {
-        const countStr = ctx.commandRunner.exec(`git rev-list --count ${comparisonBranch}..HEAD`, session.worktreePath, { silent: true }).trim();
+        const countStr = (await ctx.commandRunner.execAsync(`git rev-list --count ${comparisonBranch}..HEAD`, session.worktreePath, { silent: true })).stdout.trim();
         totalCommits = parseInt(countStr, 10) || ahead;
       } catch {
         // Keep default of ahead if command fails
@@ -1002,23 +1031,26 @@ export class GitStatusManager extends EventEmitter {
         totalCommits: totalCommits > 0 ? totalCommits : undefined
       };
       
+      if (abortController.signal.aborted) return null;
       this.gitLogger.logSessionSuccess(sessionId);
-      this.abortControllers.delete(sessionId);
       return result;
     } catch (error) {
-      this.abortControllers.delete(sessionId);
       
       // Check if this was a cancellation
-      if (error instanceof Error && error.name === 'AbortError') {
+      if (abortController.signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
         this.gitLogger.logSessionFetch(sessionId, true); // cancelled
         return null;
       }
       
-      this.gitLogger.logSessionError(sessionId, error as Error);
+      this.gitLogger.logSessionError(sessionId, error instanceof Error ? error : new Error(String(error)));
       return {
         state: 'unknown',
         lastChecked: new Date().toISOString()
       };
+    } finally {
+      if (this.abortControllers.get(sessionId) === abortController) {
+        this.abortControllers.delete(sessionId);
+      }
     }
   }
 
@@ -1116,7 +1148,7 @@ export class GitStatusManager extends EventEmitter {
     try {
       this.databaseService?.deleteSessionGitStatusCache(sessionId);
     } catch (error) {
-      this.logger?.error(`[GitStatus] Failed to delete persisted status cache for ${sessionId}:`, error as Error);
+      this.logger?.error(`[GitStatus] Failed to delete persisted status cache for ${sessionId}:`, error instanceof Error ? error : new Error(String(error)));
     }
 
     // L3: stop the file watcher for this session. No-op for
@@ -1134,7 +1166,7 @@ export class GitStatusManager extends EventEmitter {
     try {
       this.databaseService?.clearSessionGitStatusCache();
     } catch (error) {
-      this.logger?.error('[GitStatus] Failed to clear persisted status cache:', error as Error);
+      this.logger?.error('[GitStatus] Failed to clear persisted status cache:', error instanceof Error ? error : new Error(String(error)));
     }
   }
 
@@ -1209,7 +1241,7 @@ export class GitStatusManager extends EventEmitter {
         const nextOp = this.operationQueue.shift();
         if (nextOp) {
           nextOp().catch(error => {
-            this.logger?.error('[GitStatus] Queued operation failed:', error as Error);
+            this.logger?.error('[GitStatus] Queued operation failed:', error instanceof Error ? error : new Error(String(error)));
           });
         }
       }

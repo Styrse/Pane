@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CommandRunner } from '../../utils/commandRunner';
+
+function partialMock<Contract>(implementation: Partial<Contract>): Contract {
+  // SAFETY: Each test fixture implements every dependency member reached by
+  // its scenario; unexpected calls fail immediately.
+  return implementation as Contract;
+}
 import type { PathResolver } from '../../utils/pathResolver';
 import { resolveDefaultWorktreeBase, WorktreeManager } from '../worktreeManager';
 import { worktreePoolManager } from '../worktreePoolManager';
@@ -7,7 +13,7 @@ import { worktreePoolManager } from '../worktreePoolManager';
 function commandRunner(
   execAsync: (command: string, cwd: string) => Promise<{ stdout: string; stderr: string }>,
 ): CommandRunner {
-  return { execAsync: vi.fn(execAsync) } as CommandRunner;
+  return partialMock<CommandRunner>({ execAsync: vi.fn(execAsync) });
 }
 
 afterEach(() => {
@@ -64,6 +70,28 @@ describe('resolveDefaultWorktreeBase', () => {
   });
 });
 
+describe('WorktreeManager.listWorktrees', () => {
+  it('includes branch-backed and detached porcelain entries', async () => {
+    const runner = commandRunner(async () => ({
+      stdout: [
+        'worktree /repo',
+        'branch refs/heads/main',
+        '',
+        'worktree /repo/detached',
+        'HEAD abc123',
+        'detached',
+        '',
+      ].join('\n'),
+      stderr: '',
+    }));
+
+    await expect(new WorktreeManager().listWorktrees('/repo', runner)).resolves.toEqual([
+      { path: '/repo', branch: 'main' },
+      { path: '/repo/detached' },
+    ]);
+  });
+});
+
 describe('WorktreeManager.resolveWorkingDirectory', () => {
   it('creates fresh worktrees from remote bases without setting upstream tracking', async () => {
     const runner = commandRunner(async command => {
@@ -98,7 +126,7 @@ describe('WorktreeManager.resolveWorkingDirectory', () => {
       undefined,
       'origin/main',
       undefined,
-      { join: (...parts: string[]) => parts.join('/') } as PathResolver,
+      partialMock<PathResolver>({ join: (...parts: string[]) => parts.join('/') }),
       runner,
     );
 
@@ -136,7 +164,7 @@ describe('WorktreeManager.resolveWorkingDirectory', () => {
       '/repo',
       'origin/main',
       undefined,
-      { join: (...parts: string[]) => parts.join('/') } as PathResolver,
+      partialMock<PathResolver>({ join: (...parts: string[]) => parts.join('/') }),
       runner,
     );
 
@@ -175,7 +203,7 @@ describe('WorktreeManager.resolveWorkingDirectory', () => {
       undefined,
       true,
       undefined,
-      {} as PathResolver,
+      partialMock<PathResolver>({}),
       runner,
     );
 
@@ -220,7 +248,7 @@ describe('WorktreeManager.resolveWorkingDirectory', () => {
       undefined,
       true,
       undefined,
-      {} as PathResolver,
+      partialMock<PathResolver>({}),
       runner,
     );
 

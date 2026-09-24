@@ -1,13 +1,16 @@
 import { expect, test, type Page } from '@playwright/test';
+import type { JsonObject } from '../shared/validation/boundaryDecoder';
 import { installElectronApiMock } from './electronApiMock';
 
 type SettingsMock = {
-  getConfig: () => Record<string, unknown>;
-  getConfigUpdates: () => Array<Record<string, unknown>>;
+  getConfig: () => JsonObject;
+  getConfigUpdates: () => JsonObject[];
+  getListenerCount: (channel: string) => number;
   getPreferenceWrites: () => Array<{ key: string; value: string }>;
   failNextConfigUpdate: (error: string) => void;
   failNextPreferenceSet: (error: string) => void;
   setConfigGetFailures: (count: number) => void;
+  getBackgroundColorWrites: () => Array<{ theme: string; color: string }>;
 };
 
 async function bootSettings(page: Page, options: Parameters<typeof installElectronApiMock>[1] = {}) {
@@ -26,6 +29,148 @@ async function bootSettings(page: Page, options: Parameters<typeof installElectr
 }
 
 test.describe('Settings', () => {
+  test('pairs system palettes, preserves fixed selection, follows the OS, and rolls back failures', async ({ page }) => {
+    await page.emulateMedia({ colorScheme: 'light' });
+    await bootSettings(page);
+    await page.getByRole('button', { name: 'Appearance', exact: true }).click();
+    const mode = page.getByRole('radiogroup', { name: 'Appearance mode' });
+    await expect(mode.getByRole('radio', { name: 'System' })).toHaveAttribute('aria-checked', 'true');
+    await expect(page.getByRole('combobox', { name: 'Light palette' })).toHaveText('Light (rounded)');
+    await expect(page.getByRole('combobox', { name: 'Dark palette' })).toHaveText('Dark (sharp)');
+    await expect(page.getByText('Active now')).toBeVisible();
+
+    await page.getByRole('combobox', { name: 'Light palette' }).click();
+    await expect(page.getByRole('option', { name: /^Forge/ })).toHaveCount(0);
+    await page.getByRole('option', { name: /^Folio/ }).click();
+    await expect(page.locator('html')).toHaveClass(/folio/);
+    await page.getByRole('combobox', { name: 'Dark palette' }).click();
+    await expect(page.getByRole('option', { name: /^Folio/ })).toHaveCount(0);
+    await page.getByRole('option', { name: /^Forge/ }).click();
+    await expect(page.locator('html')).toHaveClass(/folio/);
+
+    await mode.getByRole('radio', { name: 'Fixed' }).click();
+    await expect(page.getByRole('combobox', { name: 'Theme' })).toHaveText('Light (rounded)');
+    await page.getByRole('combobox', { name: 'Theme' }).click();
+    await page.getByRole('option', { name: /^Night Owl(?! \(OLED\))/ }).click();
+    await expect(page.locator('html')).toHaveClass(/night-owl/);
+    await mode.getByRole('radio', { name: 'System' }).click();
+    await expect(page.locator('html')).toHaveClass(/folio/);
+    await page.emulateMedia({ colorScheme: 'dark' });
+    await expect(page.locator('html')).toHaveClass(/forge/);
+
+    await page.evaluate(() => {
+      // SAFETY: installElectronApiMock defines this test-only bridge before the page loads.
+      (window as typeof window & { __paneTestElectronMock: SettingsMock }).__paneTestElectronMock.failNextConfigUpdate('appearance save rejected');
+    });
+    await page.getByRole('combobox', { name: 'Dark palette' }).click();
+    await page.getByRole('option', { name: /^Abyss/ }).click();
+    await expect(page.getByRole('alert')).toContainText('appearance save rejected');
+    await expect(page.locator('html')).toHaveClass(/forge/);
+    await expect.poll(() => page.evaluate(() => {
+      // SAFETY: installElectronApiMock defines this test-only bridge before the page loads.
+      return (window as typeof window & { __paneTestElectronMock: SettingsMock }).__paneTestElectronMock.getBackgroundColorWrites().at(-1)?.theme;
+    })).toBe('forge');
+    const config = await page.evaluate(() => {
+      // SAFETY: installElectronApiMock defines this test-only bridge before the page loads.
+      return (window as typeof window & { __paneTestElectronMock: SettingsMock }).__paneTestElectronMock.getConfig();
+    });
+    expect(config).toMatchObject({ theme: 'night-owl', systemLightTheme: 'folio', systemDarkTheme: 'forge' });
+  });
+
+  test('terminal font updates the live xterm only', async ({ page }) => {
+    const now = new Date(0).toISOString();
+    const project = {
+      id: 913,
+      name: 'Terminal font fixture',
+      path: '/tmp/terminal-font-fixture',
+      active: true,
+      created_at: now,
+      updated_at: now,
+    };
+    const session = {
+      id: 'terminal-font-session',
+      name: 'Live terminal font',
+      worktreePath: project.path,
+      prompt: '',
+      status: 'stopped',
+      createdAt: now,
+      lastActivity: now,
+      output: [],
+      jsonMessages: [],
+      isRunning: false,
+      permissionMode: 'ignore',
+      projectId: project.id,
+      displayOrder: 0,
+      isFavorite: false,
+      toolType: 'none',
+      archived: false,
+      gitStatus: { state: 'clean', ahead: 0, behind: 0, hasUncommittedChanges: false, hasUntrackedFiles: false, filesChanged: 0 },
+    };
+    const dockPanel = {
+      id: 'terminal-font-dock',
+      sessionId: session.id,
+      type: 'terminal',
+      title: 'Terminal',
+      state: { isActive: false, hasBeenViewed: true, customState: { isInitialized: false } },
+      metadata: { createdAt: now, lastActiveAt: now, position: 0, permanent: true },
+    };
+    const panel = {
+      id: 'terminal-font-panel',
+      sessionId: session.id,
+      type: 'terminal',
+      title: 'Shell',
+      state: { isActive: true, hasBeenViewed: true, customState: { isInitialized: true } },
+      metadata: { createdAt: now, lastActiveAt: now, position: 1, permanent: false },
+    };
+
+    await installElectronApiMock(page, {
+      platform: 'darwin',
+      initialProjects: [project],
+      initialSessions: [session],
+      initialPanels: [dockPanel, panel],
+      initialTerminalStates: { [panel.id]: { scrollbackBuffer: 'ready\r\n' } },
+      activeProjectId: project.id,
+    });
+    await page.goto('/', { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    await page.getByRole('button', { name: /^Expand repository Terminal font fixture$/ }).click();
+    await page.getByRole('button', { name: session.name, exact: true }).click();
+    await expect(page.locator('.xterm-screen')).toHaveCount(1, { timeout: 15_000 });
+
+    const host = page.locator('[data-terminal-font]').first();
+    await expect(host).toHaveAttribute('data-terminal-font', '"Geist Mono", "Symbols Nerd Font Mono", monospace');
+    await expect.poll(() => page.evaluate(() => {
+      // SAFETY: installElectronApiMock defines this test-only bridge before the page loads.
+      const mock = (window as typeof window & { __paneTestElectronMock: SettingsMock }).__paneTestElectronMock;
+      return mock.getListenerCount('config:terminal-font-updated');
+    })).toBeGreaterThan(0);
+    const bodyFont = await page.locator('body').evaluate((element) => getComputedStyle(element).fontFamily);
+    await page.getByRole('button', { name: 'Settings', exact: true }).first().click();
+    await page.getByRole('button', { name: 'Terminal', exact: true }).click();
+    const fontInput = page.getByRole('textbox', { name: 'Custom terminal font family' });
+    await fontInput.fill('Menlo');
+    await fontInput.blur();
+
+    await expect.poll(() => host.getAttribute('data-terminal-font')).toBe('"Menlo", "Symbols Nerd Font Mono", monospace');
+    await expect(page.locator('body')).toHaveCSS('font-family', bodyFont);
+    // SAFETY: installElectronApiMock defines this test-only bridge before the page loads.
+    const updates = await page.evaluate(() => (
+      window as typeof window & { __paneTestElectronMock: SettingsMock }
+    ).__paneTestElectronMock.getConfigUpdates());
+    expect(updates.at(-1)).toEqual({ terminalFontFamily: 'Menlo' });
+  });
+
+  test('hides unsupported Cursor as a default Pane Chat agent on Windows', async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, 'platform', { configurable: true, get: () => 'Win32' });
+    });
+    await bootSettings(page, { platform: 'win32' });
+
+    await page.getByRole('button', { name: 'AI & Agents', exact: true }).click();
+    const agentChoices = page.getByRole('radiogroup', { name: 'Default Pane Chat agent' });
+    await expect(agentChoices.getByRole('radio')).toHaveCount(2);
+    await expect(agentChoices.getByRole('radio', { name: 'Cursor' })).toHaveCount(0);
+  });
+
   test('mounts every category from the settings catalog', async ({ page }) => {
     await bootSettings(page);
     const categories = [
@@ -102,6 +247,7 @@ test.describe('Settings', () => {
     await toggle.click();
     await expect(page.getByText('Saved', { exact: true })).toBeVisible();
 
+    // SAFETY: installElectronApiMock defines this test-only bridge before the page loads.
     const updates = await page.evaluate(() => (
       window as typeof window & { __paneTestElectronMock: SettingsMock }
     ).__paneTestElectronMock.getConfigUpdates());
@@ -119,6 +265,7 @@ test.describe('Settings', () => {
     await expect(paletteToggle).toHaveAttribute('aria-checked', 'true');
     await paletteToggle.click();
 
+    // SAFETY: installElectronApiMock defines this test-only bridge before the page loads.
     const updates = await page.evaluate(() => (
       window as typeof window & { __paneTestElectronMock: SettingsMock }
     ).__paneTestElectronMock.getConfigUpdates());
@@ -157,6 +304,7 @@ test.describe('Settings', () => {
     await expect(page.getByRole('radio', { name: 'Two rows' })).toHaveAttribute('aria-checked', 'true');
 
     const writes = await page.evaluate(() => {
+      // SAFETY: installElectronApiMock defines this test-only bridge before the page loads.
       const mock = (window as typeof window & { __paneTestElectronMock: SettingsMock }).__paneTestElectronMock;
       return { config: mock.getConfigUpdates(), preferences: mock.getPreferenceWrites() };
     });
@@ -170,6 +318,7 @@ test.describe('Settings', () => {
     await page.getByRole('switch', { name: 'Keep computer awake while sessions are active' }).click();
     await expect(page.getByText('Saved', { exact: true })).toBeVisible();
 
+    // SAFETY: installElectronApiMock defines this test-only bridge before the page loads.
     const updates = await page.evaluate(() => (
       window as typeof window & { __paneTestElectronMock: SettingsMock }
     ).__paneTestElectronMock.getConfigUpdates());
@@ -179,6 +328,7 @@ test.describe('Settings', () => {
   test('announces a failed save and restores the authoritative value', async ({ page }) => {
     await bootSettings(page, { initialConfig: { autoCheckUpdates: true } });
     await page.evaluate(() => {
+      // SAFETY: installElectronApiMock defines this test-only bridge before the page loads.
       const mock = (window as typeof window & { __paneTestElectronMock: SettingsMock }).__paneTestElectronMock;
       mock.failNextConfigUpdate('Disk is read-only');
     });
@@ -188,6 +338,7 @@ test.describe('Settings', () => {
 
     await expect(page.getByRole('alert')).toContainText('Disk is read-only');
     await expect(toggle).toHaveAttribute('aria-checked', 'true');
+    // SAFETY: installElectronApiMock defines this test-only bridge before the page loads.
     const config = await page.evaluate(() => (
       window as typeof window & { __paneTestElectronMock: SettingsMock }
     ).__paneTestElectronMock.getConfig());
@@ -198,6 +349,7 @@ test.describe('Settings', () => {
     await bootSettings(page, { configGetFailures: 100 });
     await expect(page.getByRole('alert')).toContainText('Mock config read failed');
     await page.evaluate(() => {
+      // SAFETY: installElectronApiMock defines this test-only bridge before the page loads.
       const mock = (window as typeof window & { __paneTestElectronMock: SettingsMock }).__paneTestElectronMock;
       mock.setConfigGetFailures(0);
     });
@@ -206,6 +358,7 @@ test.describe('Settings', () => {
 
     await page.getByRole('button', { name: 'Appearance', exact: true }).click();
     await page.evaluate(() => {
+      // SAFETY: installElectronApiMock defines this test-only bridge before the page loads.
       const mock = (window as typeof window & { __paneTestElectronMock: SettingsMock }).__paneTestElectronMock;
       mock.failNextPreferenceSet('Preference database is read-only');
     });
@@ -223,6 +376,7 @@ test.describe('Settings', () => {
     await expect(page.getByText('Saved', { exact: true })).toBeVisible();
     await expect(page.getByRole('dialog', { name: 'Pane Settings' })).toBeVisible();
 
+    // SAFETY: installElectronApiMock defines this test-only bridge before the page loads.
     const updates = await page.evaluate(() => (
       window as typeof window & { __paneTestElectronMock: SettingsMock }
     ).__paneTestElectronMock.getConfigUpdates());
@@ -297,6 +451,21 @@ test.describe('Settings', () => {
     await page.screenshot({ path: 'test-results/settings-narrow.png' });
   });
 
+  test('centers the dialog in the window', async ({ page }) => {
+    for (const viewport of [{ width: 1280, height: 720 }, { width: 640, height: 760 }]) {
+      await page.setViewportSize(viewport);
+      await bootSettings(page);
+
+      const panel = page.getByRole('dialog', { name: 'Pane Settings' }).locator(':scope > div').first();
+      const box = await panel.boundingBox();
+      if (!box) throw new Error('Settings dialog has no bounding box');
+      expect(box.x).toBeCloseTo((viewport.width - box.width) / 2, 0);
+      expect(box.y).toBeCloseTo((viewport.height - box.height) / 2, 0);
+
+      await page.getByRole('button', { name: 'Close modal' }).click();
+    }
+  });
+
   test('shows Windows shell controls only when the platform supports them', async ({ page }) => {
     await bootSettings(page, {
       platform: 'win32',
@@ -319,10 +488,11 @@ test.describe('Settings', () => {
   });
 
   test('renders a dark theme without changing the settings layout', async ({ page }) => {
-    await bootSettings(page, { initialConfig: { theme: 'light-rounded' } });
+    await bootSettings(page, { initialConfig: { theme: 'light-rounded', appearanceMode: 'fixed' } });
     await page.getByRole('button', { name: 'Appearance', exact: true }).click();
     await page.getByRole('combobox', { name: 'Theme' }).click();
-    await page.getByRole('option', { name: 'Night Owl', exact: true }).click();
+    // Options carry their picker description in the accessible name; match the label prefix (not the OLED variant).
+    await page.getByRole('option', { name: /^Night Owl(?! \(OLED\))/ }).click();
     await expect(page.locator('html')).toHaveClass(/night-owl/);
     await expect(page.getByRole('dialog', { name: 'Pane Settings' })).toBeVisible();
     await page.screenshot({ path: 'test-results/settings-dark.png' });

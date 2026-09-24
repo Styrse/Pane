@@ -1,6 +1,7 @@
 import Bull from 'bull';
-import { getRuntimeConfigManager } from '../core/runtime';
+import { getPaneEventSink, getRuntimeConfigManager } from '../core/runtime';
 import { SimpleQueue } from './simpleTaskQueue';
+import type { Session } from '../types/session';
 import { SessionManager } from './sessionManager';
 import type { WorktreeManager } from './worktreeManager';
 import { WorktreeNameGenerator } from './worktreeNameGenerator';
@@ -12,12 +13,13 @@ import * as os from 'os';
 import * as fs from 'fs';
 import { panelManager } from './panelManager';
 import { PathResolver } from '../utils/pathResolver';
-import type { DatabaseService } from '../database/database';
 import type { Project } from '../database/models';
 import { worktreeFileSyncService, type WorktreeFileSyncFailure } from './worktreeFileSyncService';
 import { terminalPanelManager } from './terminalPanelManager';
 import { detectProjectConfig } from './projectConfigDetector';
 import { emitFolderCreatedEvent } from './folderEvents';
+import { boundary, decodeBoundary } from '../../../shared/validation/boundaryDecoder';
+import { withLock } from '../utils/mutex';
 
 interface TaskQueueOptions {
   sessionManager: SessionManager;
@@ -41,6 +43,27 @@ interface CreateSessionJob {
   toolType?: 'claude' | 'none';
   startPinned?: boolean;
   activateOnCreate?: boolean;
+}
+
+interface SessionCreationJob {
+  id: string | number;
+  data: CreateSessionJob;
+  status?: string;
+  result?: CreateSessionQueueResult;
+  error?: Error;
+  finished?: () => Promise<CreateSessionQueueResult>;
+}
+
+interface SessionCreationQueue {
+  add(data: CreateSessionJob): Promise<SessionCreationJob>;
+  process(concurrency: number, processor: (job: SessionCreationJob) => Promise<CreateSessionQueueResult>): void;
+  on(event: 'active' | 'waiting', listener: (job: SessionCreationJob) => void): this;
+  on(event: 'completed', listener: (job: SessionCreationJob, result: CreateSessionQueueResult) => void): this;
+  on(event: 'failed', listener: (job: SessionCreationJob, error: Error) => void): this;
+  on(event: 'error', listener: (error: Error) => void): this;
+  removeListener(event: 'completed', listener: (job: SessionCreationJob, result: CreateSessionQueueResult) => void): this;
+  removeListener(event: 'failed', listener: (job: SessionCreationJob, error: Error) => void): this;
+  close(): Promise<void>;
 }
 
 interface ContinueSessionJob {
@@ -73,7 +96,7 @@ export interface CreateSessionQueueResult {
 }
 
 export class TaskQueue {
-  private sessionQueue: Bull.Queue<CreateSessionJob> | SimpleQueue<CreateSessionJob>;
+  private sessionQueue: SessionCreationQueue;
   private inputQueue: Bull.Queue<SendInputJob> | SimpleQueue<SendInputJob>;
   private continueQueue: Bull.Queue<ContinueSessionJob> | SimpleQueue<ContinueSessionJob>;
   private useSimpleQueue: boolean;
@@ -95,7 +118,7 @@ export class TaskQueue {
     if (this.useSimpleQueue) {
       console.log('[TaskQueue] Using SimpleQueue for local in-process queue');
       
-      this.sessionQueue = new SimpleQueue<CreateSessionJob>('session-creation', sessionConcurrency);
+      this.sessionQueue = new SimpleQueue<CreateSessionJob, CreateSessionQueueResult>('session-creation', sessionConcurrency);
       this.inputQueue = new SimpleQueue<SendInputJob>('session-input', 10);
       this.continueQueue = new SimpleQueue<ContinueSessionJob>('session-continue', 10);
     } else {
@@ -129,25 +152,19 @@ export class TaskQueue {
     }
     
     // Add event handlers for debugging
-    this.sessionQueue.on('active', (...args: unknown[]) => {
-      const job = args[0] as { id: string | number };
+    this.sessionQueue.on('active', (_job: { id: string | number }) => {
       // Job active tracking removed - verbose debug logging
     });
     
-    this.sessionQueue.on('completed', (...args: unknown[]) => {
-      const job = args[0] as { id: string | number };
-      const result = args[1];
+    this.sessionQueue.on('completed', (_job: SessionCreationJob, _result: CreateSessionQueueResult) => {
       // Job completion tracking removed - verbose debug logging
     });
     
-    this.sessionQueue.on('failed', (...args: unknown[]) => {
-      const job = args[0] as { id: string | number };
-      const err = args[1] as Error;
+    this.sessionQueue.on('failed', (job: { id: string | number }, err: Error) => {
       console.error(`[TaskQueue] Job ${job.id} failed:`, err);
     });
     
-    this.sessionQueue.on('error', (...args: unknown[]) => {
-      const error = args[0] as Error;
+    this.sessionQueue.on('error', (error: Error) => {
       console.error('[TaskQueue] Queue error:', error);
     });
 
@@ -165,7 +182,8 @@ export class TaskQueue {
       const { prompt, worktreeTemplate, index, permissionMode, projectId, baseBranch, toolType, startPinned } = job.data;
       const { sessionManager, worktreeManager, claudeCodeManager } = this.options;
 
-      // Processing session creation job - verbose debug logging removed
+      let createdSession: Session | undefined;
+      let sessionCreatedEmitted = false;
 
       try {
         let targetProject;
@@ -217,42 +235,45 @@ export class TaskQueue {
           }
         }
         
-        // Ensure uniqueness for both names
-        const { sessionName: uniqueSessionName, worktreeName: uniqueWorktreeName } =
-          await this.ensureUniqueNames(sessionName, worktreeName, targetProject, index);
-        sessionName = uniqueSessionName;
-        worktreeName = uniqueWorktreeName;
-
         // Get CommandRunner for this project
         const ctx = sessionManager.getProjectContextByProjectId(targetProject.id);
         if (!ctx) {
           throw new Error(`Failed to get project context for project ${targetProject.id}`);
         }
 
-        // Resolve working directory — worktree or project directory
-        const { worktreePath, baseCommit, baseBranch: actualBaseBranch } = await worktreeManager.resolveWorkingDirectory(
-          targetProject.path, worktreeName, baseBranch, !job.data.isMainRepo, targetProject.worktree_folder || undefined, ctx.pathResolver, ctx.commandRunner
-        );
+        // Reserve names through persistence, including concurrent creates on macOS/Windows.
+        const { session, worktreePath } = await withLock(`session-create-${targetProject.path}`, async () => {
+          const names = await this.ensureUniqueNames(sessionName, worktreeName, targetProject, index, !job.data.isMainRepo);
+          sessionName = names.sessionName;
+          worktreeName = names.worktreeName;
 
-        // For non-worktree sessions, clear worktree_name so archival cleanup
-        // (which checks `worktree_name && !is_main_repo`) won't attempt to
-        // remove a worktree that could belong to another session.
-        const effectiveWorktreeName = job.data.isMainRepo ? '' : worktreeName;
+          // Resolve working directory — worktree or project directory
+          const { worktreePath, baseCommit, baseBranch: actualBaseBranch } = await worktreeManager.resolveWorkingDirectory(
+            targetProject.path, worktreeName, baseBranch, !job.data.isMainRepo, targetProject.worktree_folder || undefined, ctx.pathResolver, ctx.commandRunner
+          );
 
-        const session = await sessionManager.createSession(
-          sessionName,
-          worktreePath,
-          prompt,
-          effectiveWorktreeName,
-          permissionMode,
-          targetProject.id,
-          false, // is_main_repo stays false — reserved for internal singleton.
-          job.data.folderId,
-          toolType,
-          baseCommit,
-          actualBaseBranch,
-          startPinned
-        );
+          // For non-worktree sessions, clear worktree_name so archival cleanup
+          // (which checks `worktree_name && !is_main_repo`) won't attempt to
+          // remove a worktree that could belong to another session.
+          const effectiveWorktreeName = job.data.isMainRepo ? '' : worktreeName;
+
+          const session = await sessionManager.createSession(
+            sessionName,
+            worktreePath,
+            prompt,
+            effectiveWorktreeName,
+            permissionMode,
+            targetProject.id,
+            false, // is_main_repo stays false — reserved for internal singleton.
+            job.data.folderId,
+            toolType,
+            baseCommit,
+            actualBaseBranch,
+            startPinned
+          );
+          createdSession = session;
+          return { session, worktreePath };
+        }, Infinity); // Checkout operations have their own timeouts; reservations wait for their turn.
 
         // Only add prompt-related data if there's actually a prompt
         if (prompt && prompt.trim().length > 0) {
@@ -271,14 +292,13 @@ export class TaskQueue {
             data: initialPromptDisplay,
             timestamp: new Date()
           });
-        } else {
         }
         
         // Ensure default panels exist for this session (run in parallel)
+        // Browser is on demand from the "+" menu, not a default tab.
         await Promise.all([
           panelManager.ensureExplorerPanel(session.id),
           panelManager.ensureDiffPanel(session.id),
-          panelManager.ensureBrowserPanel(session.id),
         ]);
 
         // Each createPanel marks the new panel active, so the parallel ensures
@@ -295,6 +315,8 @@ export class TaskQueue {
         sessionManager.emitSessionCreated(session, {
           activateOnCreate: job.data.activateOnCreate !== false,
         });
+
+        sessionCreatedEmitted = true;
 
         // Worktree file sync — copy gitignored files in background, then run install
         // Fire-and-forget: copies first, then writes install command to the terminal
@@ -469,7 +491,28 @@ export class TaskQueue {
 
         return { sessionId: session.id };
       } catch (error) {
-        console.error(`[TaskQueue] Failed to create session:`, error);
+        const message = error instanceof Error ? error.message : String(error);
+        if (createdSession) {
+          console.error(`[TaskQueue] Failed to initialize session ${createdSession.id}:`, error);
+          const failedSession = {
+            ...createdSession, status: 'error' as const, error: message,
+            statusMessage: `Failed to initialize pane: ${message}`,
+          };
+          await sessionManager.updateSession(createdSession.id, {
+            status: failedSession.status, error: message, statusMessage: failedSession.statusMessage,
+          });
+          if (!sessionCreatedEmitted) {
+            sessionManager.emitSessionCreated(failedSession, {
+              activateOnCreate: job.data.activateOnCreate !== false,
+              createDefaultTerminalOnCreate: false,
+            });
+          }
+        } else {
+          console.error(`[TaskQueue] Failed to create session:`, error);
+          getPaneEventSink().send('session:creation-failed', {
+            name: worktreeTemplate || 'New pane', error: message,
+          });
+        }
         throw error;
       }
     });
@@ -499,7 +542,7 @@ export class TaskQueue {
     });
   }
 
-  async createSession(data: CreateSessionJob): Promise<Bull.Job<CreateSessionJob> | { id: string; data: CreateSessionJob; status: string }> {
+  async createSession(data: CreateSessionJob): Promise<SessionCreationJob> {
     const job = await this.sessionQueue.add(data);
     return job;
   }
@@ -513,19 +556,18 @@ export class TaskQueue {
   }
 
   private async waitForSessionCreationJob(
-    job: Bull.Job<CreateSessionJob> | { id: string; data: CreateSessionJob; status: string; result?: unknown; error?: Error },
+    job: SessionCreationJob,
     timeoutMs: number,
   ): Promise<CreateSessionQueueResult> {
-    const bullJob = job as Bull.Job<CreateSessionJob> & { finished?: () => Promise<unknown> };
-    if (typeof bullJob.finished === 'function') {
+    if (job.finished) {
       return this.withSessionCreationTimeout(
-        bullJob.finished().then(result => this.parseSessionCreationResult(result, job.id)),
+        job.finished().then(result => this.parseSessionCreationResult(result, job.id)),
         timeoutMs,
         job.id,
       );
     }
 
-    const simpleJob = job as { id: string; status: string; result?: unknown; error?: Error };
+    const simpleJob = job;
     if (simpleJob.status === 'completed') {
       return this.parseSessionCreationResult(simpleJob.result, simpleJob.id);
     }
@@ -535,7 +577,7 @@ export class TaskQueue {
 
     let cleanup: () => void = () => {};
     return this.withSessionCreationTimeout(new Promise<CreateSessionQueueResult>((resolve, reject) => {
-      const handleCompleted = (completedJob: unknown, result: unknown) => {
+      const handleCompleted = (completedJob: SessionCreationJob, result: CreateSessionQueueResult) => {
         const completedJobId = this.getQueueJobId(completedJob);
         if (completedJobId !== String(simpleJob.id)) {
           return;
@@ -548,7 +590,7 @@ export class TaskQueue {
         }
       };
 
-      const handleFailed = (failedJob: unknown, error: unknown) => {
+      const handleFailed = (failedJob: { id: string | number }, error: Error) => {
         const failedJobId = this.getQueueJobId(failedJob);
         if (failedJobId !== String(simpleJob.id)) {
           return;
@@ -567,16 +609,12 @@ export class TaskQueue {
     }), timeoutMs, simpleJob.id, cleanup);
   }
 
-  private parseSessionCreationResult(result: unknown, jobId: string | number): CreateSessionQueueResult {
-    if (
-      typeof result === 'object' &&
-      result !== null &&
-      typeof (result as { sessionId?: unknown }).sessionId === 'string'
-    ) {
-      return { sessionId: (result as { sessionId: string }).sessionId };
+  private parseSessionCreationResult(result: CreateSessionQueueResult | undefined, jobId: string | number): CreateSessionQueueResult {
+    try {
+      return decodeBoundary(result, boundary.object({ sessionId: boundary.string }));
+    } catch {
+      throw new Error(`Session creation job ${jobId} completed without a sessionId`);
     }
-
-    throw new Error(`Session creation job ${jobId} completed without a sessionId`);
   }
 
   private withSessionCreationTimeout<T>(
@@ -600,13 +638,8 @@ export class TaskQueue {
     });
   }
 
-  private getQueueJobId(job: unknown): string | null {
-    if (typeof job !== 'object' || job === null) {
-      return null;
-    }
-
-    const id = (job as { id?: unknown }).id;
-    return typeof id === 'string' || typeof id === 'number' ? String(id) : null;
+  private getQueueJobId(job: { id: string | number }): string {
+    return String(job.id);
   }
 
   async createMultipleSessions(
@@ -620,7 +653,7 @@ export class TaskQueue {
     providedFolderId?: string,
     isMainRepo?: boolean,
     startPinned?: boolean
-  ): Promise<(Bull.Job<CreateSessionJob> | { id: string; data: CreateSessionJob; status: string })[]> {
+  ): Promise<SessionCreationJob[]> {
     let folderId: string | undefined = providedFolderId;
     let generatedBaseName: string | undefined;
     
@@ -638,11 +671,11 @@ export class TaskQueue {
     if (!providedFolderId && count > 1 && projectId) {
       try {
         const { sessionManager } = this.options;
-        const db = sessionManager.db as DatabaseService;
+        const db = sessionManager.db;
         const folderName = worktreeTemplate || generatedBaseName || 'Multi-session prompt';
         
         // Ensure projectId is a number
-        const numericProjectId = typeof projectId === 'string' ? parseInt(projectId, 10) : projectId;
+        const numericProjectId = projectId;
         if (isNaN(numericProjectId)) {
           throw new Error(`Invalid project ID: ${projectId}`);
         }
@@ -712,8 +745,8 @@ export class TaskQueue {
     return uniqueName;
   }
 
-  private async ensureUniqueNames(baseSessionName: string, baseWorktreeName: string, project: Project, index?: number): Promise<{ sessionName: string; worktreeName: string }> {
-    const { sessionManager, worktreeManager } = this.options;
+  private async ensureUniqueNames(baseSessionName: string, baseWorktreeName: string, project: Project, index?: number, useWorktree = true): Promise<{ sessionName: string; worktreeName: string }> {
+    const { sessionManager } = this.options;
     const db = sessionManager.db;
     
     let candidateSessionName = baseSessionName;
@@ -725,48 +758,39 @@ export class TaskQueue {
       candidateWorktreeName = `${baseWorktreeName}-${index + 1}`;
     }
     
-    // Check for existing sessions with these names (including archived)
+    // Display names only belong to active panes in this repository. Archived
+    // worktree identities stay reserved so restoring a pane cannot share its files.
     let counter = 1;
     let uniqueSessionName = candidateSessionName;
     let uniqueWorktreeName = candidateWorktreeName;
-    
-    while (true) {
-      // Check session name and worktree name separately using public methods
-      // This is important because different session names could map to the same worktree name
-      // e.g., "Fix Auth Bug" and "Fix-Auth-Bug" both become "fix-auth-bug"
-      const sessionNameExists = db.checkSessionNameExists(uniqueSessionName);
-      const worktreeNameExists = db.checkSessionNameExists(uniqueWorktreeName);
-      
-      // Check if worktree directory exists on filesystem
-      // This handles cases where a worktree was created outside of Pane
-      let worktreePathExists = false;
-      try {
-        if (project) {
-          const resolver = new PathResolver(project);
-          const worktreeFolder = project.worktree_folder || 'worktrees';
-          const worktreePath = resolver.join(project.path, worktreeFolder, uniqueWorktreeName);
-          worktreePathExists = fs.existsSync(resolver.toFileSystem(worktreePath));
-        }
-      } catch (e) {
-        // Ignore filesystem check errors
-      }
-      
-      // All must be unique (session name, worktree name in DB, and no filesystem conflict)
-      if (!sessionNameExists && !worktreeNameExists && !worktreePathExists) {
-        break;
-      }
-      
-      // If any is taken, increment both to keep them in sync
-      if (index !== undefined) {
-        uniqueSessionName = `${baseSessionName} ${index + 1} ${counter}`;
-        uniqueWorktreeName = `${baseWorktreeName}-${index + 1}-${counter}`;
-      } else {
-        uniqueSessionName = `${baseSessionName} ${counter}`;
-        uniqueWorktreeName = `${baseWorktreeName}-${counter}`;
-      }
-      counter++;
+
+    while (db.checkActiveSessionNameExists(uniqueSessionName, project.id)) {
+      uniqueSessionName = `${candidateSessionName} ${counter++}`;
     }
-    
+    if (!useWorktree) return { sessionName: uniqueSessionName, worktreeName: '' };
+
+    const ctx = sessionManager.getProjectContextByProjectId(project.id);
+    if (!ctx) throw new Error(`Failed to get project context for project ${project.id}`);
+    let branches: string[] = [];
+    try {
+      const result = await ctx.commandRunner.execFile('git', ['for-each-ref', '--format=%(refname)', 'refs/heads/'], project.path);
+      branches = result.stdout.trim().split('\n').map(branch => branch.trim().slice('refs/heads/'.length).toLowerCase());
+    } catch (error) {
+      // WorktreeManager initializes folders that are not Git repositories yet.
+      if (!(error instanceof Error) || !error.message.includes('not a git repository')) throw error;
+    }
+    const resolver = new PathResolver(project);
+    counter = 1;
+    while (
+      db.checkSessionNameExists(uniqueWorktreeName) ||
+      branches.some(branch => branch === uniqueWorktreeName || branch.startsWith(`${uniqueWorktreeName}/`)) ||
+      fs.existsSync(resolver.toFileSystem(this.options.worktreeManager.getWorktreePath(
+        project.path, uniqueWorktreeName, project.worktree_folder || undefined, resolver,
+      )))
+    ) {
+      uniqueWorktreeName = `${candidateWorktreeName}-${counter++}`;
+    }
+
     return { sessionName: uniqueSessionName, worktreeName: uniqueWorktreeName };
   }
 

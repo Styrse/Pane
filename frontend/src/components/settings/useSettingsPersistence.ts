@@ -13,19 +13,19 @@ import { useConfigStore } from '../../stores/configStore';
 
 type PreferenceName = keyof SettingsPreferenceValues;
 
-const PREFERENCE_KEY_BY_NAME: Record<PreferenceName, string> = {
+const PREFERENCE_KEY_BY_NAME = {
   autoRenameSessionsToPr: SETTINGS_PREFERENCE_KEYS.autoRenameSessionsToPr,
   sidebarPaneRowLayout: SETTINGS_PREFERENCE_KEYS.sidebarPaneRowLayout,
   atTerminalPasteMode: SETTINGS_PREFERENCE_KEYS.atTerminalPasteMode,
   atTerminalLineCount: SETTINGS_PREFERENCE_KEYS.atTerminalLineCount,
-};
+} satisfies Record<PreferenceName, string>;
 
-const PREFERENCE_SETTING_ID: Record<PreferenceName, SettingsSettingId> = {
+const PREFERENCE_SETTING_ID = {
   autoRenameSessionsToPr: 'auto-rename-pr',
   sidebarPaneRowLayout: 'sidebar-pane-rows',
   atTerminalPasteMode: 'terminal-reference-paste-mode',
   atTerminalLineCount: 'terminal-reference-line-count',
-};
+} satisfies Record<PreferenceName, SettingsSettingId>;
 
 export function useSettingsPersistence(isOpen: boolean) {
   const { config, isLoading, error: configError, fetchConfig, updateConfig } = useConfigStore();
@@ -50,6 +50,7 @@ export function useSettingsPersistence(isOpen: boolean) {
   const loadPreferences = useCallback(async () => {
     setPreferencesLoading(true);
     try {
+      // SAFETY: The named IPC/API channel contract establishes this response payload type.
       const response = await window.electron?.invoke('preferences:get-all') as {
         success?: boolean;
         data?: Record<string, string>;
@@ -97,6 +98,24 @@ export function useSettingsPersistence(isOpen: boolean) {
     }
   }, [fetchConfig, setSaveState, updateConfig]);
 
+  const runSave = useCallback(async (
+    settingId: SettingsSettingId,
+    work: () => Promise<void>,
+  ): Promise<boolean> => {
+    setSaveState(settingId, { state: 'saving' });
+    try {
+      await work();
+      setSaveState(settingId, { state: 'saved' });
+      return true;
+    } catch (error) {
+      setSaveState(settingId, {
+        state: 'error',
+        message: error instanceof Error ? error.message : 'Failed to save setting',
+      });
+      return false;
+    }
+  }, [setSaveState]);
+
   const savePreference = useCallback(async <K extends PreferenceName>(
     name: K,
     value: SettingsPreferenceValues[K],
@@ -104,6 +123,7 @@ export function useSettingsPersistence(isOpen: boolean) {
     const settingId = PREFERENCE_SETTING_ID[name];
     setSaveState(settingId, { state: 'saving' });
     try {
+      // SAFETY: The named IPC/API channel contract establishes this response payload type.
       const response = await window.electron?.invoke(
         'preferences:set',
         PREFERENCE_KEY_BY_NAME[name],
@@ -132,6 +152,7 @@ export function useSettingsPersistence(isOpen: boolean) {
     configError,
     fetchConfig,
     saveConfig,
+    runSave,
     saveStates,
     reportSaveError: (settingId: SettingsSettingId, message: string) => setSaveState(settingId, { state: 'error', message }),
     preferences,

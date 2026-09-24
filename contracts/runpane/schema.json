@@ -94,7 +94,8 @@
         "format",
         "dryRun",
         "yes",
-        "verbose"
+        "verbose",
+        "watch"
       ],
       "properties": {
         "target": {
@@ -117,6 +118,53 @@
         },
         "verbose": {
           "type": "boolean"
+        },
+        "watch": {
+          "type": "object",
+          "required": [
+            "format",
+            "heartbeatSeconds",
+            "idleAfterMs",
+            "settleMs",
+            "blockedSettleMs",
+            "minIntervalMs",
+            "idleBackoff",
+            "agentsOnly",
+            "includeHeldInputPresence"
+          ],
+          "properties": {
+            "format": {
+              "enum": [
+                "lines",
+                "json"
+              ]
+            },
+            "heartbeatSeconds": {
+              "type": "number"
+            },
+            "idleAfterMs": {
+              "type": "number"
+            },
+            "settleMs": {
+              "type": "number"
+            },
+            "blockedSettleMs": {
+              "type": "number"
+            },
+            "minIntervalMs": {
+              "type": "number"
+            },
+            "idleBackoff": {
+              "type": "boolean"
+            },
+            "agentsOnly": {
+              "type": "boolean"
+            },
+            "includeHeldInputPresence": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false
@@ -343,15 +391,23 @@
         "update",
         "version",
         "doctor",
+        "daemon repair",
         "agents doctor",
         "repos list",
         "repos add",
         "panes",
         "panes list",
+        "panes cost",
+        "workspace",
+        "workspace state",
+        "watch",
         "panes create",
+        "panes adopt",
         "panes archive",
         "panes pin",
         "panes unpin",
+        "panes rename",
+        "panes focus",
         "panels",
         "panels create",
         "panels list",
@@ -361,7 +417,16 @@
         "panels submit",
         "panels submit-composer",
         "panels wait",
-        "agent-context"
+        "agent-context",
+        "sessions",
+        "sessions list",
+        "sessions create",
+        "sessions get",
+        "sessions update",
+        "sessions set-agent",
+        "sessions associate",
+        "sessions detach",
+        "sessions overview"
       ],
       "properties": {
         "default": {
@@ -382,6 +447,9 @@
         "doctor": {
           "$ref": "#/$defs/helpLines"
         },
+        "daemon repair": {
+          "$ref": "#/$defs/helpLines"
+        },
         "agents doctor": {
           "$ref": "#/$defs/helpLines"
         },
@@ -397,7 +465,22 @@
         "panes list": {
           "$ref": "#/$defs/helpLines"
         },
+        "panes cost": {
+          "$ref": "#/$defs/helpLines"
+        },
+        "workspace": {
+          "$ref": "#/$defs/helpLines"
+        },
+        "workspace state": {
+          "$ref": "#/$defs/helpLines"
+        },
+        "watch": {
+          "$ref": "#/$defs/helpLines"
+        },
         "panes create": {
+          "$ref": "#/$defs/helpLines"
+        },
+        "panes adopt": {
           "$ref": "#/$defs/helpLines"
         },
         "panes archive": {
@@ -407,6 +490,12 @@
           "$ref": "#/$defs/helpLines"
         },
         "panes unpin": {
+          "$ref": "#/$defs/helpLines"
+        },
+        "panes rename": {
+          "$ref": "#/$defs/helpLines"
+        },
+        "panes focus": {
           "$ref": "#/$defs/helpLines"
         },
         "panels": {
@@ -437,6 +526,33 @@
           "$ref": "#/$defs/helpLines"
         },
         "agent-context": {
+          "$ref": "#/$defs/helpLines"
+        },
+        "sessions": {
+          "$ref": "#/$defs/helpLines"
+        },
+        "sessions list": {
+          "$ref": "#/$defs/helpLines"
+        },
+        "sessions create": {
+          "$ref": "#/$defs/helpLines"
+        },
+        "sessions get": {
+          "$ref": "#/$defs/helpLines"
+        },
+        "sessions update": {
+          "$ref": "#/$defs/helpLines"
+        },
+        "sessions set-agent": {
+          "$ref": "#/$defs/helpLines"
+        },
+        "sessions associate": {
+          "$ref": "#/$defs/helpLines"
+        },
+        "sessions detach": {
+          "$ref": "#/$defs/helpLines"
+        },
+        "sessions overview": {
           "$ref": "#/$defs/helpLines"
         }
       },

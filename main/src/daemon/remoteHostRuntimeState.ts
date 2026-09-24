@@ -5,6 +5,9 @@ import {
   type RemoteDaemonHostConfig,
   type RemoteDaemonHostRuntimeState,
 } from '../../../shared/types/remoteDaemon';
+import { boundary, decodeBoundary } from '../../../shared/validation/boundaryDecoder';
+import { getAppDirectory } from '../utils/appDirectory';
+import { collectRemoteDaemonExecutableHealth } from './remoteDaemonExecutableHealth';
 
 interface RemoteHttpAddress {
   host: string;
@@ -15,7 +18,10 @@ class RemoteHostRuntimeStateStore extends EventEmitter {
   private state: RemoteDaemonHostRuntimeState = createDefaultRemoteDaemonHostRuntimeState();
 
   getState(): RemoteDaemonHostRuntimeState {
-    return { ...this.state };
+    return {
+      ...this.state,
+      executableHealth: collectRemoteDaemonExecutableHealth(getAppDirectory()),
+    };
   }
 
   setInactive(config?: RemoteDaemonHostConfig | null): void {
@@ -26,6 +32,7 @@ class RemoteHostRuntimeStateStore extends EventEmitter {
       listenPort: config?.listenPort ?? null,
       lastError: null,
       connectedClients: [],
+      executableHealth: this.state.executableHealth,
       updatedAt: new Date().toISOString(),
     });
   }
@@ -38,11 +45,12 @@ class RemoteHostRuntimeStateStore extends EventEmitter {
       listenPort: address?.port ?? config.listenPort,
       lastError: null,
       connectedClients: this.state.status === 'live' ? this.state.connectedClients : [],
+      executableHealth: this.state.executableHealth,
       updatedAt: new Date().toISOString(),
     });
   }
 
-  setError(config: RemoteDaemonHostConfig | null | undefined, error: unknown): void {
+  setError<ErrorValue>(config: RemoteDaemonHostConfig | null | undefined, error: ErrorValue): void {
     this.setState({
       enabled: config?.enabled === true,
       status: 'error',
@@ -50,6 +58,7 @@ class RemoteHostRuntimeStateStore extends EventEmitter {
       listenPort: config?.listenPort ?? null,
       lastError: getErrorMessage(error, 'Remote listener failed'),
       connectedClients: [],
+      executableHealth: this.state.executableHealth,
       updatedAt: new Date().toISOString(),
     });
   }
@@ -76,16 +85,17 @@ class RemoteHostRuntimeStateStore extends EventEmitter {
   }
 }
 
-function getErrorMessage(error: unknown, fallback: string): string {
+function getErrorMessage<ErrorValue>(error: ErrorValue, fallback: string): string {
   if (error instanceof Error && error.message.trim().length > 0) {
     return error.message;
   }
 
-  if (typeof error === 'string' && error.trim().length > 0) {
-    return error.trim();
+  try {
+    const message = decodeBoundary(error, boundary.nonEmptyString).trim();
+    return message;
+  } catch {
+    return fallback;
   }
-
-  return fallback;
 }
 
 export const remoteHostRuntimeStateStore = new RemoteHostRuntimeStateStore();

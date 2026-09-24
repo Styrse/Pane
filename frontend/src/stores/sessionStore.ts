@@ -33,7 +33,7 @@ interface SessionStore {
   loadSessions: (sessions: Session[]) => void;
   addSession: (session: Session) => void;
   updateSession: (session: Session) => void;
-  deleteSession: (session: Session) => void;
+  deleteSession: (session: Pick<Session, 'id'>) => void;
   setActiveSession: (sessionId: string | null) => Promise<void>;
   addSessionOutput: (output: SessionOutput) => void;
   setSessionOutput: (sessionId: string, output: string) => void;
@@ -289,6 +289,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     if (normalizedOutput.type === 'json') {
       // Update jsonMessages array with limit
       const currentMessages = session.jsonMessages || [];
+      // SAFETY: The output type discriminator is paired with this payload shape by the IPC contract.
       const newMessage = { ...(normalizedOutput.data as ClaudeJsonMessage), timestamp: normalizedOutput.timestamp };
       const newJsonMessages = currentMessages.length >= MAX_MESSAGES
         ? [...currentMessages.slice(1), newMessage] // Remove oldest when at limit
@@ -297,9 +298,11 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     } else {
       // Add stdout/stderr to output array with limit
       const currentOutput = session.output || [];
+      // SAFETY: The output type discriminator is paired with this payload shape by the IPC contract.
+      const outputText = normalizedOutput.data as string;
       const newOutput = currentOutput.length >= MAX_OUTPUTS
-        ? [...currentOutput.slice(1), normalizedOutput.data as string] // Remove oldest when at limit
-        : [...currentOutput, normalizedOutput.data as string];
+        ? [...currentOutput.slice(1), outputText] // Remove oldest when at limit
+        : [...currentOutput, outputText];
       sessions[sessionIndex] = { ...session, output: newOutput };
     }
     
@@ -308,6 +311,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     if (state.activeMainRepoSession && state.activeMainRepoSession.id === normalizedOutput.sessionId) {
       if (normalizedOutput.type === 'json') {
         const currentMessages = state.activeMainRepoSession.jsonMessages || [];
+        // SAFETY: The output type discriminator is paired with this payload shape by the IPC contract.
         const newMessage = { ...(normalizedOutput.data as ClaudeJsonMessage), timestamp: normalizedOutput.timestamp };
         const newJsonMessages = currentMessages.length >= MAX_MESSAGES
           ? [...currentMessages.slice(1), newMessage]
@@ -315,9 +319,11 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
         updatedActiveMainRepoSession = { ...state.activeMainRepoSession, jsonMessages: newJsonMessages };
       } else {
         const currentOutput = state.activeMainRepoSession.output || [];
+        // SAFETY: The output type discriminator is paired with this payload shape by the IPC contract.
+        const outputText = normalizedOutput.data as string;
         const newOutput = currentOutput.length >= MAX_OUTPUTS
-          ? [...currentOutput.slice(1), normalizedOutput.data as string]
-          : [...currentOutput, normalizedOutput.data as string];
+          ? [...currentOutput.slice(1), outputText]
+          : [...currentOutput, outputText];
         updatedActiveMainRepoSession = { ...state.activeMainRepoSession, output: newOutput };
       }
     }
@@ -355,71 +361,40 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   
   setSessionOutputs: (sessionId, outputs) => set((state) => {
     
-    // PERFORMANCE: Process arrays in chunks to avoid V8 optimization bailouts
+    const sessionIndex = state.sessions.findIndex(session => session.id === sessionId);
+    if (sessionIndex === -1 && state.activeMainRepoSession?.id !== sessionId) return state;
+
+    const MAX_STORED_OUTPUTS = 300;
+    const MAX_STORED_MESSAGES = 100;
     const stdOutputs: string[] = [];
     const jsonMessages: ClaudeJsonMessage[] = [];
-    
-    // Process in smaller batches to avoid long-running loops that trigger V8 deoptimization
-    const BATCH_SIZE = 100;
-    for (let batch = 0; batch < outputs.length; batch += BATCH_SIZE) {
-      const batchEnd = Math.min(batch + BATCH_SIZE, outputs.length);
-      
-      for (let i = batch; i < batchEnd; i++) {
-        const output = normalizeSessionOutput(outputs[i]);
-        if (output.type === 'json') {
-          jsonMessages.push({ ...(output.data as ClaudeJsonMessage), timestamp: output.timestamp });
-        } else if (output.type === 'stdout' || output.type === 'stderr') {
-          stdOutputs.push(output.data as string);
-        }
+
+    // Read newest first so each category retains its own tail. Only normalize
+    // messages we keep, and stop when both bounded buffers are full.
+    for (let i = outputs.length - 1; i >= 0; i--) {
+      const output = outputs[i];
+      if (output.type === 'json' && jsonMessages.length < MAX_STORED_MESSAGES) {
+        // SAFETY: The output type discriminator is paired with this payload shape by the IPC contract.
+        jsonMessages.push({ ...(output.data as ClaudeJsonMessage), timestamp: normalizeSessionOutput(output).timestamp });
+      } else if ((output.type === 'stdout' || output.type === 'stderr') && stdOutputs.length < MAX_STORED_OUTPUTS) {
+        // SAFETY: The output type discriminator is paired with this payload shape by the IPC contract.
+        stdOutputs.push(output.data as string);
       }
-      
-      // Allow event loop to breathe between batches for very large arrays
-      if (batchEnd < outputs.length && outputs.length > 500) {
-        // This is a synchronous operation, so we can't truly yield,
-        // but we can at least break up the work
-        if (stdOutputs.length > 300 || jsonMessages.length > 100) {
-          // Stop early if we already have enough data
-          break;
-        }
-      }
+      if (stdOutputs.length === MAX_STORED_OUTPUTS && jsonMessages.length === MAX_STORED_MESSAGES) break;
     }
-    
-    // CRITICAL PERFORMANCE FIX: Even more aggressive limits to prevent V8 optimization failures
-    // V8 was getting stuck in recursive array iterations with large arrays
-    const MAX_STORED_OUTPUTS = 300; // Further reduced to prevent CPU spikes
-    const MAX_STORED_MESSAGES = 100; // Further reduced to prevent memory pressure
-    
-    const trimmedOutputs = stdOutputs.length > MAX_STORED_OUTPUTS 
-      ? stdOutputs.slice(-MAX_STORED_OUTPUTS) 
-      : stdOutputs;
-    
-    const trimmedMessages = jsonMessages.length > MAX_STORED_MESSAGES
-      ? jsonMessages.slice(-MAX_STORED_MESSAGES)
-      : jsonMessages;
-    
-    
-    // Performance optimization: Only create new array if session is found
+    stdOutputs.reverse();
+    jsonMessages.reverse();
+
     let updatedSessions = state.sessions;
-    let sessionFound = false;
-    
-    // Use a for loop for better performance with large arrays
-    for (let i = 0; i < state.sessions.length; i++) {
-      if (state.sessions[i].id === sessionId) {
-        const newSession = { ...state.sessions[i], output: trimmedOutputs, jsonMessages: trimmedMessages };
-        // Only create new array when we actually find the session to update
-        if (!sessionFound) {
-          updatedSessions = state.sessions.slice(); // Shallow copy is more efficient than spread
-          sessionFound = true;
-        }
-        updatedSessions[i] = newSession;
-        break;
-      }
+    if (sessionIndex !== -1) {
+      updatedSessions = state.sessions.slice();
+      updatedSessions[sessionIndex] = { ...state.sessions[sessionIndex], output: stdOutputs, jsonMessages };
     }
-    
+
     // Also update activeMainRepoSession if it matches
     let updatedActiveMainRepoSession = state.activeMainRepoSession;
     if (state.activeMainRepoSession && state.activeMainRepoSession.id === sessionId) {
-      updatedActiveMainRepoSession = { ...state.activeMainRepoSession, output: trimmedOutputs, jsonMessages: trimmedMessages };
+      updatedActiveMainRepoSession = { ...state.activeMainRepoSession, output: stdOutputs, jsonMessages };
     }
     
     return {
@@ -519,9 +494,8 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
 
   updateSessionGitStatus: (sessionId, gitStatus) => {
     const state = get();
-    
-    // Add to pending updates
-    state.pendingGitStatusUpdates.set(sessionId, gitStatus);
+    const pendingGitStatusUpdates = new Map(state.pendingGitStatusUpdates);
+    pendingGitStatusUpdates.set(sessionId, gitStatus);
     
     // Clear existing timer
     if (state.gitStatusBatchTimer) {
@@ -533,14 +507,13 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       get().processPendingGitStatusUpdates();
     }, 50); // 50ms batch window
     
-    set({ gitStatusBatchTimer: timer });
+    set({ pendingGitStatusUpdates, gitStatusBatchTimer: timer });
   },
   
   setGitStatusLoading: (sessionId, loading) => {
     const state = get();
-    
-    // Add to pending updates
-    state.pendingGitStatusLoading.set(sessionId, loading);
+    const pendingGitStatusLoading = new Map(state.pendingGitStatusLoading);
+    pendingGitStatusLoading.set(sessionId, loading);
     
     // Clear existing timer
     if (state.gitStatusBatchTimer) {
@@ -552,7 +525,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       get().processPendingGitStatusUpdates();
     }, 50); // 50ms batch window
     
-    set({ gitStatusBatchTimer: timer });
+    set({ pendingGitStatusLoading, gitStatusBatchTimer: timer });
   },
   
   isGitStatusLoading: (sessionId) => {
@@ -647,29 +620,34 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   
   processPendingGitStatusUpdates: () => {
     const state = get();
-    
-    // Clear timer
+
     if (state.gitStatusBatchTimer) {
       clearTimeout(state.gitStatusBatchTimer);
-      set({ gitStatusBatchTimer: null });
     }
-    
-    // Process loading state updates
-    if (state.pendingGitStatusLoading.size > 0) {
-      const loadingUpdates = Array.from(state.pendingGitStatusLoading.entries()).map(
-        ([sessionId, loading]) => ({ sessionId, loading })
-      );
+
+    const loadingUpdates = Array.from(state.pendingGitStatusLoading, ([sessionId, loading]) => ({
+      sessionId,
+      loading,
+    }));
+    const statusUpdates = Array.from(state.pendingGitStatusUpdates, ([sessionId, status]) => ({
+      sessionId,
+      status,
+    }));
+
+    // Reset the queues before publishing their snapshots so every observable
+    // collection gets a new identity and subsequent updates start a fresh batch.
+    set({
+      gitStatusBatchTimer: null,
+      pendingGitStatusLoading: new Map(),
+      pendingGitStatusUpdates: new Map(),
+    });
+
+    if (loadingUpdates.length > 0) {
       get().setGitStatusLoadingBatch(loadingUpdates);
-      state.pendingGitStatusLoading.clear();
     }
-    
-    // Process status updates
-    if (state.pendingGitStatusUpdates.size > 0) {
-      const statusUpdates = Array.from(state.pendingGitStatusUpdates.entries()).map(
-        ([sessionId, status]) => ({ sessionId, status })
-      );
+
+    if (statusUpdates.length > 0) {
       get().updateSessionGitStatusBatch(statusUpdates);
-      state.pendingGitStatusUpdates.clear();
     }
   },
   

@@ -2,18 +2,24 @@ import fs from 'fs/promises';
 import net from 'net';
 import os from 'os';
 import path from 'path';
+import childProcess from 'child_process';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { decodePaneRemoteConnection } from '../../../shared/types/remoteDaemon';
-import { setupRemoteHost } from './setupRemoteHost';
+import { boundary, decodeBoundary } from '../../../shared/validation/boundaryDecoder';
+import {
+  setupRemoteHost as setupRemoteHostImpl,
+  type SetupRemoteHostOptions,
+} from './setupRemoteHost';
 
-const { spawnSyncMock } = vi.hoisted(() => ({
-  spawnSyncMock: vi.fn(),
-}));
+const spawnSyncMock = vi.fn<typeof childProcess.spawnSync>();
+
+function setupRemoteHost(options: SetupRemoteHostOptions = {}) {
+  return setupRemoteHostImpl({
+    ...options,
+    tailscaleDependencies: { spawnSync: spawnSyncMock },
+  });
+}
 const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
-
-vi.mock('child_process', () => ({
-  spawnSync: spawnSyncMock,
-}));
 
 function commandResult(options: {
   status: number | null;
@@ -51,6 +57,32 @@ describe('setupRemoteHost', () => {
     })).rejects.toThrow('Tailscale is required for cross-device remote setup, but Pane could not find the tailscale CLI after attempting setup.');
 
     expect(spawnSyncMock).toHaveBeenCalledWith('tailscale', ['version'], expect.any(Object));
+  });
+
+  it('rejects an undiscoverable packaged executable before changing configuration', async () => {
+    const paneDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pane-remote-custom-executable-'));
+    const executable = path.join(paneDir, 'custom-pane');
+    const writeConfig = vi.fn(async () => {});
+    await fs.writeFile(executable, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    try {
+      await expect(setupRemoteHost({
+        paneDir,
+        writeConfig,
+        installService: true,
+        serviceDependencies: {
+          platform: 'linux',
+          homeDir: paneDir,
+          executablePath: executable,
+          executableCandidates: [path.join(paneDir, '.local', 'bin', 'pane')],
+          sourceRoot: null,
+          runCommand: () => ({ ok: false, stdout: '', stderr: '' }),
+        },
+      })).rejects.toThrow('cannot persist the current executable safely');
+      expect(writeConfig).not.toHaveBeenCalled();
+      await expect(fs.stat(path.join(paneDir, 'config.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await fs.rm(paneDir, { recursive: true, force: true });
+    }
   });
 
   it('uses a Tailscale Serve HTTPS URL for the generated connection code', async () => {
@@ -94,25 +126,28 @@ describe('setupRemoteHost', () => {
         installService: false,
       });
       const payload = decodePaneRemoteConnection(result.connectionCode);
-      const config = JSON.parse(await fs.readFile(path.join(paneDir, 'config.json'), 'utf8')) as {
-        remoteDaemon: {
-          host: {
-            config: {
-              enabled: boolean;
-              listenHost: string;
-              listenPort: number;
-            };
-            access?: {
-              baseUrl: string;
-              tunnel?: {
-                kind: string;
-                tailscaleIp?: string;
-              };
-              updatedAt: string;
-            };
-          };
-        };
-      };
+      const config = decodeBoundary(
+        JSON.parse(await fs.readFile(path.join(paneDir, 'config.json'), 'utf8')),
+        boundary.object({
+          remoteDaemon: boundary.object({
+            host: boundary.object({
+              config: boundary.object({
+                enabled: boundary.boolean,
+                listenHost: boundary.string,
+                listenPort: boundary.number,
+              }),
+              access: boundary.optional(boundary.object({
+                baseUrl: boundary.string,
+                tunnel: boundary.optional(boundary.object({
+                  kind: boundary.string,
+                  tailscaleIp: boundary.optional(boundary.string),
+                })),
+                updatedAt: boundary.string,
+              })),
+            }),
+          }),
+        }),
+      );
 
       expect(result.tunnel?.kind).toBe('tailscale');
       expect(result.tunnel?.command).toBe('tailscale serve --bg --tls-terminated-tcp=443 42137');
@@ -272,6 +307,26 @@ describe('setupRemoteHost', () => {
     expect(spawnSyncMock).not.toHaveBeenCalled();
   });
 
+  it('pairs with an in-memory config whose optional fields are unset', async () => {
+    const writeConfig = vi.fn(async (_config: Parameters<NonNullable<SetupRemoteHostOptions['writeConfig']>>[0]) => {});
+
+    const result = await setupRemoteHost({
+      preferTunnel: 'ssh',
+      installService: false,
+      existingConfig: {
+        verbose: true,
+        anthropicApiKey: undefined,
+        analytics: { enabled: true, githubEmail: undefined },
+      },
+      writeConfig,
+    });
+
+    expect(result.wroteConfig).toBe(true);
+    const written = writeConfig.mock.calls[0][0];
+    expect(written).toMatchObject({ verbose: true, analytics: { enabled: true } });
+    expect(written.remoteDaemon).toBeDefined();
+  });
+
   it('selects the next available loopback port when requested', async () => {
     const server = net.createServer();
     await new Promise<void>((resolve, reject) => {
@@ -279,7 +334,7 @@ describe('setupRemoteHost', () => {
       server.listen(0, '127.0.0.1', () => resolve());
     });
     const address = server.address();
-    if (!address || typeof address === 'string') {
+    if (!address || !(address instanceof Object)) {
       throw new Error('Expected test server to listen on a TCP port');
     }
 

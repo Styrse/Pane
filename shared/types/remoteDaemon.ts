@@ -1,4 +1,6 @@
 import type { VoiceTranscriptionMode } from './voiceTranscription';
+import { boundary, decodeBoundary, decodeOptionalBoundary } from '../validation/boundaryDecoder';
+import type { BoundarySchema, JsonObject, JsonValue } from '../validation/boundaryDecoder';
 
 export type RemoteDaemonTransport = 'http+sse';
 export type RemoteDaemonClientMode = 'local' | 'remote';
@@ -16,6 +18,29 @@ export interface RemoteDaemonHostConfig {
 }
 
 export type RemoteDaemonHostRuntimeStatus = 'inactive' | 'live' | 'error';
+export type RemoteDaemonProcessImageStatus = 'current' | 'replaced' | 'deleted' | 'unknown';
+export type RemoteDaemonRestartStatus = 'ready' | 'broken' | 'unknown';
+
+export interface RemoteDaemonExecutableHealth {
+  processImage: {
+    status: RemoteDaemonProcessImageStatus;
+    runtimePath: string | null;
+    installedPath: string | null;
+    evidence: string;
+  };
+  restart: {
+    status: RemoteDaemonRestartStatus;
+    launcherPath?: string;
+    resolvedPath?: string;
+    evidence: string;
+  };
+  diagnosticCode?:
+    | 'PANE_REMOTE_DAEMON_EXECUTABLE_DELETED'
+    | 'PANE_REMOTE_DAEMON_UPDATE_PENDING'
+    | 'PANE_REMOTE_DAEMON_LAUNCHER_STALE';
+  recoveryCommand?: string;
+  checkedAt: string;
+}
 
 export interface RemoteDaemonConnectedClient {
   id: string;
@@ -34,6 +59,7 @@ export interface RemoteDaemonHostRuntimeState {
   listenPort: number | null;
   lastError: string | null;
   connectedClients: RemoteDaemonConnectedClient[];
+  executableHealth: RemoteDaemonExecutableHealth;
   updatedAt: string;
 }
 
@@ -102,6 +128,27 @@ export interface RemoteHostSetupServiceResult {
   message: string;
 }
 
+export interface RemoteDaemonServiceInspection {
+  launcherPath: string;
+  launcherExists: boolean;
+  launcherCurrent: boolean;
+  savedExecutablePath: string | null;
+  savedExecutableExists: boolean | null;
+  resolvedExecutablePath: string | null;
+  restartStatus: RemoteDaemonRestartStatus;
+}
+
+export interface RemoteDaemonServiceRepairResult {
+  ok: boolean;
+  changed: boolean;
+  paneDir: string;
+  strategy: RemoteHostSetupServiceStrategy;
+  launcherPath: string;
+  before: RemoteDaemonServiceInspection;
+  after: RemoteDaemonServiceInspection;
+  message: string;
+}
+
 export interface RemoteHostSetupResult {
   dataDirectoryMode: RemoteSetupDataDirectoryMode;
   paneDir: string;
@@ -137,7 +184,45 @@ export interface RemoteDaemonImportResult {
 export interface RemoteDaemonHostSettings {
   config: RemoteDaemonHostConfig;
   clients: RemoteDaemonClientRecord[];
+  mobilePush: RemoteMobilePushSettings;
   access?: RemoteDaemonHostAccess;
+}
+
+export type RemoteMobilePlatform = 'ios' | 'android';
+
+export interface RemoteMobilePushRegistration {
+  id: string;
+  clientId: string;
+  platform: RemoteMobilePlatform;
+  token: string;
+  installationId: string;
+  /** Client-local profile id used only to route a notification tap after launch. */
+  hostProfileId: string;
+  needsInputEnabled: boolean;
+  completedEnabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+  revokedAt?: string;
+  /** Bounded persistent deduplication window; no notification content is stored. */
+  recentEventIds: string[];
+}
+
+export interface RemoteMobilePushSettings {
+  registrations: RemoteMobilePushRegistration[];
+  /** Monotonic host-owned sequence used to make repeated attention transitions distinct. */
+  attentionSequence: number;
+  /** Last observed agent state per panel, retained across daemon restarts. */
+  panelStates: Record<string, 'blocked' | 'working' | 'idle' | 'unknown'>;
+}
+
+export interface RemoteMobilePushStatus {
+  platform: RemoteMobilePlatform;
+  registration: 'registered' | 'not-registered' | 'revoked';
+  provider: 'ready' | 'missing-config' | 'invalid-config' | 'unavailable';
+  code: string;
+  message: string;
+  needsInputEnabled?: boolean;
+  completedEnabled?: boolean;
 }
 
 export interface RemoteDaemonClientSettings {
@@ -209,7 +294,7 @@ export interface RemotePaneConnectionState {
 
 export interface RemoteInvokeRequest {
   channel: string;
-  args: unknown[];
+  args: JsonValue[];
   token?: string;
   runtimeId?: string;
   clientLabel?: string;
@@ -221,8 +306,26 @@ export interface RemoteDaemonHeartbeatPayload {
 
 export interface RemoteDaemonEventEnvelope {
   channel: string;
-  args: unknown[];
+  args: Array<JsonValue | object>;
   timestamp: string;
+}
+
+const remoteHeartbeatPayloadSchema: BoundarySchema<RemoteDaemonHeartbeatPayload> = boundary.object({
+  timestamp: boundary.nonEmptyString,
+});
+
+const remoteDaemonEventEnvelopeSchema = boundary.object({
+  channel: boundary.string,
+  args: boundary.array(boundary.json),
+  timestamp: boundary.string,
+});
+
+export function decodeRemoteHeartbeatPayload<Value>(value: Value): RemoteDaemonHeartbeatPayload {
+  return decodeBoundary(value, remoteHeartbeatPayloadSchema);
+}
+
+export function decodeRemoteDaemonEventEnvelope<Value>(value: Value): RemoteDaemonEventEnvelope {
+  return decodeBoundary(value, remoteDaemonEventEnvelopeSchema);
 }
 
 export const DEFAULT_REMOTE_DAEMON_HOST_CONFIG: RemoteDaemonHostConfig = {
@@ -256,9 +359,10 @@ export function getRemoteDaemonHostConfigValidationError(config: RemoteDaemonHos
 
 export function createDefaultRemoteDaemonConfig(): RemoteDaemonConfig {
   return {
-    host: {
+      host: {
       config: { ...DEFAULT_REMOTE_DAEMON_HOST_CONFIG },
-      clients: [],
+        clients: [],
+        mobilePush: { registrations: [], attentionSequence: 0, panelStates: {} },
     },
     client: {
       profiles: [],
@@ -288,37 +392,64 @@ export function createDefaultRemoteDaemonHostRuntimeState(): RemoteDaemonHostRun
     listenPort: null,
     lastError: null,
     connectedClients: [],
+    executableHealth: createUnknownRemoteDaemonExecutableHealth(),
     updatedAt: '1970-01-01T00:00:00.000Z',
   };
 }
 
-export function isRemoteDaemonClientRecord(value: unknown): value is RemoteDaemonClientRecord {
-  if (!isRecord(value)) {
-    return false;
-  }
-
-  return (
-    isNonEmptyString(value.id) &&
-    isNonEmptyString(value.label) &&
-    isNonEmptyString(value.createdAt) &&
-    isNonEmptyString(value.tokenHash) &&
-    (value.lastUsedAt === undefined || isNonEmptyString(value.lastUsedAt))
-  );
+export function createUnknownRemoteDaemonExecutableHealth(): RemoteDaemonExecutableHealth {
+  return {
+    processImage: {
+      status: 'unknown',
+      runtimePath: null,
+      installedPath: null,
+      evidence: 'Executable identity has not been checked yet.',
+    },
+    restart: {
+      status: 'unknown',
+      evidence: 'Remote daemon launcher readiness has not been checked yet.',
+    },
+    checkedAt: '1970-01-01T00:00:00.000Z',
+  };
 }
 
-export function isRemotePaneConnectionProfile(value: unknown): value is RemotePaneConnectionProfile {
-  if (!isRecord(value)) {
-    return false;
-  }
+const remoteClientRecordSchema: BoundarySchema<RemoteDaemonClientRecord> = boundary.object({
+  id: boundary.nonEmptyString,
+  label: boundary.nonEmptyString,
+  createdAt: boundary.nonEmptyString,
+  tokenHash: boundary.nonEmptyString,
+  lastUsedAt: boundary.optional(boundary.nonEmptyString),
+});
+const remoteTunnelSchema: BoundarySchema<NonNullable<PaneRemoteConnectionImportPayload['tunnel']>> = boundary.object({
+  kind: boundary.enumeration('ssh', 'tailscale', 'manual'),
+  command: boundary.optional(boundary.nonEmptyString),
+  note: boundary.optional(boundary.nonEmptyString),
+  selected: boundary.boolean,
+  tailscaleIp: boundary.optional(boundary.nonEmptyString),
+});
+const remoteProfileSchema: BoundarySchema<RemotePaneConnectionProfile> = boundary.object({
+  id: boundary.nonEmptyString,
+  label: boundary.nonEmptyString,
+  baseUrl: boundary.nonEmptyString,
+  token: boundary.nonEmptyString,
+  transport: boundary.literal('http+sse'),
+  tunnel: boundary.optional(remoteTunnelSchema),
+});
+const remoteImportSchema = boundary.object({
+  v: boundary.literal(1),
+  label: boundary.nonEmptyString,
+  baseUrl: boundary.nonEmptyString,
+  token: boundary.nonEmptyString,
+  transport: boundary.literal('http+sse'),
+  tunnel: boundary.optional(remoteTunnelSchema),
+});
 
-  return (
-    isNonEmptyString(value.id) &&
-    isNonEmptyString(value.label) &&
-    isNonEmptyString(value.baseUrl) &&
-    isNonEmptyString(value.token) &&
-    value.transport === 'http+sse' &&
-    (value.tunnel === undefined || isRemoteImportTunnel(value.tunnel))
-  );
+export function isRemoteDaemonClientRecord<Value>(value: Value): value is Value & RemoteDaemonClientRecord {
+  return matchesSchema(value, remoteClientRecordSchema);
+}
+
+export function isRemotePaneConnectionProfile<Value>(value: Value): value is Value & RemotePaneConnectionProfile {
+  return matchesSchema(value, remoteProfileSchema);
 }
 
 export function encodePaneRemoteConnection(payload: PaneRemoteConnectionImportPayload): string {
@@ -337,9 +468,9 @@ export function decodePaneRemoteConnection(input: string): PaneRemoteConnectionI
     throw new Error('Remote connection code payload is empty');
   }
 
-  let parsedPayload: unknown;
+  let parsedPayload: JsonValue;
   try {
-    parsedPayload = JSON.parse(base64UrlDecode(encodedPayload));
+    parsedPayload = decodeBoundary(JSON.parse(base64UrlDecode(encodedPayload)), boundary.json);
   } catch (error) {
     throw new Error(`Remote connection code is not valid JSON: ${getErrorMessage(error)}`);
   }
@@ -352,93 +483,92 @@ export function remoteImportPayloadToProfile(
   profileId = createRemoteProfileId(),
 ): RemotePaneConnectionProfile {
   const normalizedPayload = normalizePaneRemoteConnectionImportPayload(payload);
-  const profile = {
+  const profile: RemotePaneConnectionProfile = {
     id: profileId,
     label: normalizedPayload.label,
     baseUrl: normalizedPayload.baseUrl,
     token: normalizedPayload.token,
     transport: normalizedPayload.transport,
-    ...(normalizedPayload.tunnel ? { tunnel: normalizedPayload.tunnel } : {}),
   };
-
-  if (!isRemotePaneConnectionProfile(profile)) {
-    throw new Error('Remote connection code did not produce a valid profile');
+  if (normalizedPayload.tunnel) {
+    profile.tunnel = normalizedPayload.tunnel;
   }
-
   return profile;
 }
 
-export function normalizePaneRemoteConnectionImportPayload(
-  value: unknown,
+export function normalizePaneRemoteConnectionImportPayload<Value>(
+  value: Value,
 ): PaneRemoteConnectionImportPayload {
-  if (!isRecord(value)) {
-    throw new Error('Remote connection code payload must be an object');
-  }
+  const decoded = decodeBoundary(value, remoteImportSchema);
+  const baseUrl = normalizeRemoteImportBaseUrl(decoded.baseUrl.trim());
+  const tunnel = decoded.tunnel === undefined ? undefined : normalizeRemoteImportTunnel(decoded.tunnel);
 
-  if (value.v !== 1) {
-    throw new Error('Remote connection code version is not supported');
-  }
-
-  const label = readRequiredString(value.label, 'Remote connection label');
-  const baseUrl = normalizeRemoteImportBaseUrl(readRequiredString(value.baseUrl, 'Remote base URL'));
-  const token = readRequiredString(value.token, 'Remote bearer token');
-  const transport = value.transport;
-  if (transport !== 'http+sse') {
-    throw new Error('Remote connection transport is not supported');
-  }
-
-  const tunnel = value.tunnel === undefined
-    ? undefined
-    : normalizeRemoteImportTunnel(value.tunnel);
-
-  return {
+  const payload: PaneRemoteConnectionImportPayload = {
     v: 1,
-    label,
+    label: decoded.label.trim(),
     baseUrl,
-    token,
-    transport,
-    ...(tunnel ? { tunnel } : {}),
+    token: decoded.token.trim(),
+    transport: decoded.transport,
   };
+  if (tunnel) {
+    payload.tunnel = tunnel;
+  }
+  return payload;
 }
 
-export function normalizeRemoteDaemonConfig(value: unknown): RemoteDaemonConfig {
+export function normalizeRemoteDaemonConfig<Value>(value: Value): RemoteDaemonConfig {
   const defaults = createDefaultRemoteDaemonConfig();
-  if (!isRecord(value)) {
+  const config = readJsonObject(value);
+  if (config === undefined) {
     return defaults;
   }
 
-  const host = isRecord(value.host) ? value.host : {};
-  const hostConfig = isRecord(host.config) ? host.config : {};
-  const clients = Array.isArray(host.clients)
-    ? host.clients.filter(isRemoteDaemonClientRecord)
-    : [];
+  const host = readJsonObject(config.host) ?? {};
+  const hostConfig = readJsonObject(host.config) ?? {};
+  const clients = readJsonArray(host.clients).flatMap((client) => {
+    try {
+      return [decodeBoundary(client, remoteClientRecordSchema)];
+    } catch {
+      return [];
+    }
+  });
   const access = normalizeRemoteDaemonHostAccess(host.access);
+  const mobilePush = normalizeRemoteMobilePushSettings(host.mobilePush);
 
-  const client = isRecord(value.client) ? value.client : {};
-  const profiles = Array.isArray(client.profiles)
-    ? client.profiles.filter(isRemotePaneConnectionProfile)
-    : [];
+  const client = readJsonObject(config.client) ?? {};
+  const profiles = readJsonArray(client.profiles).flatMap((profile) => {
+    try {
+      return [decodeBoundary(profile, remoteProfileSchema)];
+    } catch {
+      return [];
+    }
+  });
 
-  let activeProfileId = typeof client.activeProfileId === 'string' ? client.activeProfileId : null;
+  let activeProfileId = readOptionalString(client.activeProfileId) ?? null;
   if (activeProfileId && !profiles.some((profile) => profile.id === activeProfileId)) {
     activeProfileId = null;
   }
 
-  return {
-    host: {
-      config: {
-        enabled: readBoolean(hostConfig.enabled, defaults.host.config.enabled),
-        listenHost: readString(hostConfig.listenHost, defaults.host.config.listenHost),
-        listenPort: readPort(hostConfig.listenPort, defaults.host.config.listenPort),
-        pairingRequired: readBoolean(hostConfig.pairingRequired, defaults.host.config.pairingRequired),
-        allowInsecureHttpOnLoopback: readBoolean(
-          hostConfig.allowInsecureHttpOnLoopback,
-          defaults.host.config.allowInsecureHttpOnLoopback,
-        ),
-      },
-      clients: [...clients],
-      ...(access ? { access } : {}),
+  const hostSettings: RemoteDaemonHostSettings = {
+    config: {
+      enabled: readBoolean(hostConfig.enabled, defaults.host.config.enabled),
+      listenHost: readString(hostConfig.listenHost, defaults.host.config.listenHost),
+      listenPort: readPort(hostConfig.listenPort, defaults.host.config.listenPort),
+      pairingRequired: readBoolean(hostConfig.pairingRequired, defaults.host.config.pairingRequired),
+      allowInsecureHttpOnLoopback: readBoolean(
+        hostConfig.allowInsecureHttpOnLoopback,
+        defaults.host.config.allowInsecureHttpOnLoopback,
+      ),
     },
+    clients: [...clients],
+    mobilePush,
+  };
+  if (access) {
+    hostSettings.access = access;
+  }
+
+  return {
+    host: hostSettings,
     client: {
       profiles: [...profiles],
       activeProfileId,
@@ -447,94 +577,105 @@ export function normalizeRemoteDaemonConfig(value: unknown): RemoteDaemonConfig 
   };
 }
 
-function normalizeRemoteDaemonHostAccess(value: unknown): RemoteDaemonHostAccess | undefined {
-  if (!isRecord(value)) {
+function normalizeRemoteMobilePushSettings(value: JsonValue | undefined): RemoteMobilePushSettings {
+  const settings = readJsonObject(value) ?? {};
+  const registrations = readJsonArray(settings.registrations).flatMap((registration) => {
+    const raw = readJsonObject(registration);
+    if (!raw) return [];
+    const id = readOptionalString(raw.id);
+    const clientId = readOptionalString(raw.clientId);
+    const platform: RemoteMobilePlatform | undefined = raw.platform === 'ios' || raw.platform === 'android' ? raw.platform : undefined;
+    const token = readOptionalString(raw.token);
+    const installationId = readOptionalString(raw.installationId);
+    const hostProfileId = readOptionalString(raw.hostProfileId);
+    if (!id || !clientId || !platform || !token || !installationId || !hostProfileId || id.length > 200 || token.length > 8192) return [];
+    const normalized: RemoteMobilePushRegistration = {
+      id, clientId, platform, token, installationId,
+      hostProfileId,
+      needsInputEnabled: readBoolean(raw.needsInputEnabled, true),
+      completedEnabled: readBoolean(raw.completedEnabled, true),
+      createdAt: readOptionalString(raw.createdAt) ?? new Date(0).toISOString(),
+      updatedAt: readOptionalString(raw.updatedAt) ?? new Date(0).toISOString(),
+      recentEventIds: readJsonArray(raw.recentEventIds).flatMap(value => {
+        const eventId = readOptionalString(value);
+        return eventId ? [eventId] : [];
+      }).slice(-64),
+    };
+    const revokedAt = readOptionalString(raw.revokedAt);
+    if (revokedAt) normalized.revokedAt = revokedAt;
+    return [normalized];
+  });
+  const decodedAttentionSequence = decodeOptionalBoundary(settings.attentionSequence, boundary.number);
+  const attentionSequence = decodedAttentionSequence !== undefined && Number.isSafeInteger(decodedAttentionSequence) && decodedAttentionSequence >= 0
+    ? decodedAttentionSequence
+    : 0;
+  const panelStates = Object.fromEntries(Object.entries(readJsonObject(settings.panelStates) ?? {}).flatMap(([panelId, state]) => {
+    const decoded = decodeOptionalBoundary(state, boundary.enumeration('blocked', 'working', 'idle', 'unknown'));
+    return decoded ? [[panelId, decoded]] : [];
+  }));
+  return { registrations, attentionSequence, panelStates };
+}
+
+function normalizeRemoteDaemonHostAccess(value: JsonValue | undefined): RemoteDaemonHostAccess | undefined {
+  const access = readJsonObject(value);
+  if (access === undefined) {
     return undefined;
   }
 
   try {
-    const baseUrl = normalizeRemoteImportBaseUrl(readRequiredString(value.baseUrl, 'Remote host access URL'));
-    const tunnel = value.tunnel === undefined
+    const baseUrl = normalizeRemoteImportBaseUrl(readRequiredString(access.baseUrl, 'Remote host access URL'));
+    const tunnel = access.tunnel === undefined
       ? undefined
-      : normalizeRemoteImportTunnel(value.tunnel);
-    const updatedAt = readRequiredString(value.updatedAt, 'Remote host access timestamp');
+      : normalizeRemoteImportTunnel(access.tunnel);
+    const updatedAt = readRequiredString(access.updatedAt, 'Remote host access timestamp');
 
-    return {
+    const normalizedAccess: RemoteDaemonHostAccess = {
       baseUrl,
-      ...(tunnel ? { tunnel } : {}),
       updatedAt,
     };
+    if (tunnel) {
+      normalizedAccess.tunnel = tunnel;
+    }
+    return normalizedAccess;
   } catch {
     return undefined;
   }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
 function normalizeRemoteImportTunnel(
-  value: unknown,
+  value: JsonValue | NonNullable<PaneRemoteConnectionImportPayload['tunnel']>,
 ): PaneRemoteConnectionImportPayload['tunnel'] {
-  if (!isRecord(value)) {
-    throw new Error('Remote connection tunnel metadata must be an object');
-  }
-
-  if (value.kind !== 'ssh' && value.kind !== 'tailscale' && value.kind !== 'manual') {
-    throw new Error('Remote connection tunnel kind is not supported');
-  }
-
-  if (typeof value.selected !== 'boolean') {
-    throw new Error('Remote connection tunnel selected flag is required');
-  }
-
-  const command = value.command === undefined
+  const decoded = decodeBoundary(value, remoteTunnelSchema);
+  const tailscaleIp = decoded.tailscaleIp === undefined
     ? undefined
-    : readRequiredString(value.command, 'Remote tunnel command');
-  const note = value.note === undefined
-    ? undefined
-    : readRequiredString(value.note, 'Remote tunnel note');
-  const tailscaleIp = value.tailscaleIp === undefined
-    ? undefined
-    : readRemoteTunnelIp(value.tailscaleIp);
+    : readRemoteTunnelIp(decoded.tailscaleIp);
 
-  return {
-    kind: value.kind,
-    selected: value.selected,
-    ...(command ? { command } : {}),
-    ...(note ? { note } : {}),
-    ...(tailscaleIp ? { tailscaleIp } : {}),
+  const tunnel: NonNullable<PaneRemoteConnectionImportPayload['tunnel']> = {
+    kind: decoded.kind,
+    selected: decoded.selected,
   };
+  if (decoded.command) tunnel.command = decoded.command.trim();
+  if (decoded.note) tunnel.note = decoded.note.trim();
+  if (tailscaleIp) tunnel.tailscaleIp = tailscaleIp;
+  return tunnel;
 }
 
-function isRemoteImportTunnel(value: unknown): value is NonNullable<PaneRemoteConnectionImportPayload['tunnel']> {
-  if (!isRecord(value)) {
-    return false;
-  }
-
-  return (
-    (value.kind === 'ssh' || value.kind === 'tailscale' || value.kind === 'manual') &&
-    typeof value.selected === 'boolean' &&
-    (value.command === undefined || isNonEmptyString(value.command)) &&
-    (value.note === undefined || isNonEmptyString(value.note)) &&
-    (value.tailscaleIp === undefined || isRemoteTunnelIp(value.tailscaleIp))
-  );
-}
-
-function readRemoteTunnelIp(value: unknown): string {
-  if (!isRemoteTunnelIp(value)) {
+function readRemoteTunnelIp(value: JsonValue): string {
+  const decoded = readOptionalString(value);
+  if (decoded === undefined || !isRemoteTunnelIp(decoded)) {
     throw new Error('Remote tunnel Tailscale IP must be a valid IP address');
   }
 
-  return value.trim();
+  return decoded.trim();
 }
 
-function isRemoteTunnelIp(value: unknown): value is string {
-  if (!isNonEmptyString(value)) {
+function isRemoteTunnelIp(value: JsonValue): boolean {
+  const decoded = readOptionalString(value);
+  if (decoded === undefined) {
     return false;
   }
 
-  const normalizedValue = value.trim();
+  const normalizedValue = decoded.trim();
   return isValidIpv4Address(normalizedValue) || isValidIpv6Address(normalizedValue);
 }
 
@@ -591,30 +732,70 @@ function normalizeRemoteImportBaseUrl(value: string): string {
   return url.href.endsWith('/') ? url.href.slice(0, -1) : url.href;
 }
 
-function readRequiredString(value: unknown, fieldName: string): string {
-  if (!isNonEmptyString(value)) {
+function readRequiredString(value: JsonValue | undefined, fieldName: string): string {
+  const decoded = readOptionalString(value);
+  if (decoded === undefined) {
     throw new Error(`${fieldName} is required`);
   }
 
-  return value.trim();
+  return decoded.trim();
 }
 
-function readBoolean(value: unknown, fallback: boolean): boolean {
-  return typeof value === 'boolean' ? value : fallback;
+function readBoolean(value: JsonValue | undefined, fallback: boolean): boolean {
+  try {
+    return decodeBoundary(value, boundary.boolean);
+  } catch {
+    return fallback;
+  }
 }
 
-function readString(value: unknown, fallback: string): string {
-  return typeof value === 'string' && value.trim().length > 0 ? value : fallback;
+function readString(value: JsonValue | undefined, fallback: string): string {
+  return readOptionalString(value) ?? fallback;
 }
 
-function readPort(value: unknown, fallback: number): number {
-  return typeof value === 'number' && Number.isInteger(value) && value > 0 && value <= 65535
-    ? value
-    : fallback;
+function readPort(value: JsonValue | undefined, fallback: number): number {
+  try {
+    const decoded = decodeBoundary(value, boundary.number);
+    return Number.isInteger(decoded) && decoded > 0 && decoded <= 65535 ? decoded : fallback;
+  } catch {
+    return fallback;
+  }
 }
 
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0;
+function readOptionalString(value: JsonValue | undefined): string | undefined {
+  try {
+    return decodeBoundary(value, boundary.nonEmptyString);
+  } catch {
+    return undefined;
+  }
+}
+
+function readJsonObject<Value>(value: Value): JsonObject | undefined {
+  try {
+    return decodeBoundary(value, boundary.jsonObject);
+  } catch {
+    return undefined;
+  }
+}
+
+function readJsonArray(value: JsonValue | undefined): JsonValue[] {
+  try {
+    return decodeBoundary(value, boundary.array(boundary.json));
+  } catch {
+    return [];
+  }
+}
+
+function matchesSchema<Input, Output>(
+  value: Input,
+  schema: BoundarySchema<Output>,
+): boolean {
+  try {
+    decodeBoundary(value, schema);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function base64UrlEncode(input: string): string {
@@ -643,13 +824,12 @@ function base64UrlDecode(input: string): string {
 }
 
 function createRemoteProfileId(): string {
-  if (typeof globalThis.crypto?.randomUUID === 'function') {
-    return globalThis.crypto.randomUUID();
-  }
+  const generatedId = globalThis.crypto?.randomUUID?.();
+  if (generatedId) return generatedId;
 
   return `remote-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function getErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : 'Unknown error';
+function getErrorMessage(cause: unknown): string {
+  return cause instanceof Error ? cause.message : 'Unknown error';
 }

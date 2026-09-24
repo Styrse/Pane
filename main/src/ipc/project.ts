@@ -7,13 +7,18 @@ import type { CreateProjectRequest, UpdateProjectRequest } from '../../../fronte
 import { scriptExecutionTracker } from '../services/scriptExecutionTracker';
 import { panelManager } from '../services/panelManager';
 import { parseWSLPath, validateWSLAvailable } from '../utils/wslUtils';
-import { PathResolver } from '../utils/pathResolver';
+import { PathResolver, expandUserRepoPath } from '../utils/pathResolver';
 import { CommandRunner } from '../utils/commandRunner';
+import { detectProjectBranch } from '../utils/detectProjectBranch';
 import { getGitAttributionEnv } from '../utils/attribution';
 import { detectProjectConfig } from '../services/projectConfigDetector';
 import { ensureProjectAgentContext } from '../services/agentContextManager';
 import type { ConfigManager } from '../services/configManager';
 import type { Project } from '../database/models';
+import { boundary, decodeBoundary } from '../../../shared/validation/boundaryDecoder';
+import { createRequire } from 'node:module';
+
+const loadProjectDependency = createRequire(__filename);
 
 // Helper function to stop a running project script
 async function stopProjectScriptInternal(projectId?: number): Promise<{ success: boolean; error?: string }> {
@@ -27,13 +32,12 @@ async function stopProjectScriptInternal(projectId?: number): Promise<{ success:
 
     // If there's a running project script, stop it
     if (runningScript && runningScript.type === 'project' && runningScript.sessionId) {
-      const projectIdToStop = runningScript.id as number;
+      const projectIdToStop = decodeBoundary(runningScript.id, boundary.number);
 
       // Mark as closing
       scriptExecutionTracker.markClosing('project', projectIdToStop);
 
-      const { panelManager } = require('../services/panelManager');
-      const { logsManager } = require('../services/panels/logPanel/logsManager');
+      const { logsManager } = loadProjectDependency('../services/panels/logPanel/logsManager');
 
       const panels = await panelManager.getPanelsForSession(runningScript.sessionId);
       const logsPanel = panels?.find((p: { type: string }) => p.type === 'logs');
@@ -111,9 +115,11 @@ export function registerProjectHandlers(
     try {
       console.log('[Main] Creating project:', projectData);
 
+      const requestedPath = expandUserRepoPath(projectData.path);
+
       // Parse WSL path if applicable
-      const wslInfo = parseWSLPath(projectData.path);
-      let actualPath = projectData.path;
+      const wslInfo = parseWSLPath(requestedPath);
+      let actualPath = requestedPath;
       let wslEnabled = false;
       let wslDistribution: string | null = null;
       let isGitRepo = false;
@@ -144,7 +150,7 @@ export function registerProjectHandlers(
 
       // Check if it's a git repository
       try {
-        commandRunner.exec('git rev-parse --is-inside-work-tree', actualPath, { silent: true });
+        await commandRunner.execAsync('git rev-parse --is-inside-work-tree', actualPath, { silent: true });
         isGitRepo = true;
         console.log('[Main] Directory is already a git repository');
       } catch {
@@ -155,13 +161,13 @@ export function registerProjectHandlers(
       if (!isGitRepo) {
         try {
           const branchName = 'main';
-          commandRunner.exec('git init', actualPath);
+          await commandRunner.execAsync('git init', actualPath);
           console.log('[Main] Git repository initialized successfully');
 
-          commandRunner.exec(`git checkout -b ${branchName}`, actualPath);
+          await commandRunner.execAsync(`git checkout -b ${branchName}`, actualPath);
           console.log(`[Main] Created and checked out branch: ${branchName}`);
 
-          commandRunner.exec('git commit -m "Initial commit" --allow-empty', actualPath, { env: getGitAttributionEnv(configManager.getConfig()) });
+          await commandRunner.execAsync('git commit -m "Initial commit" --allow-empty', actualPath, { env: getGitAttributionEnv(configManager.getConfig()) });
           console.log('[Main] Created initial empty commit');
         } catch (error) {
           console.error('[Main] Failed to initialize git repository:', error);
@@ -239,7 +245,11 @@ export function registerProjectHandlers(
         errorDetails = error.stack || error.toString();
 
         // Check if it's a command error
-        const cmdError = error as Error & { cmd?: string; stderr?: string; stdout?: string };
+        const cmdError = decodeBoundary(error, boundary.object({
+          cmd: boundary.optional(boundary.string),
+          stderr: boundary.optional(boundary.string),
+          stdout: boundary.optional(boundary.string),
+        }));
         if (cmdError.cmd) {
           command = cmdError.cmd;
         }
@@ -394,7 +404,7 @@ export function registerProjectHandlers(
       if (ctx) {
         for (const session of allProjectSessions) {
           // Skip sessions that are main repo or don't have worktrees
-          if (session.is_main_repo || !session.worktree_name) {
+          if (session.is_main_repo || !session.worktree_name || session.worktree_ownership === 'external') {
             continue;
           }
 
@@ -415,7 +425,7 @@ export function registerProjectHandlers(
         }
       } else {
         for (const session of allProjectSessions) {
-          if (session.is_main_repo || !session.worktree_name) {
+          if (session.is_main_repo || !session.worktree_name || session.worktree_ownership === 'external') {
             continue;
           }
           console.warn(`[WorktreeAudit] remove_skipped source="project-delete" sessionId=${JSON.stringify(session.id)} projectId=${projectIdNum} projectPath=${JSON.stringify(project.path)} worktreeName=${JSON.stringify(session.worktree_name)} worktreePath=${JSON.stringify(session.worktree_path || '')} reason="missing_project_context"`);
@@ -455,21 +465,10 @@ export function registerProjectHandlers(
     }
   });
 
-  commandRegistry.register('projects:detect-branch', async (path: string) => {
-    try {
-      const wslInfo = parseWSLPath(path);
-      const tempProject = {
-        path: wslInfo ? wslInfo.linuxPath : path,
-        wsl_enabled: !!wslInfo,
-        wsl_distribution: wslInfo?.distro ?? null
-      };
-      const commandRunner = new CommandRunner(tempProject);
-      const branch = await worktreeManager.getProjectMainBranch(tempProject.path, commandRunner);
-      return { success: true, data: branch };
-    } catch (error) {
-      console.log('[Main] Could not detect branch:', error);
-      return { success: true, data: 'main' }; // Return default if detection fails
-    }
+  commandRegistry.register('projects:detect-branch', async (repoPath: string) => {
+    return detectProjectBranch(repoPath, (projectPath, commandRunner) => (
+      worktreeManager.getProjectMainBranch(projectPath, commandRunner)
+    ));
   });
 
   commandRegistry.register('projects:list-branches', async (projectId: string) => {
@@ -708,17 +707,18 @@ export function registerProjectHandlers(
         // Stop the script based on its type
         if (runningScript.type === 'project') {
           // Call internal stop function
-          const stopResult = await stopProjectScriptInternal(runningScript.id as number);
+          const projectScriptId = decodeBoundary(runningScript.id, boundary.number);
+          const stopResult = await stopProjectScriptInternal(projectScriptId);
           if (!stopResult?.success) {
             console.warn('[Main] Failed to stop running project script, continuing anyway');
           }
         } else if (runningScript.type === 'session') {
           // Stop session script through logs panel
-          const sessionIdToStop = runningScript.id as string;
+          const sessionIdToStop = decodeBoundary(runningScript.id, boundary.string);
           const panels = await panelManager.getPanelsForSession(sessionIdToStop);
           const logsPanel = panels?.find((p: { type: string }) => p.type === 'logs');
           if (logsPanel) {
-            const { logsManager } = require('../services/panels/logPanel/logsManager');
+            const { logsManager } = loadProjectDependency('../services/panels/logPanel/logsManager');
             await logsManager.stopScript(logsPanel.id);
           }
           // Also try old mechanism as fallback
@@ -737,7 +737,7 @@ export function registerProjectHandlers(
       const sessionId = mainRepoSession.id;
 
       // Run the script in the project root using logsManager
-      const { logsManager } = require('../services/panels/logPanel/logsManager');
+      const { logsManager } = loadProjectDependency('../services/panels/logPanel/logsManager');
       const ctx = sessionManager.getProjectContextByProjectId(projectId);
       const wslContext = ctx ? ctx.commandRunner.wslContext : null;
       await logsManager.runScript(sessionId, runScript, project.path, wslContext);

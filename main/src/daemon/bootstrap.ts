@@ -1,5 +1,6 @@
+import path from 'path';
 import { powerMonitor, type App, type BrowserWindow } from 'electron';
-import { startupRetentionResult } from '../services/database';
+import { startupPanelBufferMigration, startupRetentionResult } from '../services/database';
 import { ConfigManager } from '../services/configManager';
 import { Logger } from '../utils/logger';
 import { DatabaseService } from '../database/database';
@@ -19,6 +20,7 @@ import { RunCommandManager } from '../services/runCommandManager';
 import { VersionChecker } from '../services/versionChecker';
 import { SkillCacheManager } from '../services/skillCacheManager';
 import { PaneChatManager } from '../services/paneChatManager';
+import { OrchestrationSessionManager } from '../services/orchestrationSessionManager';
 import { TaskQueue } from '../services/taskQueue';
 import { registerIpcHandlers } from '../ipc';
 import { PaneDaemonServer } from './server';
@@ -35,6 +37,14 @@ import { setupEventListeners } from '../events';
 import { getAppDirectory } from '../utils/appDirectory';
 import { resourceMonitorService } from '../services/resourceMonitorService';
 import type { PaneCommandRegistry } from './commandRegistry';
+import { syncRemoteTransportForMode } from './remoteTransportStartup';
+import { panelManager } from '../services/panelManager';
+import { terminalPanelManager } from '../services/terminalPanelManager';
+import { WorkspaceJournal } from '../services/workspaceJournal';
+import { WorkspaceStateReader } from '../services/workspaceStateReader';
+import { WorkspaceCursorStore } from '../services/workspaceCursorStore';
+import { extractWorkspaceHeldInput } from '../services/workspaceHeldInput';
+import { boundary, decodeBoundary } from '../../../shared/validation/boundaryDecoder';
 
 interface PaneDaemonHostOptions {
   app: App;
@@ -87,6 +97,10 @@ function registerPowerMonitorDiagnostics(logger: Logger): void {
   powerMonitor.on('unlock-screen', () => logger.info('[Lifecycle] power:unlock-screen'));
 }
 
+function megabytes(bytes: number | null): string {
+  return bytes === null ? 'unknown' : `${(bytes / 1_000_000).toFixed(1)} MB`;
+}
+
 export async function createPaneDaemonHost(options: PaneDaemonHostOptions): Promise<PaneDaemonHost> {
   const mode = options.mode ?? 'desktop';
   const startRemoteTransport = options.startRemoteTransport ?? true;
@@ -102,13 +116,25 @@ export async function createPaneDaemonHost(options: PaneDaemonHostOptions): Prom
   console.log('[Main] Logger initialized with file logging to ~/.pane/logs');
   registerPowerMonitorDiagnostics(logger);
 
+  if (startupPanelBufferMigration.error) {
+    logger.error('[PanelBuffers] Startup migration failed', startupPanelBufferMigration.error);
+  } else if (startupPanelBufferMigration.result?.migrated) {
+    const migration = startupPanelBufferMigration.result;
+    logger.info(
+      `[PanelBuffers] Moved terminal bytes out of ${migration.panelsRepaired} panel states ` +
+      `(${migration.panelsWithBuffers} with buffers) in ${migration.durationMs} ms; ` +
+      `sessions.db ${megabytes(migration.fileBytesBefore)} -> ${megabytes(migration.fileBytesAfter)}; ` +
+      `backup ${migration.backupPath ?? 'none'}`,
+    );
+  }
+
   if (startupRetentionResult.error) {
     logger.error('[ScrollbackRetention] Sweep failed', startupRetentionResult.error);
   } else if (startupRetentionResult.result && startupRetentionResult.result.panelsCleared > 0) {
     const result = startupRetentionResult.result;
     logger.info(
       `[ScrollbackRetention] Cleared ${result.panelsCleared} panels across ` +
-      `${result.sessionsTouched} sessions, freed ~${(result.bytesFreed / 1_000_000).toFixed(1)} MB`,
+      `${result.sessionsTouched} sessions, freed ~${megabytes(result.bytesFreed)}`,
     );
   }
 
@@ -179,6 +205,19 @@ export async function createPaneDaemonHost(options: PaneDaemonHostOptions): Prom
   await paneChatManager.getOrCreate().catch(error => {
     logger.warn('[PaneChat] Failed to ensure startup Pane Chat session', error instanceof Error ? error : undefined);
   });
+  const orchestrationSessionManager = new OrchestrationSessionManager(
+    configManager,
+    sessionManager,
+    skillCacheManager,
+    paneChatManager,
+    gitStatusManager,
+  );
+  await orchestrationSessionManager.initialize().catch(error => {
+    // Keep the rest of Pane available when a previously-written Session store
+    // cannot be read. Session APIs retry and return the exact failure instead
+    // of silently replacing the user's metadata.
+    logger.error('[Sessions] Failed to initialize durable Session metadata', error instanceof Error ? error : new Error(String(error)));
+  });
   const taskQueue = new TaskQueue({
     sessionManager,
     worktreeManager,
@@ -187,6 +226,57 @@ export async function createPaneDaemonHost(options: PaneDaemonHostOptions): Prom
     executionTracker,
     worktreeNameGenerator,
   });
+
+  const workspaceJournal = new WorkspaceJournal({
+    resolvePane: (paneId) => {
+      const session = sessionManager.getSession(paneId);
+      if (!session) return undefined;
+      const project = sessionManager.getProjectForSession(paneId);
+      return {
+        paneId,
+        paneName: session.name,
+        repoId: project?.id,
+        repoName: project?.name,
+        worktreePath: session.worktreePath,
+      };
+    },
+    resolvePanel: (panelId) => {
+      const panel = panelManager.getPanel(panelId);
+      if (!panel) return undefined;
+      const snapshot = terminalPanelManager.getTerminalSnapshot(panelId);
+      const customState = decodeBoundary(panel.state.customState ?? {}, boundary.object({
+        agentType: boundary.optional(boundary.string),
+        isCliPanel: boundary.optional(boundary.boolean),
+      }));
+      return {
+        panelId,
+        paneId: panel.sessionId,
+        isCliPanel: snapshot?.isCliPanel ?? customState.isCliPanel ?? false,
+        agentType: snapshot?.agentType ?? customState.agentType,
+        panelTitle: panel.title,
+        lastActivityAt: snapshot?.lastActivityTime,
+        heldInput: snapshot?.screenText ? extractWorkspaceHeldInput(snapshot.screenText) : undefined,
+      };
+    },
+  });
+  for (const session of sessionManager.getAllSessions()) {
+    const project = sessionManager.getProjectForSession(session.id);
+    workspaceJournal.rememberPane({
+      paneId: session.id,
+      paneName: session.name,
+      repoId: project?.id,
+      repoName: project?.name,
+      worktreePath: session.worktreePath,
+    });
+  }
+  const workspaceStateReader = new WorkspaceStateReader(
+    sessionManager,
+    () => workspaceJournal.epoch,
+    () => workspaceJournal.generation,
+  );
+  const workspaceCursorStore = new WorkspaceCursorStore(
+    path.join(getAppDirectory(), 'workspace-cursors.json'),
+  );
 
   const daemonServices: DaemonHostServices = {
     configManager,
@@ -203,12 +293,16 @@ export async function createPaneDaemonHost(options: PaneDaemonHostOptions): Prom
     versionChecker,
     skillCacheManager,
     paneChatManager,
+    orchestrationSessionManager,
     taskQueue,
     getMainWindow: options.getMainWindow,
     logger,
     archiveProgressManager,
     analyticsManager,
     spotlightManager,
+    workspaceJournal,
+    workspaceStateReader,
+    workspaceCursorStore,
   };
 
   const services: AppServices = {
@@ -235,14 +329,13 @@ export async function createPaneDaemonHost(options: PaneDaemonHostOptions): Prom
 
   if (startRemoteTransport) {
     remoteTransportController.startWatchingConfig();
-    try {
-      await remoteTransportController.syncToConfig();
-    } catch (error) {
-      console.error('[Pane remote daemon] Failed to start remote HTTP transport; continuing without remote access', error);
-    }
+    await syncRemoteTransportForMode(remoteTransportController, mode, async () => {
+      await remoteTransportController.stopWatchingAndShutdown();
+      await paneDaemonServer?.stop();
+    });
   }
 
-  const daemonSinks: PaneEventSink[] = [];
+  const daemonSinks: PaneEventSink[] = [workspaceJournal];
   if (paneDaemonServer) {
     daemonSinks.push(paneDaemonServer.getEventSink());
   }
@@ -280,7 +373,7 @@ export async function createPaneDaemonHost(options: PaneDaemonHostOptions): Prom
 
   if (options.restoreSpotlights !== false) {
     try {
-      spotlightManager.restoreAll();
+      await spotlightManager.restoreAll();
     } catch (error) {
       console.error('[Main] Failed to restore spotlight state:', error);
     }
@@ -297,13 +390,14 @@ export async function createPaneDaemonHost(options: PaneDaemonHostOptions): Prom
     permissionIpcServer,
     async shutdown(): Promise<void> {
       resourceMonitorService.stop();
-      spotlightManager.disableAll();
+      await spotlightManager.disableAll();
       await sessionManager.cleanup();
       await runCommandManager.stopAllRunCommands();
       gitStatusManager.stopPolling();
       configManager.stopWatching();
       await cliManagerFactory.shutdown();
       await taskQueue.close();
+      workspaceJournal.dispose();
       await permissionIpcServer?.stop();
       await remoteTransportController.stopWatchingAndShutdown();
       if (paneDaemonServer) {

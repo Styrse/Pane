@@ -16,6 +16,31 @@ export interface TooltipProps extends Omit<React.HTMLAttributes<HTMLElement>, 'c
 }
 
 const GAP = 6;
+type TooltipSide = NonNullable<TooltipProps['side']>;
+const ARROW_BORDER = {
+  top: 'border-l-transparent border-r-transparent border-b-transparent border-t-bg-tertiary',
+  bottom: 'border-l-transparent border-r-transparent border-t-transparent border-b-bg-tertiary',
+  left: 'border-t-transparent border-b-transparent border-r-transparent border-l-bg-tertiary',
+  right: 'border-t-transparent border-b-transparent border-l-transparent border-r-bg-tertiary',
+} satisfies Record<TooltipSide, string>;
+const ARROW_STYLE = {
+  top: { bottom: -8, left: '50%', transform: 'translateX(-50%)' },
+  bottom: { top: -8, left: '50%', transform: 'translateX(-50%)' },
+  left: { right: -8, top: '50%', transform: 'translateY(-50%)' },
+  right: { left: -8, top: '50%', transform: 'translateY(-50%)' },
+} satisfies Record<TooltipSide, React.CSSProperties>;
+// An interactive tooltip is usually far taller than its trigger, so reaching its
+// far edge means travelling diagonally across the gap. These invisible bridges
+// span that gap for the tooltip's whole edge, keeping the pointer inside the
+// hover region the entire way.
+const BRIDGE_STYLE = {
+  top: { left: 0, right: 0, bottom: -GAP, height: GAP },
+  bottom: { left: 0, right: 0, top: -GAP, height: GAP },
+  left: { top: 0, bottom: 0, right: -GAP, width: GAP },
+  right: { top: 0, bottom: 0, left: -GAP, width: GAP },
+} satisfies Record<TooltipSide, React.CSSProperties>;
+// Grace period for the pointer to cross from trigger to tooltip.
+const HOVER_GRACE_MS = 250;
 
 export const Tooltip = React.forwardRef<HTMLElement, TooltipProps>(({
   content,
@@ -29,6 +54,7 @@ export const Tooltip = React.forwardRef<HTMLElement, TooltipProps>(({
   onFocus,
   onBlur,
   onKeyDown,
+  onPointerDown,
   ...triggerProps
 }, forwardedRef) => {
   const [isOpen, setIsOpen] = useState(false);
@@ -109,7 +135,7 @@ export const Tooltip = React.forwardRef<HTMLElement, TooltipProps>(({
     cancelShow();
     if (interactive) {
       // Small delay so user can move mouse from trigger to tooltip
-      hideTimeout.current = setTimeout(() => setIsOpen(false), 100);
+      hideTimeout.current = setTimeout(() => setIsOpen(false), HOVER_GRACE_MS);
     } else {
       setIsOpen(false);
     }
@@ -126,28 +152,15 @@ export const Tooltip = React.forwardRef<HTMLElement, TooltipProps>(({
     cancelShow();
   }, [cancelHide, cancelShow]);
 
+  // SAFETY: The surrounding typed producer establishes the narrower value shape consumed here.
   const existingDescription = (children.props as { 'aria-describedby'?: string })['aria-describedby'];
   const describedBy = [existingDescription, isOpen ? tooltipId : undefined]
     .filter(Boolean)
     .join(' ') || undefined;
 
-  const arrowBorder: Record<string, string> = {
-    top: 'border-l-transparent border-r-transparent border-b-transparent border-t-bg-tertiary',
-    bottom: 'border-l-transparent border-r-transparent border-t-transparent border-b-bg-tertiary',
-    left: 'border-t-transparent border-b-transparent border-r-transparent border-l-bg-tertiary',
-    right: 'border-t-transparent border-b-transparent border-l-transparent border-r-bg-tertiary',
-  };
-
-  const arrowStyle: Record<string, React.CSSProperties> = {
-    top: { bottom: -8, left: '50%', transform: 'translateX(-50%)' },
-    bottom: { top: -8, left: '50%', transform: 'translateX(-50%)' },
-    left: { right: -8, top: '50%', transform: 'translateY(-50%)' },
-    right: { left: -8, top: '50%', transform: 'translateY(-50%)' },
-  };
-
   const setTriggerRef = useCallback((node: HTMLElement | null) => {
     triggerRef.current = node;
-    if (typeof forwardedRef === 'function') forwardedRef(node);
+    if (forwardedRef instanceof Function) forwardedRef(node);
     else if (forwardedRef) forwardedRef.current = node;
   }, [forwardedRef]);
 
@@ -165,6 +178,13 @@ export const Tooltip = React.forwardRef<HTMLElement, TooltipProps>(({
         onMouseLeave={(event) => {
           onMouseLeave?.(event);
           if (!event.defaultPrevented) hide();
+        }}
+        onPointerDown={(event) => {
+          onPointerDown?.(event);
+          // Clicking or right-clicking the trigger means the pointer is busy with
+          // something else — a context menu, a navigation. An interactive tooltip
+          // outranks those overlays, so leaving it up would swallow their clicks.
+          if (!event.defaultPrevented) dismiss();
         }}
         onFocus={(event) => {
           onFocus?.(event);
@@ -201,9 +221,12 @@ export const Tooltip = React.forwardRef<HTMLElement, TooltipProps>(({
           onMouseLeave={interactive ? hide : undefined}
         >
           {content}
+          {interactive && (
+            <div aria-hidden="true" className="absolute" style={BRIDGE_STYLE[side]} />
+          )}
           <div
-            className={cn('absolute w-0 h-0 border-4', arrowBorder[side])}
-            style={arrowStyle[side]}
+            className={cn('absolute w-0 h-0 border-4', ARROW_BORDER[side])}
+            style={ARROW_STYLE[side]}
           />
         </div>,
         portalContainer ?? document.body

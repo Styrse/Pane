@@ -1,8 +1,10 @@
-import React, { useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useId, useLayoutEffect, useRef, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { cn } from '../../utils/cn';
 import { X } from 'lucide-react';
 import { PortalContainerProvider } from '../../contexts/PortalContainerContext';
+import { useScrollSurface } from '../../hooks/useScrollSurface';
+import { useCommittedRef } from '../../hooks/useCommittedRef';
 
 export interface ModalProps {
   isOpen: boolean;
@@ -16,6 +18,14 @@ export interface ModalProps {
   ariaLabel?: string;
   initialFocusRef?: React.RefObject<HTMLElement | null>;
   restoreFocusOnClose?: boolean;
+  /**
+   * Opens with no entrance animation at all. Set it on a surface reached by
+   * keyboard dozens or hundreds of times a day — the command palette — where an
+   * entrance is not polish, it is the gap between pressing the shortcut and
+   * being able to type. Raycast's palette has no open animation for exactly
+   * this reason.
+   */
+  instant?: boolean;
 }
 
 function canReceiveFocus(element: HTMLElement | null): element is HTMLElement {
@@ -36,14 +46,13 @@ export const Modal: React.FC<ModalProps> = ({
   ariaLabel,
   initialFocusRef,
   restoreFocusOnClose = true,
+  instant = false,
 }) => {
   const contentRef = useRef<HTMLDivElement>(null);
   const openerRef = useRef<HTMLElement | null>(null);
   const didRestoreRef = useRef(false);
-  const restoreFocusRef = useRef(restoreFocusOnClose);
+  const restoreFocusRef = useCommittedRef(restoreFocusOnClose);
   const [portalContainer, setPortalContainer] = useState<HTMLDivElement | null>(null);
-
-  restoreFocusRef.current = restoreFocusOnClose;
 
   const restoreOpener = () => {
     if (didRestoreRef.current || !restoreFocusRef.current) return;
@@ -78,7 +87,12 @@ export const Modal: React.FC<ModalProps> = ({
   return (
     <Dialog.Root open={isOpen} onOpenChange={(open) => !open && onClose()}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-modal-backdrop bg-modal-overlay backdrop-blur-sm" />
+        <Dialog.Overlay
+          className={cn(
+            'fixed inset-0 z-modal-backdrop bg-modal-overlay backdrop-blur-sm',
+            !instant && 'animate-modal-overlay-enter',
+          )}
+        />
         <Dialog.Content
           ref={contentRef}
           aria-modal="true"
@@ -109,7 +123,8 @@ export const Modal: React.FC<ModalProps> = ({
           <PortalContainerProvider value={portalContainer}>
             <div
               className={cn(
-                'relative bg-bg-primary rounded-modal shadow-modal w-full max-h-[calc(100vh-2rem)] overflow-hidden flex flex-col animate-fadeIn',
+                'relative bg-surface-primary border border-border-primary rounded-modal shadow-modal w-full max-h-[calc(100vh-2rem)] overflow-hidden flex flex-col',
+                !instant && 'animate-modal-enter',
                 className,
               )}
             >
@@ -195,9 +210,21 @@ export interface ModalBodyProps extends React.HTMLAttributes<HTMLDivElement> {
 
 export const ModalBody = React.forwardRef<HTMLDivElement, ModalBodyProps>(
   ({ className, children, ...props }, ref) => {
+    const surfaceId = useId();
+    const scrollSurfaceRef = useScrollSurface<HTMLDivElement>({
+      id: `modal-body:${surfaceId}`,
+      priority: 50,
+    });
+    const setBodyRef = useCallback((element: HTMLDivElement | null) => {
+      scrollSurfaceRef(element);
+      if (ref instanceof Function) ref(element);
+      else if (ref) ref.current = element;
+    }, [ref, scrollSurfaceRef]);
+
     return (
       <div
-        ref={ref}
+        ref={setBodyRef}
+        tabIndex={-1}
         className={cn(
           'flex-1 overflow-y-auto px-6 py-4',
           className
