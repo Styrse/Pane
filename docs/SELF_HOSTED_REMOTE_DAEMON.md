@@ -91,7 +91,8 @@ The setup command:
 - enables the loopback listener on `127.0.0.1:42137`
 - creates a paired client record with a hashed token on the host
 - emits the raw token only inside the one-time `pane-remote://...` import code
-- attempts to install and start a user-level daemon service
+- attempts to install and start a user-level daemon service (on Linux, it also
+  enables lingering so the service keeps running after you log out)
 - prints the manual daemon command if service setup is unavailable
 - detects Tailscale Serve where possible and otherwise prints an SSH local-forward command
 
@@ -132,8 +133,10 @@ it up as a Remote Pane host:
    npx --yes runpane@latest install daemon --label "Cloud VM" --format deb
    ```
 
-6. Keep the daemon running after you log out. The daemon runs as a systemd
-   user service, which stops when your SSH session ends unless lingering is on:
+6. Check that the daemon keeps running after you log out. It runs as a systemd
+   user service, and setup turns on lingering (through passwordless `sudo` if
+   needed) so the service outlives your SSH session. If the setup output says
+   it could not, enable lingering yourself:
 
    ```bash
    sudo loginctl enable-linger "$USER"
