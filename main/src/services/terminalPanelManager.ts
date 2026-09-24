@@ -1,4 +1,6 @@
 import * as pty from '@lydell/node-pty';
+import { EventEmitter } from 'events';
+import { filterSyncBlockClears } from './syncBlockClearFilter';
 import { ToolPanel, TerminalPanelState } from '../../../shared/types/panels';
 import { getPaneDaemonEventSink, getPaneEventSink, getPtyHostRuntime, getRuntimeConfigManager, type PtyHandleLike, type PtyHostRuntime } from '../core/runtime';
 import { panelManager } from './panelManager';
@@ -6,10 +8,13 @@ import * as path from 'path';
 import { promises as fs } from 'fs';
 import { randomUUID } from 'crypto';
 import { getShellPath } from '../utils/shellPath';
+import { trimAnsiSafe } from '../utils/ansiTrim';
+import { databaseService } from './database';
 import { ShellDetector } from '../utils/shellDetector';
 import type { AnalyticsManager } from './analyticsManager';
 import { getWSLShellSpawn, buildWSLENV, WSLContext } from '../utils/wslUtils';
 import { getGitAttributionEnv } from '../utils/attribution';
+import { inheritedProcessEnv } from '../utils/inheritedProcessEnv';
 import {
   type FlowControlRecord,
   createFlowControlRecord,
@@ -17,7 +22,7 @@ import {
   onAck as flowControlOnAck,
   onPtyBytes as flowControlOnPtyBytes,
 } from '../ptyHost/flowControl';
-import { TerminalStateEmulator } from './terminalStateEmulator';
+import { sharedEmulatorThread, type RemoteTerminalEmulator, type TerminalEmulatorHostConnection } from './terminalEmulatorClient';
 import { AgentStatusMonitor } from './agentStatus/agentStatusMonitor';
 import { detectAgentState } from './agentStatus/manifestEngine';
 import { getManifestForAgent } from './agentStatus/manifests';
@@ -29,10 +34,15 @@ const OUTPUT_BATCH_INTERVAL_HIDDEN = 250; // ms — background / hidden cadence 
 const OUTPUT_BATCH_SIZE = 131072; // 128KB — timer-based flush preferred; size trigger is safety net
 const OUTPUT_BATCH_SIZE_HIDDEN = 80_000; // 80KB — cap hidden flush size to avoid foreground backpressure churn
 const MAX_CONCURRENT_SPAWNS = 3;
-const IDLE_THRESHOLD_MS = 30_000; // 30s — mark panel idle after no PTY output
 const AGENT_STATUS_POLL_MS = 500; // cadence for re-deriving blocked/working/done from the live screen
 const MAX_SCROLLBACK_BUFFER_SIZE = 500_000; // 500KB of normal shell history
 const MAX_ALTERNATE_SCREEN_BUFFER_SIZE = 100_000; // 100KB of recent TUI redraw state
+// Command-detection heuristic bounds. These buffers live in memory only and
+// are never persisted; full-screen apps redraw without newlines, so the
+// accumulator is frozen while the alternate screen is active.
+const MAX_CURRENT_COMMAND_SIZE = 4096;
+const MAX_COMMAND_HISTORY_ENTRY_SIZE = 1024;
+const MAX_COMMAND_HISTORY_ENTRIES = 100;
 const MIN_PTY_COLS = 20;
 const MIN_PTY_ROWS = 5;
 const FORCED_REDRAW_TRANSITION_MS = 50;
@@ -44,7 +54,7 @@ const SHELL_PROMPT_FALLBACK_MS = 5000;
 // Orca (TERMINAL_SCROLLBACK_REPLAY_BYTE_LIMIT) and Superset (MAX_HISTORY_SCROLLBACK_BYTES) both use
 // 512 * 1024. The 2500-line emulator serialization sits well under this in
 // practice; the cap is a backstop against pathological payloads.
-const MAX_RESTORE_PAYLOAD_SIZE = 512 * 1024;
+export const MAX_RESTORE_PAYLOAD_SIZE = 512 * 1024;
 
 import { CliAgentType, resolveAgentTypeFromCommand } from './agents/agentIdentity';
 import { buildCursorLaunchCommand, createCursorReadyDetector, extractCursorChatId } from './agents/cursorLaunch';
@@ -183,7 +193,7 @@ interface TerminalProcess {
   scrollbackBuffer: string;
   alternateScreenBuffer: string;
   /** Authoritative xterm-compatible model of the live PTY byte stream. */
-  screenEmulator?: TerminalStateEmulator;
+  screenEmulator?: RemoteTerminalEmulator;
   commandHistory: string[];
   currentCommand: string;
   lastActivity: Date;
@@ -211,12 +221,13 @@ interface TerminalProcess {
   isVisible: boolean;
   // Alternate screen buffer tracking — universal TUI detection signal
   isAlternateScreen: boolean;
-  activityStatus: 'active' | 'idle';
-  idleTimer: ReturnType<typeof setTimeout> | null;
   /** CLI agent driving this panel, when any — selects the status-detection manifest. */
   agentType?: CliAgentType;
   // DEC Mode 2026 synchronized-output block tracking — persists across chunks
   inSyncBlock: boolean;
+  /** Alt-screen state as seen by filterSyncBlockClears (stream-ordered, may
+   *  differ transiently from isAlternateScreen which is chunk-granular). */
+  filterInAltScreen: boolean;
   capturedAgentSessionId?: string;
   agentSessionScrapeBuffer: string;
 }
@@ -227,7 +238,7 @@ interface CliLaunchResolution {
   isCliCommand: boolean;
 }
 
-export class TerminalPanelManager {
+export class TerminalPanelManager extends EventEmitter {
   private terminals = new Map<string, TerminalProcess>();
   private serializedBuffers = new Map<string, string>();
   private readonly visibleViewersByPanel = new Map<string, Map<string, number>>();
@@ -241,7 +252,12 @@ export class TerminalPanelManager {
   // At-a-glance agent status (blocked/working/done) for AI/CLI panels.
   private readonly agentStatusMonitor = new AgentStatusMonitor();
   private agentStatusPollTimer: ReturnType<typeof setInterval> | null = null;
-  private agentStatusPolling = false;
+
+  /** Screen models parse PTY output on this host, off the main thread. */
+  constructor(private readonly emulatorHost: () => TerminalEmulatorHostConnection = sharedEmulatorThread) {
+    super();
+    this.setMaxListeners(100);
+  }
 
   private quoteCommandArgument(value: string): string {
     return `"${value.replace(/([\\"$`])/g, '\\$1')}"`;
@@ -529,7 +545,7 @@ export class TerminalPanelManager {
   private captureAgentSessionId(terminal: TerminalProcess, output: string): void {
     if (terminal.agentType !== 'codex' && terminal.agentType !== 'cursor') return;
 
-    terminal.agentSessionScrapeBuffer = this.trimAnsiSafe(
+    terminal.agentSessionScrapeBuffer = trimAnsiSafe(
       terminal.agentSessionScrapeBuffer + output,
       2000
     );
@@ -604,50 +620,6 @@ export class TerminalPanelManager {
     }
   }
 
-  private trimAnsiSafe(buffer: string, maxSize: number): string {
-    if (buffer.length <= maxSize) return buffer;
-
-    let start = buffer.length - maxSize;
-
-    // Prefer a line boundary so replay starts from a sane row.
-    const nextNewline = buffer.indexOf('\n', start);
-    if (nextNewline !== -1 && nextNewline < buffer.length - 1) {
-      start = nextNewline + 1;
-    }
-
-    // If the cut lands inside a common ANSI escape sequence, advance past it.
-    const lastEsc = buffer.lastIndexOf('\x1b', start);
-    if (lastEsc !== -1) {
-      let sequenceEnd = -1;
-      const introducer = buffer[lastEsc + 1];
-
-      if (introducer === '[') {
-        const finalByte = buffer.slice(lastEsc + 2).search(/[@-~]/);
-        sequenceEnd = finalByte === -1 ? -1 : lastEsc + 2 + finalByte;
-      } else if (introducer === ']') {
-        const belEnd = buffer.indexOf('\x07', lastEsc + 2);
-        const stEnd = buffer.indexOf('\x1b\\', lastEsc + 2);
-        if (belEnd !== -1 && stEnd !== -1) {
-          sequenceEnd = Math.min(belEnd, stEnd + 1);
-        } else if (belEnd !== -1) {
-          sequenceEnd = belEnd;
-        } else if (stEnd !== -1) {
-          sequenceEnd = stEnd + 1;
-        }
-      } else if (introducer) {
-        sequenceEnd = lastEsc + 1;
-      }
-
-      if (sequenceEnd === -1) {
-        start = buffer.length;
-      } else if (sequenceEnd >= start) {
-        start = sequenceEnd + 1;
-      }
-    }
-
-    return buffer.slice(start);
-  }
-
   private flushOutputBuffer(terminal: TerminalProcess): void {
     if (terminal.outputFlushTimer) {
       clearTimeout(terminal.outputFlushTimer);
@@ -668,20 +640,13 @@ export class TerminalPanelManager {
       return;
     }
 
-    // Send batched output to renderer. Legacy path: IPC send via
-    // `terminal:output`. Flag-on ptyHost path: post the filtered bytes over
-    // the per-window MessagePort so `electronAPI.ptyHost.onData` subscribers
-    // fire. Both paths continue to run; the renderer short-circuits the
-    // legacy handler once a `ptyId` is set to avoid double-delivery.
+    // Send batched output to the renderer and daemon subscribers. This is the
+    // only byte path for every PTY, ptyHost or not.
     this.sendRendererEvent('terminal:output', {
       sessionId: terminal.sessionId,
       panelId: terminal.panelId,
       output: data
     });
-    if (terminal.isPtyHost && terminal.ptyId) {
-      const supervisor = getPtyHostRuntime();
-      supervisor?.postDataToRenderers(terminal.ptyId, data);
-    }
 
     // Update flow-control bookkeeping with the bytes just flushed. The record
     // owns the HIGH/LOW watermark check, the `pauseRpcInFlight` gate, and the
@@ -947,6 +912,7 @@ export class TerminalPanelManager {
      * PANE_* var) silently disappear inside WSL terminals.
      */
     const isWSL = !!wslContext && process.platform === 'win32';
+    const panelCustomState = terminalCustomState(panel.state);
     const wslEnvVars: Record<string, string> = isWSL
       ? {
           WSLENV: buildWSLENV([
@@ -955,6 +921,7 @@ export class TerminalPanelManager {
             'PANE_PORT',
             'PANE_SESSION_ID',
             'PANE_PANEL_ID',
+            'PANE_ORCHESTRATION_SESSION_ID',
             'WORKTREE_PATH',
             'PANE_WORKSPACE_PATH',
           ]),
@@ -965,17 +932,10 @@ export class TerminalPanelManager {
     const spawnCols = initialDimensions?.cols || 80;
     const spawnRows = initialDimensions?.rows || 30;
 
-    // `process.env` is `NodeJS.ProcessEnv` which allows `undefined` values; the
-    // ptyHost RPC DTO requires `Record<string, string>`. Drop undefined keys so
-    // both the legacy `pty.spawn` path and the ptyHost path see the same shape.
-    const baseEnv: Record<string, string> = {};
-    for (const [key, value] of Object.entries(process.env)) {
-      if (value !== undefined) {
-        baseEnv[key] = value;
-      }
-    }
-    const spawnEnv = {
-      ...baseEnv,
+    // The ptyHost RPC DTO requires `Record<string, string>`, so both the legacy
+    // `pty.spawn` path and the ptyHost path get the same undefined-free shape.
+    const baseSpawnEnv = {
+      ...inheritedProcessEnv(),
       ...getGitAttributionEnv(getRuntimeConfigManager().getConfig()),
       PATH: enhancedPath,
       TERM: 'xterm-256color',
@@ -988,6 +948,9 @@ export class TerminalPanelManager {
       PANE_WORKSPACE_PATH: cwd,
       ...wslEnvVars,
     } satisfies Record<string, string>;
+    const spawnEnv = panelCustomState.orchestrationSessionId
+      ? { ...baseSpawnEnv, PANE_ORCHESTRATION_SESSION_ID: panelCustomState.orchestrationSessionId }
+      : baseSpawnEnv;
 
     // Read the setting once per spawn so we don't scatter config reads.
     // `getPtyHostRuntime()` returns null when the setting is off or when
@@ -1047,7 +1010,7 @@ export class TerminalPanelManager {
       sessionId: panel.sessionId,
       scrollbackBuffer: '',
       alternateScreenBuffer: '',
-      screenEmulator: new TerminalStateEmulator(spawnCols, spawnRows),
+      screenEmulator: this.emulatorHost().createEmulator(spawnCols, spawnRows),
       commandHistory: [],
       currentCommand: '',
       lastActivity: new Date(),
@@ -1062,9 +1025,8 @@ export class TerminalPanelManager {
       outputFlushTimer: null,
       isVisible: true,
       isAlternateScreen: false,
-      activityStatus: 'idle',
-      idleTimer: null,
       inSyncBlock: false,
+      filterInAltScreen: false,
       agentType: this.resolveTerminalAgentType(terminalCustomState(panel.state)),
       agentSessionScrapeBuffer: ''
     };
@@ -1075,10 +1037,9 @@ export class TerminalPanelManager {
     // Begin at-a-glance status detection for AI/CLI agent panels.
     this.registerAgentStatusPanel(terminalProcess);
 
-    // Tell the renderer which `ptyId` to subscribe to for this panel so
-    // `TerminalPanel.tsx` can use `electronAPI.ptyHost.onData(ptyId, ...)`
-    // under the flag. Flag-off path skips this: the renderer keeps using
-    // the legacy `terminal:output` channel.
+    // Tell the renderer which `ptyId` backs this panel so `TerminalPanel.tsx`
+    // can ack flow-control bytes over the ptyHost port. Flag-off path skips
+    // this: the renderer acks over IPC.
     if (usePtyHost && ptyHostId) {
       this.sendRendererEvent('terminal:ptyReady', {
         sessionId: panel.sessionId,
@@ -1189,45 +1150,9 @@ export class TerminalPanelManager {
     }
   }
 
-  /**
-   * Strips \x1b[2J (clear-screen) sequences that appear inside DEC Mode 2026
-   * synchronized-output blocks. Claude Code uses these blocks for full-screen
-   * redraws; the clear-screen causes xterm.js to reset scroll position, yanking
-   * users away from where they were reading. State (inSyncBlock) persists across
-   * chunk boundaries on the terminal object.
-   */
+  /** See syncBlockClearFilter.ts — state lives on the terminal object. */
   private filterSyncBlockClears(terminal: TerminalProcess, data: string): string {
-    const SYNC_START = '\x1b[?2026h';
-    const SYNC_END   = '\x1b[?2026l';
-    const CLEAR      = '\x1b[2J';
-
-    // Fast path: no sync sequences and not already inside a block
-    if (!terminal.inSyncBlock && !data.includes(SYNC_START)) {
-      return data;
-    }
-
-    let result = '';
-    let i = 0;
-
-    while (i < data.length) {
-      if (data.startsWith(SYNC_START, i)) {
-        terminal.inSyncBlock = true;
-        result += SYNC_START;
-        i += SYNC_START.length;
-      } else if (data.startsWith(SYNC_END, i)) {
-        terminal.inSyncBlock = false;
-        result += SYNC_END;
-        i += SYNC_END.length;
-      } else if (terminal.inSyncBlock && data.startsWith(CLEAR, i)) {
-        // Strip the clear-screen — scroll position preserved in xterm.js
-        i += CLEAR.length;
-      } else {
-        result += data[i];
-        i++;
-      }
-    }
-
-    return result;
+    return filterSyncBlockClears(terminal, data);
   }
 
   private setupTerminalHandlers(terminal: TerminalProcess): void {
@@ -1238,18 +1163,6 @@ export class TerminalPanelManager {
       terminal.lastActivity = outputAt;
       terminal.lastOutputAt = outputAt;
       terminal.outputGeneration += 1;
-
-      // Activity status transition: mark active on first byte after idle
-      if (terminal.activityStatus !== 'active') {
-        terminal.activityStatus = 'active';
-        this.emitActivityStatus(terminal);
-      }
-      if (terminal.idleTimer) clearTimeout(terminal.idleTimer);
-      terminal.idleTimer = setTimeout(() => {
-        terminal.activityStatus = 'idle';
-        terminal.idleTimer = null;
-        this.emitActivityStatus(terminal);
-      }, IDLE_THRESHOLD_MS);
 
       // Feed PTY activity to the agent-status monitor (the "working" authority).
       this.agentStatusMonitor.noteActivity(terminal.panelId, outputAt.getTime());
@@ -1286,7 +1199,10 @@ export class TerminalPanelManager {
       // Detect commands (simple heuristic - look for carriage returns)
       if (data.includes('\r') || data.includes('\n')) {
         if (terminal.currentCommand.trim()) {
-          terminal.commandHistory.push(terminal.currentCommand);
+          terminal.commandHistory.push(terminal.currentCommand.slice(0, MAX_COMMAND_HISTORY_ENTRY_SIZE));
+          if (terminal.commandHistory.length > MAX_COMMAND_HISTORY_ENTRIES) {
+            terminal.commandHistory.splice(0, terminal.commandHistory.length - MAX_COMMAND_HISTORY_ENTRIES);
+          }
 
           // Emit command executed event
           panelManager.emitPanelEvent(
@@ -1312,9 +1228,13 @@ export class TerminalPanelManager {
 
           terminal.currentCommand = '';
         }
-      } else {
-        // Accumulate command input
+      } else if (!terminal.isAlternateScreen) {
+        // Accumulate command input. Anything past the cap is not a command
+        // (a TUI frame, a paste, a progress bar), so drop it rather than grow.
         terminal.currentCommand += data;
+        if (terminal.currentCommand.length > MAX_CURRENT_COMMAND_SIZE) {
+          terminal.currentCommand = '';
+        }
       }
 
       // Buffer output for batching instead of sending immediately
@@ -1340,16 +1260,6 @@ export class TerminalPanelManager {
     
     // Handle terminal exit
     terminal.pty.onExit((exitCode: { exitCode: number; signal?: number }) => {
-      // Clear idle timer and mark as idle on exit
-      if (terminal.idleTimer) {
-        clearTimeout(terminal.idleTimer);
-        terminal.idleTimer = null;
-      }
-      if (terminal.activityStatus !== 'idle') {
-        terminal.activityStatus = 'idle';
-        this.emitActivityStatus(terminal);
-      }
-
       // A finished agent is "done": settle its status to idle and stop tracking.
       if (this.agentStatusMonitor.isTracked(terminal.panelId)) {
         this.emitAgentStatus(terminal, 'idle', 'exit');
@@ -1385,14 +1295,14 @@ export class TerminalPanelManager {
   
   private addToScrollback(terminal: TerminalProcess, data: string): void {
     if (terminal.isAlternateScreen) {
-      terminal.alternateScreenBuffer = this.trimAnsiSafe(
+      terminal.alternateScreenBuffer = trimAnsiSafe(
         terminal.alternateScreenBuffer + data,
         MAX_ALTERNATE_SCREEN_BUFFER_SIZE
       );
       return;
     }
 
-    terminal.scrollbackBuffer = this.trimAnsiSafe(
+    terminal.scrollbackBuffer = trimAnsiSafe(
       terminal.scrollbackBuffer + data,
       MAX_SCROLLBACK_BUFFER_SIZE
     );
@@ -1415,6 +1325,11 @@ export class TerminalPanelManager {
 
   getLastOutputAt(panelId: string): string | undefined {
     return this.terminals.get(panelId)?.lastOutputAt?.toISOString();
+  }
+
+  /** Viewport text with dim cells blanked, so placeholder hints do not read as typed input. */
+  getInputScreenText(panelId: string): string | undefined {
+    return this.terminals.get(panelId)?.screenEmulator?.state.inputScreenText;
   }
 
   getOutputGeneration(panelId: string): number {
@@ -1473,8 +1388,12 @@ export class TerminalPanelManager {
 
     try {
       if (options.force && isSameSize) {
-        const redrawCols = cols > MIN_PTY_COLS ? cols - 1 : cols + 1;
-        terminal.pty.resize(redrawCols, rows);
+        // Single repaint nudge: toggle ROWS (not cols) so the normal buffer never
+        // reflows, and keep the headless emulator in step so the intermediate
+        // frame is parsed at the geometry it was drawn for.
+        const redrawRows = rows > MIN_PTY_ROWS ? rows - 1 : rows + 1;
+        terminal.pty.resize(cols, redrawRows);
+        terminal.screenEmulator?.resize(cols, redrawRows);
         // Give the foreground process time to observe the intermediate grid.
         // Back-to-back TIOCSWINSZ calls can collapse into a single pending signal.
         await new Promise(resolve => setTimeout(resolve, FORCED_REDRAW_TRANSITION_MS));
@@ -1515,8 +1434,6 @@ export class TerminalPanelManager {
     const panel = panelManager.getPanel(panelId);
     if (!panel) return;
 
-    await terminal.screenEmulator?.waitForIdle();
-    
     // Get current working directory (if possible)
     let cwd = (panel.state.customState && 'cwd' in panel.state.customState) ? panel.state.customState.cwd : undefined;
     cwd = cwd || process.cwd();
@@ -1535,14 +1452,14 @@ export class TerminalPanelManager {
     
     // Save state to panel
     const state = panel.state;
-    const savedIsAlternateScreen =
-      terminal.screenEmulator?.isAlternateScreen ?? terminal.isAlternateScreen;
+    const restore = await terminal.screenEmulator?.restoreSnapshot();
+    const savedIsAlternateScreen = restore?.isAlternateScreen ?? terminal.isAlternateScreen;
     // Same source as getTerminalState: persist the rendered emulator model for
     // normal buffers so restarts replay a duplicate-free snapshot, not the raw
     // append log with its accumulated repaint traffic.
     const savedScrollback =
-      !savedIsAlternateScreen && terminal.screenEmulator
-        ? this.trimAnsiSafe(terminal.screenEmulator.serializeForRestore(true), MAX_RESTORE_PAYLOAD_SIZE)
+      restore && !savedIsAlternateScreen
+        ? trimAnsiSafe(restore.serialized, MAX_RESTORE_PAYLOAD_SIZE)
         : terminal.scrollbackBuffer;
     const customState: TerminalPanelState = {
       ...terminalCustomState(state),
@@ -1551,11 +1468,9 @@ export class TerminalPanelManager {
       scrollbackBuffer: savedScrollback,
       alternateScreenBuffer: terminal.alternateScreenBuffer,
       isAlternateScreen: savedIsAlternateScreen,
-      commandHistory: terminal.commandHistory.slice(-100), // Keep last 100 commands
       lastActivityTime: terminal.lastActivity.toISOString(),
-      lastActiveCommand: terminal.currentCommand,
-      serializedBuffer: terminal.screenEmulator?.isAlternateScreen
-        ? terminal.screenEmulator.serializeForRestore()
+      serializedBuffer: restore?.isAlternateScreen
+        ? restore.serialized
         : this.serializedBuffers.get(panelId),
     };
     if (terminal.capturedAgentSessionId && terminal.agentType) {
@@ -1583,7 +1498,10 @@ export class TerminalPanelManager {
   }
   
   async restoreTerminalState(panel: ToolPanel, state: TerminalPanelState, wslContext?: WSLContext | null): Promise<void> {
-    if (!state.scrollbackBuffer || state.scrollbackBuffer.length === 0) {
+    // Terminal bytes live in panel_buffers, never in the panel state JSON.
+    const buffers = databaseService.getPanelBuffers(panel.id);
+    const scrollback = buffers?.scrollback ?? '';
+    if (scrollback.length === 0) {
       return;
     }
 
@@ -1593,56 +1511,38 @@ export class TerminalPanelManager {
     const terminal = this.terminals.get(panel.id);
     if (!terminal) return;
     
-    // Restore scrollback buffer (handle both string and array formats)
-    if (Array.isArray(state.scrollbackBuffer)) {
-      // Convert legacy array format to string
-      terminal.scrollbackBuffer = state.scrollbackBuffer.join('\n');
-    } else {
-      terminal.scrollbackBuffer = state.scrollbackBuffer;
-    }
-    terminal.alternateScreenBuffer = state.alternateScreenBuffer || '';
-    terminal.commandHistory = state.commandHistory || [];
+    terminal.scrollbackBuffer = scrollback;
+    terminal.alternateScreenBuffer = buffers?.alternate ?? '';
     
     // Send restoration indicator to terminal
     const restorationMsg = `\r\n[Session Restored from ${state.lastActivityTime || 'previous session'}]\r\n`;
     terminal.pty.write(restorationMsg);
     
-    // Send scrollback to frontend. Dual-path mirrors `flushOutputBuffer`:
-    // `terminal:output` IPC for legacy subscribers, ptyHost port for flag-on.
-    if (state.scrollbackBuffer) {
-      // Cap the renderer replay at the formal ceiling; main's own buffer (set above) keeps full content.
-      const rawScrollback = Array.isArray(state.scrollbackBuffer)
-        ? state.scrollbackBuffer.join('\n')
-        : state.scrollbackBuffer;
-      const output = this.trimAnsiSafe(rawScrollback, MAX_RESTORE_PAYLOAD_SIZE) + restorationMsg;
-      this.sendRendererEvent('terminal:output', {
-        sessionId: panel.sessionId,
-        panelId: panel.id,
-        output,
-      });
-      if (terminal.isPtyHost && terminal.ptyId) {
-        const supervisor = getPtyHostRuntime();
-        supervisor?.postDataToRenderers(terminal.ptyId, output);
-      }
-    }
+    // Send scrollback to frontend. Cap the renderer replay at the formal
+    // ceiling; main's own buffer (set above) keeps full content.
+    const output = trimAnsiSafe(scrollback, MAX_RESTORE_PAYLOAD_SIZE) + restorationMsg;
+    this.sendRendererEvent('terminal:output', {
+      sessionId: panel.sessionId,
+      panelId: panel.id,
+      output,
+    });
   }
   
   async getTerminalState(panelId: string): Promise<TerminalPanelState | null> {
     const terminal = this.terminals.get(panelId);
     if (!terminal) return null;
 
-    await terminal.screenEmulator?.waitForIdle();
-
-    const isAlternateScreen = terminal.screenEmulator?.isAlternateScreen ?? terminal.isAlternateScreen;
+    const restore = await terminal.screenEmulator?.restoreSnapshot();
+    const isAlternateScreen = restore?.isAlternateScreen ?? terminal.isAlternateScreen;
     // Normal-buffer restore content comes from the rendered emulator model, not
     // the raw append log: the log accumulates repaint traffic (forced activation
     // redraws re-emit the current frame), which a reset+replay renders as
     // duplicated rows. The emulator consumed those bytes like a live terminal —
     // repaints overwrite in place — so its serialization is duplicate-free.
-    const cappedScrollback =
-      !isAlternateScreen && terminal.screenEmulator
-        ? this.trimAnsiSafe(terminal.screenEmulator.serializeForRestore(true), MAX_RESTORE_PAYLOAD_SIZE)
-        : this.trimAnsiSafe(terminal.scrollbackBuffer, MAX_RESTORE_PAYLOAD_SIZE);
+    const cappedScrollback = trimAnsiSafe(
+      restore && !isAlternateScreen ? restore.serialized : terminal.scrollbackBuffer,
+      MAX_RESTORE_PAYLOAD_SIZE,
+    );
     return {
       isInitialized: true,
       cwd: process.cwd(), // Simplified - would need platform-specific implementation
@@ -1650,13 +1550,11 @@ export class TerminalPanelManager {
       scrollbackBuffer: cappedScrollback,
       alternateScreenBuffer: terminal.alternateScreenBuffer,
       isAlternateScreen,
-      commandHistory: terminal.commandHistory,
       lastActivityTime: terminal.lastActivity.toISOString(),
-      lastActiveCommand: terminal.currentCommand,
       // An active alternate screen cannot be reconstructed from normal shell
       // scrollback. Serialize the authoritative live model for renderer remounts.
       serializedBuffer: isAlternateScreen
-        ? terminal.screenEmulator?.serializeForRestore()
+        ? restore?.serialized
         : cappedScrollback.length > 0
           ? undefined
           : this.serializedBuffers.get(panelId)
@@ -1664,7 +1562,7 @@ export class TerminalPanelManager {
   }
 
   async waitForTerminalState(panelId: string): Promise<void> {
-    await this.terminals.get(panelId)?.screenEmulator?.waitForIdle();
+    await this.terminals.get(panelId)?.screenEmulator?.refresh();
   }
 
   getTerminalSnapshot(panelId: string): TerminalPanelSnapshot | null {
@@ -1679,9 +1577,9 @@ export class TerminalPanelManager {
       initialized: true,
       scrollbackBuffer: terminal.scrollbackBuffer,
       alternateScreenBuffer: terminal.alternateScreenBuffer,
-      screenText: terminal.screenEmulator?.getScreenText(),
-      isAlternateScreen: terminal.screenEmulator?.isAlternateScreen ?? terminal.isAlternateScreen,
-      activityStatus: terminal.activityStatus,
+      screenText: terminal.screenEmulator?.state.screenText,
+      isAlternateScreen: terminal.screenEmulator?.state.isAlternateScreen ?? terminal.isAlternateScreen,
+      activityStatus: this.deriveActivityStatus(panelId),
       lastActivityTime: terminal.lastActivity.toISOString(),
       currentCommand: terminal.currentCommand,
       isCliPanel: customState.isCliPanel,
@@ -1712,11 +1610,20 @@ export class TerminalPanelManager {
     await panelManager.updatePanel(panelId, { state });
   }
   
+  private deriveActivityStatus(panelId: string): 'active' | 'idle' {
+    const state = this.agentStatusMonitor.getState(panelId);
+    return state === 'working' || state === 'blocked' ? 'active' : 'idle';
+  }
+
+  getAgentStatus(panelId: string): AgentState | undefined {
+    return this.agentStatusMonitor.getState(panelId);
+  }
+
   private emitActivityStatus(terminal: TerminalProcess): void {
     this.sendRendererEvent('panel:activityStatus', {
       panelId: terminal.panelId,
       sessionId: terminal.sessionId,
-      status: terminal.activityStatus,
+      status: this.deriveActivityStatus(terminal.panelId),
       lastActivityAt: terminal.lastActivity.toISOString()
     });
   }
@@ -1748,12 +1655,14 @@ export class TerminalPanelManager {
       reason,
     };
     this.sendRendererEvent('panel:agentStatus', payload);
+    this.emit('agent-status', payload);
+    this.emitActivityStatus(terminal);
   }
 
   private ensureAgentStatusPoll(): void {
     if (this.agentStatusPollTimer) return;
     this.agentStatusPollTimer = setInterval(() => {
-      void this.pollAgentStatus();
+      this.pollAgentStatus();
     }, AGENT_STATUS_POLL_MS);
   }
 
@@ -1767,11 +1676,9 @@ export class TerminalPanelManager {
   /**
    * Re-derive blocked/working/done for every tracked agent panel from its live
    * screen + OSC title, and emit `panel:agentStatus` on any change. Runs on a
-   * short interval; a guard prevents overlapping passes.
+   * short interval.
    */
-  private async pollAgentStatus(): Promise<void> {
-    if (this.agentStatusPolling) return;
-    this.agentStatusPolling = true;
+  private pollAgentStatus(): void {
     try {
       for (const terminal of this.terminals.values()) {
         if (!this.agentStatusMonitor.isTracked(terminal.panelId)) continue;
@@ -1779,19 +1686,18 @@ export class TerminalPanelManager {
         const emulator = terminal.screenEmulator;
         if (!emulator) continue;
 
-        await emulator.waitForIdle();
+        // The pushed screen is at most ~50 ms old, well inside this poll's cadence.
+        const screen = emulator.state;
         const detection = detectAgentState(manifest, {
-          screen: emulator.getScreenText(),
-          oscTitle: emulator.getOscTitle(),
-          oscProgress: emulator.getOscProgress(),
+          screen: screen.screenText,
+          oscTitle: screen.oscTitle,
+          oscProgress: screen.oscProgress,
         });
         const next = this.agentStatusMonitor.update(terminal.panelId, detection, Date.now());
         if (next) this.emitAgentStatus(terminal, next, detection.matchedRuleId);
       }
     } catch (error) {
       console.error('[TerminalPanelManager] agent status poll failed:', error);
-    } finally {
-      this.agentStatusPolling = false;
     }
   }
 
@@ -1801,8 +1707,12 @@ export class TerminalPanelManager {
       return;
     }
 
-    // Save state before destroying
-    this.saveTerminalState(panelId);
+    // Save state before destroying. `saveTerminalState` is async, so a
+    // surrounding synchronous `try` could never observe its rejection — and
+    // `panelManager.updatePanel` writes to SQLite, which can reject.
+    this.saveTerminalState(panelId).catch((error) => {
+      console.error(`[TerminalPanelManager] Failed to save state for ${panelId}:`, error);
+    });
 
     // Clear timers
     if (terminal.outputFlushTimer) {
@@ -1810,10 +1720,6 @@ export class TerminalPanelManager {
       terminal.outputFlushTimer = null;
     }
     disposeFlowControlRecord(terminal.flowControl);
-    if (terminal.idleTimer) {
-      clearTimeout(terminal.idleTimer);
-      terminal.idleTimer = null;
-    }
     this.flushOutputBuffer(terminal);
     terminal.screenEmulator?.dispose();
 
@@ -1949,10 +1855,6 @@ export class TerminalPanelManager {
         terminal.outputFlushTimer = null;
       }
       disposeFlowControlRecord(terminal.flowControl);
-      if (terminal.idleTimer) {
-        clearTimeout(terminal.idleTimer);
-        terminal.idleTimer = null;
-      }
       terminal.screenEmulator?.dispose();
       this.terminals.delete(panelId);
       this.visibleViewersByPanel.delete(panelId);
@@ -2000,7 +1902,7 @@ export class TerminalPanelManager {
     const terminal = this.terminals.get(panelId);
     if (!terminal) return null;
     return {
-      isAlternateScreen: terminal.screenEmulator?.isAlternateScreen ?? terminal.isAlternateScreen,
+      isAlternateScreen: terminal.screenEmulator?.state.isAlternateScreen ?? terminal.isAlternateScreen,
     };
   }
 
@@ -2049,9 +1951,18 @@ export class TerminalPanelManager {
 
   destroyAllTerminals(): void {
     for (const [panelId, terminal] of this.terminals) {
+      // Outer guard: nothing in one terminal's teardown may abort the loop.
+      // That failure is wider than the one this method is fixing — it would
+      // leave every later PTY unkilled and skip the `clear()` calls below,
+      // and the caller in `index.ts` hard-exits immediately afterwards.
       try {
-        // Save state before killing
-        this.saveTerminalState(panelId);
+        // Save state before killing. `saveTerminalState` is async, so no
+        // synchronous `try` can observe its rejection; hence the explicit
+        // `.catch`. `panelManager.updatePanel` writes to SQLite mid-shutdown
+        // and can reject.
+        this.saveTerminalState(panelId).catch((error) => {
+          console.error(`[TerminalPanelManager] Failed to save state for ${panelId}:`, error);
+        });
 
         // Clear timers
         if (terminal.outputFlushTimer) {
@@ -2059,16 +1970,33 @@ export class TerminalPanelManager {
           terminal.outputFlushTimer = null;
         }
         disposeFlowControlRecord(terminal.flowControl);
-        if (terminal.idleTimer) {
-          clearTimeout(terminal.idleTimer);
-          terminal.idleTimer = null;
-        }
-        this.flushOutputBuffer(terminal);
-        terminal.screenEmulator?.dispose();
 
-        terminal.pty.kill();
+        // Inner guards: each step is caught on its own so a failure in one
+        // cannot skip `pty.kill()`. The event-sink fanout rethrows its first
+        // subscriber error and `dispose()` serializes through a third-party
+        // addon, so either can throw. Under a single shared `try` a throwing
+        // subscriber skipped the kill, and `this.terminals.clear()` below then
+        // dropped the last handle to that PTY — orphaning a shell on the quit
+        // path with nothing left able to reclaim it.
+        try {
+          this.flushOutputBuffer(terminal);
+        } catch (error) {
+          console.warn(`[TerminalPanelManager] Final output flush failed for ${panelId}:`, error);
+        }
+
+        try {
+          terminal.screenEmulator?.dispose();
+        } catch (error) {
+          console.warn(`[TerminalPanelManager] Emulator dispose failed for ${panelId}:`, error);
+        }
+
+        try {
+          terminal.pty.kill();
+        } catch (error) {
+          console.error(`[TerminalPanelManager] Error killing terminal ${panelId}:`, error);
+        }
       } catch (error) {
-        console.error(`[TerminalPanelManager] Error killing terminal ${panelId}:`, error);
+        console.error(`[TerminalPanelManager] Error tearing down terminal ${panelId}:`, error);
       }
     }
 

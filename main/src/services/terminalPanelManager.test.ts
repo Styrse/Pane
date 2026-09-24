@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ConfigManager } from './configManager';
 import { resetPaneRuntimeForTests, setPaneRuntime } from '../core/runtime';
 import { createFlowControlRecord, disposeFlowControlRecord, type FlowControlRecord } from '../ptyHost/flowControl';
-import { TerminalStateEmulator } from './terminalStateEmulator';
+import type { RemoteTerminalEmulator } from './terminalEmulatorClient';
+import { inProcessEmulatorHost } from '../test/inProcessEmulatorHost';
 import type { TerminalPanelState } from '../../../shared/types/panels';
 
 import { TerminalPanelManager } from './terminalPanelManager';
@@ -20,13 +21,14 @@ type TerminalUnderTest = {
     resume: ReturnType<typeof vi.fn>;
     resize: ReturnType<typeof vi.fn>;
     write: ReturnType<typeof vi.fn>;
+    kill: ReturnType<typeof vi.fn>;
   };
   isPtyHost: boolean;
   panelId: string;
   sessionId: string;
   scrollbackBuffer: string;
   alternateScreenBuffer: string;
-  screenEmulator?: TerminalStateEmulator;
+  screenEmulator?: RemoteTerminalEmulator;
   commandHistory: string[];
   currentCommand: string;
   lastActivity: Date;
@@ -38,8 +40,6 @@ type TerminalUnderTest = {
   outputFlushTimer: ReturnType<typeof setTimeout> | null;
   isVisible: boolean;
   isAlternateScreen: boolean;
-  activityStatus: 'active' | 'idle';
-  idleTimer: ReturnType<typeof setTimeout> | null;
   inSyncBlock: boolean;
   agentType?: 'claude' | 'codex' | 'cursor';
   agentSessionScrapeBuffer: string;
@@ -95,6 +95,12 @@ type AgentSessionCaptureAccess = {
   saveTerminalState(panelId: string): Promise<void>;
 };
 
+type DestroyAllAccess = {
+  terminals: Map<string, TerminalUnderTest>;
+  destroyAllTerminals(): void;
+  flushOutputBuffer(terminal: TerminalUnderTest): void;
+};
+
 type ShellPromptSchedulerAccess = {
   scheduleAfterShellPrompt(ptyProcess: TerminalUnderTest['pty'] & {
     onData(listener: (data: string) => void): { dispose(): void };
@@ -122,6 +128,7 @@ function createTerminal(overrides: Partial<TerminalUnderTest> = {}): TerminalUnd
       resume: vi.fn(),
       resize: vi.fn(),
       write: vi.fn(),
+      kill: vi.fn(),
     },
     isPtyHost: false,
     panelId: 'panel-1',
@@ -138,13 +145,26 @@ function createTerminal(overrides: Partial<TerminalUnderTest> = {}): TerminalUnd
     outputFlushTimer: null,
     isVisible: true,
     isAlternateScreen: false,
-    activityStatus: 'idle',
-    idleTimer: null,
     inSyncBlock: false,
     agentSessionScrapeBuffer: '',
     ...overrides,
   };
 }
+
+describe('TerminalPanelManager keyboard input', () => {
+  it.each([
+    '\x1b[1;3A', '\x1b[1;2D', '\x1b[1;2A', '\x1b[17~',
+    '\x1b[38;72;0;1;258;1_', '\x1b[37;75;0;1;272;1_',
+    '\x1b[38;72;0;1;272;1_', '\x1b[117;64;0;1;0;1_',
+  ])('writes each complete input message exactly once: %j', (data) => {
+    const manager = new TerminalPanelManager();
+    const terminal = createTerminal();
+    testAccess<SnapshotAccess>(manager).terminals.set(terminal.panelId, terminal);
+    manager.writeToTerminal(terminal.panelId, data);
+    expect(terminal.pty.write.mock.calls).toEqual([[data]]);
+    disposeFlowControlRecord(terminal.flowControl);
+  });
+});
 
 describe('TerminalPanelManager terminal resize', () => {
   afterEach(() => {
@@ -163,7 +183,7 @@ describe('TerminalPanelManager terminal resize', () => {
     expect(terminal.pty.resize).not.toHaveBeenCalled();
 
     const redraw = manager.resizeTerminal(terminal.panelId, 80, 24, { force: true });
-    expect(terminal.pty.resize).toHaveBeenNthCalledWith(1, 79, 24);
+    expect(terminal.pty.resize).toHaveBeenNthCalledWith(1, 80, 23);
     expect(terminal.pty.resize).toHaveBeenCalledTimes(1);
 
     await vi.runAllTimersAsync();
@@ -431,15 +451,14 @@ describe('TerminalPanelManager hidden output delivery', () => {
 
   it('returns emulated live screen and restore state for daemon and renderer reads', async () => {
     const manager = testAccess<SnapshotAccess>(new TerminalPanelManager());
-    const screenEmulator = new TerminalStateEmulator(40, 5);
+    const screenEmulator = inProcessEmulatorHost().createEmulator(40, 5);
     screenEmulator.write('\x1b[?1049h\x1b[Hagent screen');
-    await screenEmulator.waitForIdle();
+    await screenEmulator.refresh();
     const terminal = createTerminal({
       scrollbackBuffer: 'scrollback',
       alternateScreenBuffer: 'screen',
       screenEmulator,
       isAlternateScreen: true,
-      activityStatus: 'active',
       currentCommand: 'codex',
       capturedAgentSessionId: 'agent-session-1',
     });
@@ -472,7 +491,7 @@ describe('TerminalPanelManager hidden output delivery', () => {
       alternateScreenBuffer: 'screen',
       screenText: 'agent screen',
       isAlternateScreen: true,
-      activityStatus: 'active',
+      activityStatus: 'idle',
       currentCommand: 'codex',
       isCliPanel: true,
       isCliReady: true,
@@ -491,7 +510,7 @@ describe('TerminalPanelManager hidden output delivery', () => {
 
   it('serves normal-buffer restore content from the rendered emulator, not the raw append log', async () => {
     const manager = testAccess<SnapshotAccess>(new TerminalPanelManager());
-    const screenEmulator = new TerminalStateEmulator(40, 5);
+    const screenEmulator = inProcessEmulatorHost().createEmulator(40, 5);
     const frame = 'PR #363 state unchanged';
     // Live stream: the frame prints once, then forced-redraw repaints re-emit it
     // after cursor-home — the traffic that duplicated rows when the raw log was
@@ -501,7 +520,6 @@ describe('TerminalPanelManager hidden output delivery', () => {
     screenEmulator.write(initial);
     screenEmulator.write(repaint);
     screenEmulator.write(repaint);
-    await screenEmulator.waitForIdle();
     const terminal = createTerminal({
       scrollbackBuffer: initial + repaint + repaint,
       screenEmulator,
@@ -1008,5 +1026,39 @@ describe('TerminalPanelManager agent session capture', () => {
       }),
     });
     disposeFlowControlRecord(terminal.flowControl);
+  });
+});
+
+describe('TerminalPanelManager destroyAllTerminals', () => {
+  afterEach(() => {
+    vi.mocked(panelManager.getPanel).mockReset();
+    vi.mocked(panelManager.updatePanel).mockReset();
+  });
+
+  it('kills every PTY even when one terminal fails to flush', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const manager = testAccess<DestroyAllAccess>(new TerminalPanelManager());
+    const doomed = createTerminal({ panelId: 'panel-throws' });
+    const healthy = createTerminal({ panelId: 'panel-ok' });
+    manager.terminals.set(doomed.panelId, doomed);
+    manager.terminals.set(healthy.panelId, healthy);
+    // The production event-sink fanout rethrows its first subscriber error, so
+    // one destroyed webContents is enough to make this throw during quit.
+    vi.spyOn(manager, 'flushOutputBuffer').mockImplementation((terminal) => {
+      if (terminal.panelId === doomed.panelId) throw new Error('event sink exploded');
+    });
+
+    manager.destroyAllTerminals();
+
+    // The throwing terminal must still be killed: the map is cleared straight
+    // after this loop, so a skipped kill leaves nothing able to reclaim it.
+    expect(doomed.pty.kill).toHaveBeenCalled();
+    expect(healthy.pty.kill).toHaveBeenCalled();
+    expect(manager.terminals.size).toBe(0);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('Final output flush failed'),
+      expect.anything(),
+    );
+    warn.mockRestore();
   });
 });

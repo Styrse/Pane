@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
+import time
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from .daemon_client import invoke_daemon
+from .daemon_client import PaneDaemonClientError, invoke_daemon
 from .generated_contract import RUNPANE_CONTRACT
 
 
@@ -41,6 +44,134 @@ def run_repos_add(parsed: Any) -> int:
     return 0
 
 
+def run_sessions_list(parsed: Any) -> int:
+    result = invoke_daemon("runpane:sessions:list", [], pane_dir=parsed.pane_dir)
+    if parsed.json:
+        print_json(result)
+        return 0
+    sessions = result.get("sessions", [])
+    if not sessions:
+        print("No named Sessions.")
+        return 0
+    for session in sessions:
+        print(
+            f"{session.get('id')}\t{session.get('name')}\t{session.get('agent')}\t"
+            f"{len(session.get('associations') or [])} Pane(s)"
+        )
+    return 0
+
+
+def run_sessions_create(parsed: Any) -> int:
+    payload = read_session_payload(parsed, "create")
+    result = invoke_daemon("runpane:sessions:create", [payload], pane_dir=parsed.pane_dir)
+    return print_session_result(result, parsed.json, "Created")
+
+
+def run_sessions_get(parsed: Any) -> int:
+    result = invoke_daemon("runpane:sessions:get", [_session_selector(parsed)], pane_dir=parsed.pane_dir)
+    return print_session_result(result, parsed.json, "")
+
+
+def run_sessions_update(parsed: Any) -> int:
+    payload = read_session_payload(parsed, "update")
+    result = invoke_daemon(
+        "runpane:sessions:update",
+        [{"selector": _session_selector(parsed), "input": payload}],
+        pane_dir=parsed.pane_dir,
+    )
+    return print_session_result(result, parsed.json, "Updated")
+
+
+def run_sessions_set_agent(parsed: Any) -> int:
+    if not parsed.agent:
+        raise ValueError("runpane sessions set-agent requires --agent.")
+    result = invoke_daemon(
+        "runpane:sessions:set-agent",
+        [{"selector": _session_selector(parsed), "agent": parsed.agent}],
+        pane_dir=parsed.pane_dir,
+    )
+    return print_session_result(result, parsed.json, "Updated agent for")
+
+
+def run_sessions_associate(parsed: Any) -> int:
+    if not parsed.pane_id:
+        raise ValueError("runpane sessions associate requires --pane.")
+    association: Dict[str, Any] = {"paneId": parsed.pane_id}
+    if parsed.panel_id:
+        association["panelIds"] = [parsed.panel_id]
+    result = invoke_daemon(
+        "runpane:sessions:associate",
+        [{"selector": _session_selector(parsed), "association": association}],
+        pane_dir=parsed.pane_dir,
+    )
+    return print_session_result(result, parsed.json, "Associated")
+
+
+def run_sessions_detach(parsed: Any) -> int:
+    result = invoke_daemon(
+        "runpane:sessions:detach",
+        [{"selector": _session_selector(parsed), **optional_value("paneId", parsed.pane_id)}],
+        pane_dir=parsed.pane_dir,
+    )
+    return print_session_result(result, parsed.json, "Detached")
+
+
+def run_sessions_overview(parsed: Any) -> int:
+    result = invoke_daemon("runpane:sessions:overview", [_session_selector(parsed)], pane_dir=parsed.pane_dir)
+    if parsed.json:
+        print_json(result)
+        return 0
+    session = result.get("session") or {}
+    print(f"{session.get('name')}: {result.get('status')}")
+    for pane in result.get("panes", []):
+        if pane.get("missing"):
+            details = "missing"
+        elif pane.get("archived"):
+            details = "archived"
+        else:
+            details = ", ".join(
+                f"{panel.get('title')}={panel.get('state')}"
+                for panel in pane.get("panels", [])
+            ) or "no terminal panels"
+        print(f"  {pane.get('name')}: {details}")
+    return 0
+
+
+def _session_selector(parsed: Any) -> Dict[str, str]:
+    session_id = (parsed.session_id or "").strip()
+    if not session_id:
+        raise ValueError("Named Session id or name is required via --session.")
+    return {"sessionId": session_id}
+
+
+def read_session_payload(parsed: Any, command: str) -> Dict[str, Any]:
+    if not parsed.from_json:
+        raise ValueError(f"runpane sessions {command} requires --from-json <path|->.")
+    try:
+        value = json.loads(strip_utf8_bom(read_input_source(parsed.from_json)))
+    except json.JSONDecodeError as error:
+        raise ValueError(f"runpane sessions {command} received invalid JSON: {error}") from error
+    if not isinstance(value, dict):
+        raise ValueError(f"runpane sessions {command} JSON input must be an object.")
+    if command == "create" and not isinstance(value.get("name"), str):
+        raise ValueError("runpane sessions create JSON input requires a string name.")
+    return value
+
+
+def print_session_result(result: Dict[str, Any], as_json: bool, action: str) -> int:
+    if as_json:
+        print_json(result)
+        return 0 if result.get("ok", result.get("success", False)) else 1
+    session = result.get("session") or {}
+    if not result.get("ok", result.get("success", False)):
+        raise ValueError(result.get("error") or "Sessions operation failed")
+    prefix = f"{action} " if action else ""
+    print(f"{prefix}Session {session.get('name')} ({session.get('id')})")
+    if result.get("panelId"):
+        print(f"Panel: {result.get('panelId')}")
+    return 0
+
+
 def run_panes_list(parsed: Any) -> int:
     result = invoke_daemon("runpane:panes:list", [{
         "repo": parsed.repo,
@@ -52,6 +183,174 @@ def run_panes_list(parsed: Any) -> int:
 
     print_pane_list_result(result)
     return 0
+
+
+def run_panes_cost(parsed: Any) -> int:
+    result = invoke_daemon("runpane:panes:cost", [{
+        **optional_value("repo", parsed.repo),
+        **optional_value("paneId", parsed.pane_id),
+    }], pane_dir=parsed.pane_dir)
+
+    if parsed.json:
+        print_json(result)
+        return 0
+
+    print_pane_cost_result(result)
+    return 0
+
+
+def run_workspace_state(parsed: Any) -> int:
+    result = invoke_daemon(
+        "runpane:workspace:state",
+        [{"repo": parsed.repo}],
+        pane_dir=parsed.pane_dir,
+    )
+
+    if parsed.json:
+        print_json(result)
+        return 0
+
+    for entry in result.get("entries", []):
+        panel = f"\t{entry.get('panelId')}" if entry.get("panelId") else ""
+        print(f"{workspace_label(entry.get('kind'))}\t{entry.get('paneName')}{panel}")
+    return 0
+
+
+def has_cadence_value_flag(parsed: Any) -> bool:
+    """True when any cadence flag that needs a named daemon cursor was given."""
+    return any(value is not None for value in (parsed.settle_ms, parsed.blocked_settle_ms, parsed.min_interval_ms))
+
+
+def run_watch(parsed: Any) -> int:
+    if parsed.watch_as and parsed.watch_since is not None:
+        raise ValueError("runpane watch accepts either --as or --since, not both.")
+
+    defaults = RUNPANE_CONTRACT["defaults"]["watch"]
+    output_format = parsed.watch_format or ("json" if parsed.json else "lines")
+    heartbeat_seconds = parsed.heartbeat_seconds
+    if heartbeat_seconds is None:
+        heartbeat_seconds = defaults["heartbeatSeconds"] if parsed.follow else 0
+    heartbeat_ms = effective_watch_heartbeat_ms(heartbeat_seconds)
+    idle_after_ms = parsed.idle_after_ms
+    if idle_after_ms is None:
+        idle_after_ms = defaults["idleAfterMs"] if parsed.follow else 0
+    effective_agents_only = None if parsed.include_shells else (True if parsed.agents_only or parsed.follow else None)
+    include_held_input = True if parsed.include_held_input and not parsed.no_held_input else None
+    include_held_input_presence = (
+        True if defaults["includeHeldInputPresence"]
+        and not parsed.no_held_input and parsed.follow and output_format == "lines" else None
+    )
+    cadence_value_flag_present = has_cadence_value_flag(parsed)
+    # Cadence state lives in the daemon per named consumer, so an anonymous follower names itself.
+    watch_as = parsed.watch_as
+    if watch_as is None and parsed.follow:
+        watch_as = os.environ.get("PANE_PANEL_ID") or (f"follow-{os.getpid()}" if cadence_value_flag_present else None)
+    request: Dict[str, Any] = {
+        **optional_value("as", watch_as),
+        **optional_value("since", parsed.watch_since),
+        **optional_value("from", parsed.watch_from),
+        **optional_value("timeoutMs", parsed.timeout_ms),
+        **optional_value("limit", parsed.limit),
+        **optional_value("kinds", parsed.watch_kinds or None),
+        **optional_value("paneIds", parsed.watch_pane_ids or None),
+        **optional_value("excludePaneIds", parsed.watch_exclude_pane_ids or None),
+        **optional_value("repo", parsed.repo),
+        **optional_value("nameContains", parsed.name_contains),
+        **optional_value("agentsOnly", effective_agents_only),
+        **optional_value("ackNow", True if parsed.ack_now else None),
+        **optional_value("includeHeldInput", include_held_input),
+        **optional_value("includeHeldInputPresence", include_held_input_presence),
+        "idleAfterMs": idle_after_ms,
+        **optional_value("settleMs", parsed.settle_ms),
+        **optional_value("blockedSettleMs", parsed.blocked_settle_ms),
+        **optional_value("minIntervalMs", parsed.min_interval_ms),
+        **optional_value("idleBackoff", True if parsed.idle_backoff else None),
+    }
+
+    armed = False
+    failing_code: Optional[str] = None
+    last_failure_at = 0.0
+    last_heartbeat_at = time.monotonic() * 1_000
+    anonymous_idle_window_start_ms = 0 if not watch_as and parsed.follow else None
+    try:
+        while True:
+            requested_wait_ms = parsed.timeout_ms if parsed.timeout_ms is not None else (heartbeat_ms or 60_000)
+            heartbeat_wait_ms = (
+                max(0, heartbeat_ms - (time.monotonic() * 1_000 - last_heartbeat_at))
+                if heartbeat_ms > 0 else requested_wait_ms
+            )
+            timeout_ms = 0 if parsed.self_test else min(requested_wait_ms, heartbeat_wait_ms, 120_000)
+            try:
+                call_request = dict(request)
+                call_request["timeoutMs"] = timeout_ms
+                if parsed.self_test:
+                    call_request.pop("as", None)
+                    call_request.pop("since", None)
+                    call_request.update({"from": "now", "idleAfterMs": 0, "timeoutMs": 0})
+                elif anonymous_idle_window_start_ms is not None:
+                    call_request["idleWindowStartMs"] = anonymous_idle_window_start_ms
+                result = invoke_daemon(
+                    "runpane:workspace:wait",
+                    [call_request],
+                    pane_dir=parsed.pane_dir,
+                    timeout_ms=timeout_ms + 5_000,
+                    event_include=[],
+                )
+            except PaneDaemonClientError as error:
+                if not parsed.follow or error.code not in {
+                    "ERR_RUNPANE_DAEMON_CLOSED",
+                    "ERR_RUNPANE_DAEMON_CONNECT_FAILED",
+                    "ERR_RUNPANE_DAEMON_TIMEOUT",
+                    "ECONNREFUSED",
+                    "ENOENT",
+                }:
+                    return emit_watch_failure(error, output_format)
+                code = error.code or type(error).__name__
+                now_ms = time.monotonic() * 1_000
+                if failing_code != code or (heartbeat_ms > 0 and now_ms - last_failure_at >= heartbeat_ms):
+                    emit_watch_non_entry("_error", output_format, code=code, message=str(error))
+                    last_failure_at = now_ms
+                failing_code = code
+                time.sleep(1)
+                continue
+            if failing_code:
+                emit_watch_non_entry("_reconnected", output_format, generation=result.get("generation"))
+                failing_code = None
+            if not armed and (parsed.follow or parsed.self_test):
+                emit_watch_non_entry(
+                    "_ok",
+                    output_format,
+                    generation=result.get("generation"),
+                    epoch=result.get("epoch"),
+                )
+                armed = True
+                if parsed.self_test:
+                    return 0
+            print_workspace_wait_result(result, output_format)
+            now_ms = time.monotonic() * 1_000
+            if heartbeat_ms > 0 and now_ms - last_heartbeat_at >= heartbeat_ms:
+                emit_watch_non_entry(
+                    "_heartbeat",
+                    output_format,
+                    generation=result.get("generation"),
+                    at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                )
+                last_heartbeat_at = now_ms
+            if not watch_as:
+                request["since"] = result.get("generation")
+                if parsed.follow:
+                    anonymous_idle_window_start_ms = time.time() * 1_000
+            if not parsed.follow:
+                break
+    except KeyboardInterrupt:
+        return 0
+
+    return 0
+
+
+def effective_watch_heartbeat_ms(seconds: float) -> float:
+    configured_ms = seconds * 1_000
+    return min(configured_ms, 120_000) if configured_ms > 0 else 0
 
 
 def run_panes_create(parsed: Any) -> int:
@@ -78,8 +377,9 @@ def run_panes_archive(parsed: Any) -> int:
 
     request: Dict[str, Any] = {
         "paneId": parsed.pane_id,
-        "force": parsed.force or None,
-        "source": parsed.source if parsed.source in ("user", "agent") else None,
+        **optional_value("force", True if parsed.force else None),
+        **optional_value("source", parsed.source if parsed.source in ("user", "agent") else None),
+        **optional_value("dryRun", True if parsed.dry_run else None),
     }
 
     confirm_pane_archive(parsed, request)
@@ -276,10 +576,17 @@ def run_panels_submit(parsed: Any) -> int:
     else:
         input_bytes = result.get("inputBytes", 0)
         suffix = "" if input_bytes == 1 else "s"
-        print(f"Submitted {input_bytes} byte{suffix} with Enter to panel {result.get('panelId')}.")
+        verb = "Submitted" if result.get("ok") else "Could not verify"
+        verified = " verified" if result.get("verifiedSubmitted") else " unverified"
+        print(
+            f"{verb} {input_bytes} byte{suffix} via {result.get('sequenceName')} "
+            f"to panel {result.get('panelId')}.{verified}"
+        )
+        if result.get("blocked"):
+            print(f"Blocked: {result['blocked'].get('message')}")
         if result.get("nextCommand"):
             print(f"Next: {result.get('nextCommand')}")
-    return 0
+    return 0 if result.get("ok") else 1
 
 
 def run_panels_submit_composer(parsed: Any) -> int:
@@ -519,7 +826,7 @@ def confirm_pane_create(parsed: Any, request: Dict[str, Any]) -> None:
 
 
 def confirm_pane_archive(parsed: Any, request: Dict[str, Any]) -> None:
-    if parsed.yes:
+    if parsed.dry_run or parsed.yes:
         return
     if not is_interactive_shell():
         raise ValueError("runpane panes archive mutates Pane state. Rerun with --yes in non-interactive shells.")
@@ -637,6 +944,101 @@ def print_json(value: Any) -> None:
     print(json.dumps(value, indent=2))
 
 
+def sanitize_watch_value(value: Any) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", str(value))).strip() or "<unnamed>"
+
+
+def print_workspace_wait_result(result: Dict[str, Any], output_format: str) -> None:
+    reset = result.get("reset")
+    if reset:
+        if output_format == "json":
+            print(json.dumps({
+                "kind": "_reset",
+                "reason": reset.get("reason"),
+                "epoch": result.get("epoch"),
+            }, separators=(",", ":")), flush=True)
+        else:
+            print(f"RESET {sanitize_watch_value(reset.get('reason'))} epoch {sanitize_watch_value(result.get('epoch'))}", flush=True)
+
+    if result.get("dropped") is not None:
+        if output_format == "json":
+            print(json.dumps({"kind": "_dropped", "count": result.get("dropped")}, separators=(",", ":")), flush=True)
+        else:
+            print(f"DROPPED {result.get('dropped')}", flush=True)
+
+    for entry in result.get("entries", []):
+        if output_format == "json":
+            print(json.dumps(entry, separators=(",", ":")), flush=True)
+            continue
+        line = format_workspace_entry_line(entry)
+        if line:
+            print(line, flush=True)
+        if entry.get("kind") in {"agent.ready", "agent.idle"} and (entry.get("heldInputPresent") or entry.get("heldInput")):
+            panel = f" panel {sanitize_watch_value(entry.get('panelId'))}" if entry.get("panelId") else ""
+            print(
+                f"STUCK {sanitize_watch_value(entry.get('paneName'))} pane {sanitize_watch_value(entry.get('paneId'))}{panel} held-input-present",
+                flush=True,
+            )
+
+
+def format_workspace_entry_line(entry: Dict[str, Any]) -> Optional[str]:
+    if entry.get("baseline") and not entry.get("changedWhileAway"):
+        return None
+    name = sanitize_watch_value(entry.get("paneName"))
+    pane = f"pane {sanitize_watch_value(entry.get('paneId'))}"
+    panel = f" panel {sanitize_watch_value(entry.get('panelId'))}" if entry.get("panelId") else ""
+    if entry.get("changedWhileAway"):
+        return f"CHANGED {name} {pane}{panel}"
+    kind = entry.get("kind")
+    if kind == "agent.idle":
+        minutes = max(0, int(entry.get("idleMs") or 0) // 60_000)
+        return f"IDLE {name} {minutes}m {pane}{panel}"
+    if kind == "panel.exited":
+        code = entry.get("exitCode") if entry.get("exitCode") is not None else "unknown"
+        return f"EXIT {name} {pane}{panel} code {code}"
+    if kind in {"pane.created", "pane.gone"}:
+        return f"{workspace_label(kind)} {name} {pane}"
+    return f"{workspace_label(kind)} {name} {pane}{panel}"
+
+
+def emit_watch_non_entry(kind: str, output_format: str, **fields: Any) -> None:
+    if output_format == "json":
+        print(json.dumps({"kind": kind, **fields}, separators=(",", ":")), flush=True)
+        return
+    if kind == "_ok":
+        print(f"WATCH OK gen {fields.get('generation')} epoch {sanitize_watch_value(fields.get('epoch'))}", flush=True)
+    elif kind == "_heartbeat":
+        print(f"HEARTBEAT gen {fields.get('generation')} at {fields.get('at')}", flush=True)
+    elif kind == "_reconnected":
+        print(f"WATCH RECONNECTED gen {fields.get('generation')}", flush=True)
+    else:
+        print(f"WATCH ERROR {sanitize_watch_value(fields.get('code'))}: {sanitize_watch_value(fields.get('message'))}", flush=True)
+
+
+def emit_watch_failure(error: Exception, output_format: str) -> int:
+    code = error.code if isinstance(error, PaneDaemonClientError) and error.code else type(error).__name__
+    if output_format == "json":
+        line = json.dumps({"kind": "_error", "code": code, "message": str(error)}, separators=(",", ":"))
+    else:
+        line = f"WATCH ERROR {sanitize_watch_value(code)}: {sanitize_watch_value(error)}"
+    print(line, flush=True)
+    print(line, file=sys.stderr, flush=True)
+    return 2
+
+
+def workspace_label(kind: Any) -> str:
+    return {
+        "agent.ready": "READY",
+        "agent.busy": "BUSY",
+        "agent.blocked": "BLOCKED",
+        "agent.unknown": "UNKNOWN",
+        "agent.idle": "IDLE",
+        "pane.created": "NEW",
+        "pane.gone": "GONE",
+        "panel.exited": "EXIT",
+    }.get(kind, str(kind).upper())
+
+
 def print_repo_add_result(result: Dict[str, Any]) -> None:
     preview = result.get("preview") or {}
     if result.get("dryRun") and preview:
@@ -667,6 +1069,36 @@ def print_pane_list_result(result: Dict[str, Any]) -> None:
         print(f"{pane.get('id')}\t{pane.get('name')}\t{pane.get('status')}{pinned}\t{pane.get('panelCount')} panels\t{pane.get('worktreePath')}{repo}")
 
 
+def print_pane_cost_result(result: Dict[str, Any]) -> None:
+    for pane in result.get("panes", []):
+        hit_rate = int(pane.get("cacheHitRate", 0) * 100 + 0.5)
+        uncached_cost = format_pane_cost(pane.get("uncachedCostUsd", 0), pane.get("costIncomplete", False))
+        total_cost = format_pane_cost(pane.get("estimatedCostUsd", 0), pane.get("costIncomplete", False))
+        print(f"{pane.get('paneId')}\t{pane.get('paneName')}\t{uncached_cost} uncached\t{total_cost} total\t{hit_rate}% hit")
+        print_pane_cost_models(pane.get("byModel", []))
+    unattributed = result.get("unattributed")
+    if unattributed:
+        hit_rate = int(unattributed.get("cacheHitRate", 0) * 100 + 0.5)
+        uncached_cost = format_pane_cost(unattributed.get("uncachedCostUsd", 0), unattributed.get("costIncomplete", False))
+        total_cost = format_pane_cost(unattributed.get("estimatedCostUsd", 0), unattributed.get("costIncomplete", False))
+        print(f"Unattributed\t{uncached_cost} uncached\t{total_cost} total\t{hit_rate}% hit")
+        print_pane_cost_models(unattributed.get("byModel", []))
+    totals = result.get("totals")
+    if totals:
+        total_cost = format_pane_cost(totals.get("estimatedCostUsd", 0), totals.get("costIncomplete", False))
+        print(f"Total\t{total_cost}\t{totals.get('totalTokens', 0)} tokens")
+
+
+def format_pane_cost(cost_usd: float, cost_incomplete: bool) -> str:
+    return "n/a" if cost_incomplete else f"${cost_usd:.4f}"
+
+
+def print_pane_cost_models(models: list[Dict[str, Any]]) -> None:
+    for model in models:
+        cost = "n/a" if model.get("costIncomplete") else f"${model.get('estimatedCostUsd', 0):.4f}"
+        print(f"  {model.get('model')}\t{model.get('totalTokens', 0)} tokens\t{cost}")
+
+
 def print_pane_create_result(result: Dict[str, Any]) -> None:
     for item in result.get("items", []):
         name = item.get("name") or f"pane {item.get('index')}"
@@ -688,14 +1120,35 @@ def print_pane_create_result(result: Dict[str, Any]) -> None:
 
 
 def print_pane_archive_result(result: Dict[str, Any]) -> None:
+    if result.get("dryRun"):
+        action = "Would archive" if result.get("wouldArchive") else "Would refuse to archive"
+        forced = " (forced)" if result.get("forced") else ""
+        print(f"{action} pane {result.get('paneId')}{forced}.")
+        blocked = result.get("blocked") or {}
+        if blocked:
+            print(f"Safety: {blocked.get('message')}")
+        print_archive_commit_evidence(result.get("safetyCheck") or {})
+        return
+
     if "archived" not in result:
         blocked = result.get("blocked") or {}
         print(f"Refused to archive pane {result.get('paneId')}: {blocked.get('message')}", file=sys.stderr)
+        print_archive_commit_evidence(blocked.get("safetyCheck") or {}, file=sys.stderr)
         print(f"Next: {result.get('nextCommand')}", file=sys.stderr)
         return
 
     forced = " (forced)" if result.get("forced") else ""
     print(f"Archived pane {result.get('paneId')}{forced}. Worktree cleanup: {result.get('worktreeCleanup')}.")
+
+
+def print_archive_commit_evidence(safety_check: Dict[str, Any], file: Any = None) -> None:
+    destination = file if file is not None else sys.stdout
+    upstream = safety_check.get("upstream")
+    if upstream:
+        refreshed = " (refreshed)" if safety_check.get("upstreamRefreshed") else ""
+        print(f"Upstream: {upstream}{refreshed}", file=destination)
+    for commit in safety_check.get("unpushedCommitDetails") or []:
+        print(f"Unpushed: {commit.get('sha')} {commit.get('subject')}", file=destination)
 
 
 def print_panel_create_result(result: Dict[str, Any]) -> None:

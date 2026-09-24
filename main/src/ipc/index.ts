@@ -18,7 +18,6 @@ import { registerPanelHandlers } from './panels';
 import { registerEditorPanelHandlers } from './editorPanel';
 import { registerNimbalystHandlers } from './nimbalyst';
 import { registerSpotlightHandlers } from './spotlight';
-import { registerCloudHandlers } from './cloud';
 import { registerRemoteDaemonHandlers } from './remoteDaemon';
 import { registerRunpaneHandlers } from './runpane';
 import { registerClipboardHandlers } from './clipboard';
@@ -26,10 +25,14 @@ import { registerResourceMonitorHandlers } from './resourceMonitor';
 import { registerOnboardingHandlers } from './onboarding';
 import { registerVoiceHandlers } from './voice';
 import { registerPaneChatHandlers } from './paneChat';
+import { registerUsageHandlers } from './usage';
+import { registerOrchestrationSessionHandlers } from './orchestrationSessions';
+import { registerExportHandlers } from './export';
 import { createDaemonBridgeRouter, registerDaemonBridgeHandlers } from './daemon';
 import { registerPermissionHandlers } from './permissions';
 import { registerAgentUsageHandlers } from './agentUsage';
 import { registerFeedbackHandlers } from './feedback';
+import { registerMobilePushHandlers } from './mobilePush';
 import { PaneCommandRegistry } from '../daemon/commandRegistry';
 import { remotePaneClientController } from '../daemon/client/remotePaneClient';
 
@@ -59,7 +62,9 @@ export function registerIpcHandlers(services: AppServices): PaneCommandRegistry 
   registerSessionHandlers(ipcMain, services, commandRegistry);
   registerProjectHandlers(ipcMain, services, commandRegistry);
   registerConfigHandlers(ipcMain, services, commandRegistry);
+  registerMobilePushHandlers(ipcMain, services, commandRegistry);
   registerDialogHandlers(ipcMain, services);
+  registerExportHandlers(ipcMain, services);
   registerPermissionHandlers(ipcMain, services, commandRegistry);
   registerGitHandlers(ipcMain, services, commandRegistry);
   registerScriptHandlers(ipcMain, services, commandRegistry);
@@ -73,7 +78,6 @@ export function registerIpcHandlers(services: AppServices): PaneCommandRegistry 
   registerEditorPanelHandlers(ipcMain, services);
   registerNimbalystHandlers(ipcMain, services);
   registerSpotlightHandlers(ipcMain, services);
-  registerCloudHandlers(ipcMain, services);
   registerRemoteDaemonHandlers(ipcMain, services);
   registerRunpaneHandlers(ipcMain, services, commandRegistry);
   registerClipboardHandlers(ipcMain, services);
@@ -81,6 +85,8 @@ export function registerIpcHandlers(services: AppServices): PaneCommandRegistry 
   registerAgentUsageHandlers(ipcMain, services, commandRegistry);
   registerVoiceHandlers(ipcMain, services, commandRegistry);
   registerPaneChatHandlers(ipcMain, services, commandRegistry);
+  registerOrchestrationSessionHandlers(ipcMain, services, commandRegistry);
+  registerUsageHandlers(ipcMain, commandRegistry);
   registerOnboardingHandlers(ipcMain, services);
   registerDaemonBridgeHandlers(ipcMain, bridgeRouter);
 

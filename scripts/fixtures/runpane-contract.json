@@ -68,6 +68,44 @@
       "/tmp/pane"
     ],
     [
+      "doctor",
+      "--report",
+      "--title",
+      "watch failed",
+      "--body-file",
+      "/tmp/watch-evidence.txt",
+      "--json"
+    ],
+    [
+      "watch",
+      "--as",
+      "monitor",
+      "--from",
+      "earliest",
+      "--follow",
+      "--format",
+      "lines",
+      "--heartbeat",
+      "60",
+      "--idle-after",
+      "600000",
+      "--settle",
+      "180000",
+      "--blocked-settle",
+      "30000",
+      "--min-interval",
+      "600000",
+      "--idle-backoff",
+      "--all-managed",
+      "--agents-only",
+      "--exclude-pane",
+      "pane-old",
+      "--kinds",
+      "agent.ready,agent.idle",
+      "--include-held-input",
+      "--self-test"
+    ],
+    [
       "daemon",
       "repair",
       "--pane-dir",
@@ -109,6 +147,13 @@
       "list",
       "--repo",
       "active",
+      "--json"
+    ],
+    [
+      "panes",
+      "cost",
+      "--pane",
+      "session-1",
       "--json"
     ],
     [
@@ -328,6 +373,26 @@
       "auto",
       "--yes",
       "--json"
+    ],
+    [
+      "sessions",
+      "list",
+      "--json"
+    ],
+    [
+      "sessions",
+      "get",
+      "--session",
+      "demo",
+      "--json"
+    ],
+    [
+      "sessions",
+      "update",
+      "--session",
+      "demo",
+      "--from-json",
+      "-"
     ]
   ],
   "help": {

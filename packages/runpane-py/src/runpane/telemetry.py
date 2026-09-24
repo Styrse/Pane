@@ -44,7 +44,11 @@ def create_initial_telemetry_context(argv: Optional[List[str]] = None) -> Wrappe
     if first == "repos":
         return {"command": "repos add" if len(args) > 1 and args[1] == "add" else "repos list"}
     if first == "panes":
-        return {"command": "panes list" if len(args) > 1 and args[1] == "list" else "panes create"}
+        if len(args) > 1 and args[1] == "list":
+            return {"command": "panes list"}
+        if len(args) > 1 and args[1] == "cost":
+            return {"command": "panes cost"}
+        return {"command": "panes create"}
     if first == "panels":
         if len(args) > 1 and args[1] == "output":
             return {"command": "panels output"}

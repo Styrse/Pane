@@ -10,7 +10,7 @@ export const RUNPANE_CONTRACT = {
     "Work starts only when a user runs `runpane ...`."
   ],
   "compatibility": {
-    "node": ">=18.17.0",
+    "node": ">=20.0.0",
     "python": ">=3.8"
   },
   "terminology": {
@@ -26,7 +26,18 @@ export const RUNPANE_CONTRACT = {
     "format": "auto",
     "dryRun": false,
     "yes": false,
-    "verbose": false
+    "verbose": false,
+    "watch": {
+      "format": "lines",
+      "heartbeatSeconds": 60,
+      "idleAfterMs": 600000,
+      "settleMs": 0,
+      "blockedSettleMs": 0,
+      "minIntervalMs": 0,
+      "idleBackoff": false,
+      "agentsOnly": true,
+      "includeHeldInputPresence": true
+    }
   },
   "enums": {
     "installTargets": [
@@ -117,7 +128,8 @@ export const RUNPANE_CONTRACT = {
       "name": "doctor",
       "summary": "Run platform, release, installed Pane, daemon reachability, and remote setup diagnostics.",
       "usage": [
-        "runpane doctor [--json] [--pane-dir <path>] [--pane-path <path>] [--format <format>] [--verbose]"
+        "runpane doctor [--json] [--pane-dir <path>] [--pane-path <path>] [--format <format>] [--verbose]",
+        "runpane doctor --report [--title <text>] --body-file <path|-> [--yes] [--json]"
       ],
       "jsonSchemas": [
         "doctorResult"
@@ -189,6 +201,38 @@ export const RUNPANE_CONTRACT = {
       ]
     },
     {
+      "name": "panes cost",
+      "summary": "Report estimated token cost per Pane, with per-model breakdown and cache efficiency.",
+      "usage": [
+        "runpane panes cost [--repo <selector>] [--pane <pane-id>] [--json]"
+      ],
+      "jsonSchemas": [
+        "paneCostRequest",
+        "paneCostResult"
+      ]
+    },
+    {
+      "name": "workspace state",
+      "summary": "Read one workspace snapshot of every Pane and CLI panel.",
+      "usage": [
+        "runpane workspace state [--repo <selector>] [--json]"
+      ],
+      "jsonSchemas": [
+        "workspaceStateResult"
+      ]
+    },
+    {
+      "name": "watch",
+      "summary": "Wait for workspace agent and Pane transitions using a daemon-held cursor.",
+      "usage": [
+        "runpane watch [--as <name>|--since <generation>] [--follow] [--format <lines|json>] [--heartbeat <seconds>] [--idle-after <ms>] [--settle <ms>] [--blocked-settle <ms>] [--min-interval <ms>] [--idle-backoff] [--all-managed|--pane <id>] [--include-shells] [--self-test] [--kinds <kind,...>] [--repo <selector>] [--name-contains <text>] [--timeout-ms <ms>] [--from <now|earliest>] [--json]"
+      ],
+      "jsonSchemas": [
+        "workspaceWaitRequest",
+        "workspaceWaitResult"
+      ]
+    },
+    {
       "name": "panes create",
       "summary": "Create user-visible Panes (Pane sessions) backed by Pane-managed worktrees for feature/PR work and open terminal-backed tool tabs.",
       "usage": [
@@ -202,10 +246,21 @@ export const RUNPANE_CONTRACT = {
       ]
     },
     {
+      "name": "panes adopt",
+      "summary": "Adopt an existing externally managed git worktree as a Pane without changing the worktree.",
+      "usage": [
+        "runpane panes adopt --repo <selector> --path <dir> --name <name> --agent <codex|claude|cursor> [--resume <id>] [--folder <name>] [--launch] [--no-pinned] [--dry-run] [--yes] [--json]"
+      ],
+      "mutates": true,
+      "jsonSchemas": [
+        "paneCreateResult"
+      ]
+    },
+    {
       "name": "panes archive",
       "summary": "Archive a Pane (session) exactly like the UI Archive action, including safe removal of its Pane-managed git worktree.",
       "usage": [
-        "runpane panes archive --pane <pane-id> [--source user|agent] [--force] --yes [--json]"
+        "runpane panes archive --pane <pane-id> [--source user|agent] [--force] [--dry-run] --yes [--json]"
       ],
       "mutates": true,
       "jsonSchemas": [
@@ -318,7 +373,7 @@ export const RUNPANE_CONTRACT = {
     },
     {
       "name": "panels submit",
-      "summary": "Send text to a terminal panel and append a terminal Enter byte.",
+      "summary": "Send and submit text to a terminal panel, including idle agent composers.",
       "usage": [
         "runpane panels submit --panel <panel-id> (--text <text>|--input-file <path|->) --yes [--json]"
       ],
@@ -348,6 +403,91 @@ export const RUNPANE_CONTRACT = {
       ],
       "jsonSchemas": [
         "panelWaitResult"
+      ]
+    },
+    {
+      "name": "sessions list",
+      "summary": "List durable named orchestration Sessions.",
+      "usage": [
+        "runpane sessions list [--json] [--pane-dir <path>]"
+      ],
+      "jsonSchemas": [
+        "sessionListResult"
+      ]
+    },
+    {
+      "name": "sessions create",
+      "summary": "Create a durable named orchestration Session and its hidden terminal owner.",
+      "usage": [
+        "runpane sessions create --from-json <path|-> [--json] [--pane-dir <path>]"
+      ],
+      "mutates": true,
+      "jsonSchemas": [
+        "sessionResult"
+      ]
+    },
+    {
+      "name": "sessions get",
+      "summary": "Read one durable named orchestration Session.",
+      "usage": [
+        "runpane sessions get --session <id|name> [--json] [--pane-dir <path>]"
+      ],
+      "jsonSchemas": [
+        "sessionResult"
+      ]
+    },
+    {
+      "name": "sessions update",
+      "summary": "Update a Session overview from structured JSON.",
+      "usage": [
+        "runpane sessions update --session <id|name> --from-json <path|-> [--json] [--pane-dir <path>]"
+      ],
+      "mutates": true,
+      "jsonSchemas": [
+        "sessionResult"
+      ]
+    },
+    {
+      "name": "sessions set-agent",
+      "summary": "Switch the durable terminal agent for a named Session.",
+      "usage": [
+        "runpane sessions set-agent --session <id|name> --agent <codex|claude|cursor> [--json] [--pane-dir <path>]"
+      ],
+      "mutates": true,
+      "jsonSchemas": [
+        "sessionResult"
+      ]
+    },
+    {
+      "name": "sessions associate",
+      "summary": "Associate a user-visible Pane with a named Session.",
+      "usage": [
+        "runpane sessions associate --session <id|name> --pane <pane-id> [--json] [--pane-dir <path>]"
+      ],
+      "mutates": true,
+      "jsonSchemas": [
+        "sessionResult"
+      ]
+    },
+    {
+      "name": "sessions detach",
+      "summary": "Detach a Pane from a named Session.",
+      "usage": [
+        "runpane sessions detach --session <id|name> [--pane <pane-id>] [--json] [--pane-dir <path>]"
+      ],
+      "mutates": true,
+      "jsonSchemas": [
+        "sessionResult"
+      ]
+    },
+    {
+      "name": "sessions overview",
+      "summary": "Read a live status, activity, git, and pull request overview for a named Session.",
+      "usage": [
+        "runpane sessions overview --session <id|name> [--json] [--pane-dir <path>]"
+      ],
+      "jsonSchemas": [
+        "sessionOverviewResult"
       ]
     }
   ],
@@ -482,6 +622,16 @@ export const RUNPANE_CONTRACT = {
         "description": "Base branch for the created worktree."
       },
       {
+        "name": "--folder",
+        "value": "<name>",
+        "description": "Top-level sidebar folder for an adopted pane."
+      },
+      {
+        "name": "--resume",
+        "value": "<agent-session-id>",
+        "description": "Agent session id to persist and resume in an adopted pane."
+      },
+      {
         "name": "--agent",
         "value": "<codex|claude|cursor>",
         "description": "Built-in agent terminal template to open."
@@ -512,7 +662,7 @@ export const RUNPANE_CONTRACT = {
       {
         "name": "--from-json",
         "value": "<path|->",
-        "description": "Read a full panes.create request JSON payload from a file or stdin."
+        "description": "Read a structured JSON request payload from a file or stdin."
       },
       {
         "name": "--timeout-ms",
@@ -568,6 +718,76 @@ export const RUNPANE_CONTRACT = {
         "name": "--strategy",
         "value": "<auto|codex-ctrl-enter|enter>",
         "description": "Composer submit key sequence strategy for panels submit-composer."
+      },
+      {
+        "name": "--as",
+        "value": "<consumer-name>",
+        "description": "Use a persisted daemon-held workspace cursor."
+      },
+      {
+        "name": "--since",
+        "value": "<generation>",
+        "description": "Read workspace events after this generation."
+      },
+      {
+        "name": "--from",
+        "value": "<now|earliest>",
+        "description": "Choose where a new named cursor starts."
+      },
+      {
+        "name": "--kinds",
+        "value": "<kind,...>",
+        "description": "Limit workspace events to comma-separated kinds."
+      },
+      {
+        "name": "--name-contains",
+        "value": "<text>",
+        "description": "Limit workspace events to Pane names containing text."
+      },
+      {
+        "name": "--exclude-pane",
+        "value": "<pane-id>",
+        "description": "Exclude a Pane from workspace watch results; repeatable."
+      },
+      {
+        "name": "--format",
+        "value": "<lines|json>",
+        "description": "Watch output format; scoped to the watch command."
+      },
+      {
+        "name": "--heartbeat",
+        "value": "<seconds>",
+        "description": "Maximum healthy silence in follow mode; 0 disables heartbeats."
+      },
+      {
+        "name": "--idle-after",
+        "value": "<milliseconds>",
+        "description": "Emit agent.idle after this READY duration; 0 disables idle events."
+      },
+      {
+        "name": "--settle",
+        "value": "<milliseconds>",
+        "description": "Follow-only opt-in: emit READY only after the panel stays idle this long; a BUSY inside the window cancels it silently."
+      },
+      {
+        "name": "--blocked-settle",
+        "value": "<milliseconds>",
+        "description": "Follow-only opt-in: emit BLOCKED only after the panel stays blocked this long; an in-pane answer inside the window cancels it silently."
+      },
+      {
+        "name": "--min-interval",
+        "value": "<milliseconds>",
+        "description": "Follow-only opt-in: hold non-urgent lines and flush them together at most once per interval; BLOCKED bypasses it."
+      },
+      {
+        "name": "--body-file",
+        "value": "<path|->",
+        "description": "Read diagnostic report evidence from a file or stdin."
+      },
+      {
+        "name": "--session",
+        "value": "<id|name>",
+        "description": "Named orchestration Session id or exact name."
       }
     ],
     "localBoolean": [
@@ -598,6 +818,50 @@ export const RUNPANE_CONTRACT = {
       {
         "name": "--force",
         "description": "Archive even if the pane's branch has uncommitted, untracked, or unpushed changes."
+      },
+      {
+        "name": "--launch",
+        "description": "Run an adopted pane's agent resume command immediately instead of staging it."
+      },
+      {
+        "name": "--follow",
+        "description": "Continue waiting for workspace events until interrupted."
+      },
+      {
+        "name": "--ack-now",
+        "description": "Advance a named cursor immediately for at-most-once delivery."
+      },
+      {
+        "name": "--include-held-input",
+        "description": "Include up to 120 characters of unsubmitted composer text in ready events."
+      },
+      {
+        "name": "--agents-only",
+        "description": "Limit workspace events to CLI agent panels."
+      },
+      {
+        "name": "--all-managed",
+        "description": "Watch all non-archived, non-hidden managed panes."
+      },
+      {
+        "name": "--include-shells",
+        "description": "Include ordinary shell panels in follow mode."
+      },
+      {
+        "name": "--no-held-input",
+        "description": "Disable redacted STUCK detection in lines follow mode."
+      },
+      {
+        "name": "--self-test",
+        "description": "Probe the current daemon watch path without advancing a named cursor."
+      },
+      {
+        "name": "--idle-backoff",
+        "description": "Follow-only opt-in: IDLE fires at --idle-after, then 30m, 1h, 3h, then daily per panel; any activity resets it."
+      },
+      {
+        "name": "--report",
+        "description": "Prepare a redacted doctor report; external filing still requires --yes."
       }
     ]
   },
@@ -611,14 +875,26 @@ export const RUNPANE_CONTRACT = {
         "  runpane update [options]",
         "  runpane version",
         "  runpane doctor",
+        "  runpane doctor --report --body-file <path|->",
         "  runpane daemon repair [--pane-dir <path>] [--yes] [--json]",
         "  runpane agent-context [--json]",
         "  runpane agents doctor --agent <codex|claude|cursor> [--repo <selector>] [--json]",
         "  runpane repos list [--json]",
         "  runpane repos add --path <path> [--name <name>]",
+        "  runpane sessions list [--json] [--pane-dir <path>]",
+        "  runpane sessions create --from-json <path|-> [--json] [--pane-dir <path>]",
+        "  runpane sessions get --session <id|name> [--json] [--pane-dir <path>]",
+        "  runpane sessions update --session <id|name> --from-json <path|-> [--json] [--pane-dir <path>]",
+        "  runpane sessions set-agent --session <id|name> --agent <codex|claude|cursor> [--json] [--pane-dir <path>]",
+        "  runpane sessions associate --session <id|name> --pane <pane-id> [--json] [--pane-dir <path>]",
+        "  runpane sessions detach --session <id|name> [--pane <pane-id>] [--json] [--pane-dir <path>]",
+        "  runpane sessions overview --session <id|name> [--json] [--pane-dir <path>]",
         "  runpane panes list [--repo <selector>] [--json]",
+        "  runpane panes cost [--repo <selector>] [--pane <pane-id>] [--json]",
+        "  runpane workspace state [--repo <selector>] [--json]",
+        "  runpane watch --follow",
         "  runpane panes create --repo <selector> --name <name> --agent <codex|claude|cursor> [--source user|agent] [--focus|--no-focus] [--wait-ready]",
-        "  runpane panes archive --pane <pane-id> [--source user|agent] [--force] --yes",
+        "  runpane panes archive --pane <pane-id> [--source user|agent] [--force] [--dry-run] --yes",
         "  runpane panels create --pane <pane-id> --agent <codex|claude|cursor> [--source user|agent] [--focus|--no-focus] --yes",
         "  runpane panels list --pane <pane-id> [--json]",
         "  runpane panels output --panel <panel-id> [--limit <count>] [--json]",
@@ -716,6 +992,7 @@ export const RUNPANE_CONTRACT = {
       "doctor": [
         "Usage:",
         "  runpane doctor [--json] [--pane-dir <path>] [--pane-path <path>] [--format <format>] [--verbose]",
+        "  runpane doctor --report [--title <text>] --body-file <path|-> [--yes] [--json]",
         "",
         "Checks wrapper/runtime details, release metadata, installed Pane detection, and Pane daemon reachability.",
         "",
@@ -725,6 +1002,10 @@ export const RUNPANE_CONTRACT = {
         "  --pane-path <path>             Inspect a specific Pane executable",
         "  --format <format>              Release artifact format to inspect",
         "  --verbose                      Print extra diagnostics",
+        "  --report                       Prepare a redacted, inspectable report",
+        "  --body-file <path|->           Read report evidence from a file or stdin",
+        "  --title <text>                 Report title",
+        "  --yes                          Confirm creating one greenfield-inc/Pane issue",
         "",
         "Agent discovery:",
         "  runpane doctor --json",
@@ -774,8 +1055,9 @@ export const RUNPANE_CONTRACT = {
         "",
         "Commands:",
         "  runpane panes list [--repo <selector>] [--json]",
+        "  runpane panes cost [--repo <selector>] [--pane <pane-id>] [--json]",
         "  runpane panes create --repo <selector> --name <name> --agent <codex|claude|cursor> [options]",
-        "  runpane panes archive --pane <pane-id> [--force] [--source user|agent] --yes [--json]",
+        "  runpane panes archive --pane <pane-id> [--force] [--source user|agent] [--dry-run] --yes [--json]",
         "  runpane panes pin --pane <pane-id> --yes [--dry-run] [--json]",
         "  runpane panes unpin --pane <pane-id> --yes [--dry-run] [--json]",
         "  runpane panes rename --pane <pane-id> --name <new-name> --yes [--dry-run] [--json]",
@@ -792,6 +1074,71 @@ export const RUNPANE_CONTRACT = {
         "  --repo <selector>              active, id, exact path, or saved repository name",
         "  --pane-dir <path>              Connect to a specific Pane data directory",
         "  --json                         Print machine-readable output"
+      ],
+      "panes cost": [
+        "Usage:",
+        "  runpane panes cost [--repo <selector>] [--pane <pane-id>] [--json]",
+        "",
+        "Reports estimated token costs per Pane for the last 30 days, including per-model and cache-efficiency details.",
+        "",
+        "Options:",
+        "  --repo <selector>              Limit results to one saved repository",
+        "  --pane <pane-id>               Return one Pane, including an idle Pane with zero usage",
+        "  --pane-dir <path>              Connect to a specific Pane data directory",
+        "  --json                         Print machine-readable output"
+      ],
+      "workspace": [
+        "Workspace observation commands.",
+        "",
+        "Usage:",
+        "  runpane workspace state [--repo <selector>] [--json]",
+        "  runpane watch --follow"
+      ],
+      "workspace state": [
+        "Usage:",
+        "  runpane workspace state [--repo <selector>] [--json]",
+        "",
+        "Returns one workspace snapshot of every Pane and CLI panel."
+      ],
+      "watch": [
+        "Usage:",
+        "  runpane watch [--as <name>|--since <generation>] [--follow] [options]",
+        "",
+        "Waits for agent state, Pane lifecycle, and panel exit transitions without polling.",
+        "",
+        "Options:",
+        "  --as <name>                    Use a persisted daemon-held cursor",
+        "  --since <generation>           Use an explicit cursor instead",
+        "  --from <now|earliest>          Starting point for a new named cursor",
+        "  --follow                       Continue waiting until interrupted",
+        "  --format <lines|json>          Output format; lines is the follow default",
+        "  --heartbeat <seconds>          Healthy-silence bound; defaults to 60 under --follow",
+        "  --idle-after <ms>              Re-firing READY idle interval; defaults to 600000 under --follow",
+        "  --settle <ms>                  Opt-in: emit READY only after this quiet window (--follow only)",
+        "  --blocked-settle <ms>          Opt-in: emit BLOCKED only after this window (--follow only)",
+        "  --min-interval <ms>            Opt-in: batch non-urgent lines per interval; BLOCKED bypasses (--follow only)",
+        "  --idle-backoff                 Opt-in: IDLE at --idle-after, 30m, 1h, 3h, then daily (--follow only)",
+        "  --all-managed                  Explicitly watch all managed panes",
+        "  --include-shells               Include ordinary shell panels",
+        "  --agents-only                  Limit to CLI agent panels",
+        "  --exclude-pane <id>            Exclude a Pane; repeatable",
+        "  --self-test                    Anonymous, read-only daemon path probe",
+        "  --kinds <kind,...>             Limit event kinds",
+        "  --pane <id>                    Limit to a Pane; repeatable",
+        "  --repo <selector>              Limit to a saved repository",
+        "  --name-contains <text>         Limit by Pane name substring",
+        "  --timeout-ms <ms>              Wait timeout; 0 polls once",
+        "  --limit <count>                Maximum entries per response",
+        "  --ack-now                      Use at-most-once named-cursor delivery",
+        "  --include-held-input           Include unsubmitted composer text in JSON",
+        "  --no-held-input                Disable redacted STUCK detection",
+        "  --json                         Alias for --format json",
+        "",
+        "Defaults are responsive: no settle, no batching, all kinds, IDLE every --idle-after. BUSY carries no action; drop it with --kinds.",
+        "Expensive consumers opt in: --kinds agent.ready,agent.blocked,agent.idle,panel.exited,pane.gone --settle 180000 --blocked-settle 30000 --min-interval 600000 --idle-backoff",
+        "Pane Chat arms those flags itself through its skill; pass them only for your own scripts.",
+        "STUCK means real unsubmitted composer text; an agent prompt suggestion never counts.",
+        "Dead watch: HEARTBEAT is proof of life only. Judge death by a non-zero exit or a WATCH ERROR line, not by silence."
       ],
       "panes create": [
         "Usage:",
@@ -826,11 +1173,19 @@ export const RUNPANE_CONTRACT = {
         "  --dry-run                      Validate and preview without creating panes",
         "  --yes                          Skip confirmation for mutating commands"
       ],
+      "panes adopt": [
+        "Usage:",
+        "  runpane panes adopt --repo <selector> --path <dir> --name <name> --agent <codex|claude|cursor> [options]",
+        "",
+        "Adopts an existing externally managed git worktree without creating, syncing, or deleting it.",
+        "",
+        "Options: --resume <id> stages the agent resume command; --launch runs it immediately; --folder <name> groups the pane; --no-pinned opts out of pinning; --dry-run previews."
+      ],
       "panes archive": [
         "Usage:",
-        "  runpane panes archive --pane <pane-id> [--source user|agent] [--force] --yes [--json]",
+        "  runpane panes archive --pane <pane-id> [--source user|agent] [--force] [--dry-run] --yes [--json]",
         "",
-        "Archives a Pane (session) exactly like the UI Archive action, including removal of its Pane-managed git worktree. Refuses to archive a pane with uncommitted, untracked, or unpushed-to-remote changes unless --force is passed. Waits for worktree removal to finish before returning.",
+        "Archives a Pane (session) exactly like the UI Archive action, including removal of its Pane-managed git worktree. Refreshes the configured upstream before checking for unpushed commits and reports exact commit evidence. Refuses unsafe archives unless --force is passed. Use --dry-run to print the evidence without mutating Pane state.",
         "",
         "Options:",
         "  --pane <pane-id>               Pane/session id to archive",
@@ -838,6 +1193,7 @@ export const RUNPANE_CONTRACT = {
         "  --force                        Archive even if the pane has uncommitted, untracked, or unpushed changes",
         "  --pane-dir <path>              Connect to a specific Pane data directory",
         "  --json                         Print machine-readable output",
+        "  --dry-run                      Refresh and print archive safety evidence without archiving",
         "  --yes                          Skip confirmation for mutating commands"
       ],
       "panes pin": [
@@ -1052,6 +1408,100 @@ export const RUNPANE_CONTRACT = {
         "  --strategy <strategy>         Defaults to auto; Codex sends Ctrl+Enter and other panels send Enter.",
         "  --yes                         Skip confirmation prompts.",
         "  --json                        Print JSON output."
+      ],
+      "sessions list": [
+        "Usage:",
+        "runpane sessions list [--json] [--pane-dir <path>]",
+        "",
+        "Options:",
+        "  --session <id|name>         Named Session id or exact name.",
+        "  --from-json <path|->         Read structured JSON from a file or stdin.",
+        "  --pane <pane-id>             User-visible Pane to associate or detach.",
+        "  --agent <codex|claude|cursor>  Agent terminal to use.",
+        "  --json                       Print JSON output."
+      ],
+      "sessions create": [
+        "Usage:",
+        "runpane sessions create --from-json <path|-> [--json] [--pane-dir <path>]",
+        "",
+        "Options:",
+        "  --session <id|name>         Named Session id or exact name.",
+        "  --from-json <path|->         Read structured JSON from a file or stdin.",
+        "  --pane <pane-id>             User-visible Pane to associate or detach.",
+        "  --agent <codex|claude|cursor>  Agent terminal to use.",
+        "  --json                       Print JSON output."
+      ],
+      "sessions get": [
+        "Usage:",
+        "runpane sessions get --session <id|name> [--json] [--pane-dir <path>]",
+        "",
+        "Options:",
+        "  --session <id|name>         Named Session id or exact name.",
+        "  --from-json <path|->         Read structured JSON from a file or stdin.",
+        "  --pane <pane-id>             User-visible Pane to associate or detach.",
+        "  --agent <codex|claude|cursor>  Agent terminal to use.",
+        "  --json                       Print JSON output."
+      ],
+      "sessions update": [
+        "Usage:",
+        "runpane sessions update --session <id|name> --from-json <path|-> [--json] [--pane-dir <path>]",
+        "",
+        "Options:",
+        "  --session <id|name>         Named Session id or exact name.",
+        "  --from-json <path|->         Read structured JSON from a file or stdin.",
+        "  --pane <pane-id>             User-visible Pane to associate or detach.",
+        "  --agent <codex|claude|cursor>  Agent terminal to use.",
+        "  --json                       Print JSON output."
+      ],
+      "sessions set-agent": [
+        "Usage:",
+        "runpane sessions set-agent --session <id|name> --agent <codex|claude|cursor> [--json] [--pane-dir <path>]",
+        "",
+        "Options:",
+        "  --session <id|name>         Named Session id or exact name.",
+        "  --from-json <path|->         Read structured JSON from a file or stdin.",
+        "  --pane <pane-id>             User-visible Pane to associate or detach.",
+        "  --agent <codex|claude|cursor>  Agent terminal to use.",
+        "  --json                       Print JSON output."
+      ],
+      "sessions associate": [
+        "Usage:",
+        "runpane sessions associate --session <id|name> --pane <pane-id> [--json] [--pane-dir <path>]",
+        "",
+        "Options:",
+        "  --session <id|name>         Named Session id or exact name.",
+        "  --from-json <path|->         Read structured JSON from a file or stdin.",
+        "  --pane <pane-id>             User-visible Pane to associate or detach.",
+        "  --agent <codex|claude|cursor>  Agent terminal to use.",
+        "  --json                       Print JSON output."
+      ],
+      "sessions detach": [
+        "Usage:",
+        "runpane sessions detach --session <id|name> [--pane <pane-id>] [--json] [--pane-dir <path>]",
+        "",
+        "Options:",
+        "  --session <id|name>         Named Session id or exact name.",
+        "  --from-json <path|->         Read structured JSON from a file or stdin.",
+        "  --pane <pane-id>             User-visible Pane to associate or detach.",
+        "  --agent <codex|claude|cursor>  Agent terminal to use.",
+        "  --json                       Print JSON output."
+      ],
+      "sessions overview": [
+        "Usage:",
+        "runpane sessions overview --session <id|name> [--json] [--pane-dir <path>]",
+        "",
+        "Options:",
+        "  --session <id|name>         Named Session id or exact name.",
+        "  --from-json <path|->         Read structured JSON from a file or stdin.",
+        "  --pane <pane-id>             User-visible Pane to associate or detach.",
+        "  --agent <codex|claude|cursor>  Agent terminal to use.",
+        "  --json                       Print JSON output."
+      ],
+      "sessions": [
+        "Usage:",
+        "  runpane sessions <list|create|get|update|set-agent|associate|detach|overview> [options]",
+        "",
+        "Use a named Session to keep context, activity, and evidence attached to one orchestration thread."
       ]
     },
     "pip": {
@@ -1063,14 +1513,18 @@ export const RUNPANE_CONTRACT = {
         "  runpane update [options]",
         "  runpane version",
         "  runpane doctor",
+        "  runpane doctor --report --body-file <path|->",
         "  runpane daemon repair [--pane-dir <path>] [--yes] [--json]",
         "  runpane agent-context [--json]",
         "  runpane agents doctor --agent <codex|claude|cursor> [--repo <selector>] [--json]",
         "  runpane repos list [--json]",
         "  runpane repos add --path <path> [--name <name>]",
         "  runpane panes list [--repo <selector>] [--json]",
+        "  runpane panes cost [--repo <selector>] [--pane <pane-id>] [--json]",
+        "  runpane workspace state [--repo <selector>] [--json]",
+        "  runpane watch --follow",
         "  runpane panes create --repo <selector> --name <name> --agent <codex|claude|cursor> [--source user|agent] [--focus|--no-focus] [--wait-ready]",
-        "  runpane panes archive --pane <pane-id> [--source user|agent] [--force] --yes",
+        "  runpane panes archive --pane <pane-id> [--source user|agent] [--force] [--dry-run] --yes",
         "  python -m runpane panels create --pane <pane-id> --agent <codex|claude|cursor> [--source user|agent] [--focus|--no-focus] --yes",
         "  runpane panels list --pane <pane-id> [--json]",
         "  runpane panels output --panel <panel-id> [--limit <count>] [--json]",
@@ -1157,6 +1611,7 @@ export const RUNPANE_CONTRACT = {
       "doctor": [
         "Usage:",
         "  runpane doctor [--json] [--pane-dir <path>] [--pane-path <path>] [--format <format>] [--verbose]",
+        "  runpane doctor --report [--title <text>] --body-file <path|-> [--yes] [--json]",
         "",
         "Checks wrapper/runtime details, release metadata, installed Pane detection, and Pane daemon reachability.",
         "",
@@ -1166,6 +1621,10 @@ export const RUNPANE_CONTRACT = {
         "  --pane-path <path>",
         "  --format <format>",
         "  --verbose",
+        "  --report",
+        "  --body-file <path|->",
+        "  --title <text>",
+        "  --yes",
         "",
         "Agent discovery:",
         "  runpane doctor --json",
@@ -1215,8 +1674,9 @@ export const RUNPANE_CONTRACT = {
         "",
         "Commands:",
         "  runpane panes list [--repo <selector>] [--json]",
+        "  runpane panes cost [--repo <selector>] [--pane <pane-id>] [--json]",
         "  runpane panes create --repo <selector> --name <name> --agent <codex|claude|cursor> [options]",
-        "  runpane panes archive --pane <pane-id> [--force] [--source user|agent] --yes [--json]",
+        "  runpane panes archive --pane <pane-id> [--force] [--source user|agent] [--dry-run] --yes [--json]",
         "  runpane panes pin --pane <pane-id> --yes [--dry-run] [--json]",
         "  runpane panes unpin --pane <pane-id> --yes [--dry-run] [--json]",
         "  runpane panes rename --pane <pane-id> --name <new-name> --yes [--dry-run] [--json]",
@@ -1233,6 +1693,71 @@ export const RUNPANE_CONTRACT = {
         "  --repo <selector>",
         "  --pane-dir <path>",
         "  --json"
+      ],
+      "panes cost": [
+        "Usage:",
+        "  runpane panes cost [--repo <selector>] [--pane <pane-id>] [--json]",
+        "",
+        "Reports estimated token costs per Pane for the last 30 days, including per-model and cache-efficiency details.",
+        "",
+        "Options:",
+        "  --repo <selector>",
+        "  --pane <pane-id>",
+        "  --pane-dir <path>",
+        "  --json"
+      ],
+      "workspace": [
+        "Workspace observation commands.",
+        "",
+        "Usage:",
+        "  runpane workspace state [--repo <selector>] [--json]",
+        "  runpane watch --follow"
+      ],
+      "workspace state": [
+        "Usage:",
+        "  runpane workspace state [--repo <selector>] [--json]",
+        "",
+        "Returns one workspace snapshot of every Pane and CLI panel."
+      ],
+      "watch": [
+        "Usage:",
+        "  runpane watch [--as <name>|--since <generation>] [--follow] [options]",
+        "",
+        "Waits for workspace transitions without polling.",
+        "",
+        "Options:",
+        "  --as <name>",
+        "  --since <generation>",
+        "  --from <now|earliest>",
+        "  --follow",
+        "  --format <lines|json>",
+        "  --heartbeat <seconds>",
+        "  --idle-after <ms>",
+        "  --settle <ms>                  Opt-in READY quiet window (--follow only)",
+        "  --blocked-settle <ms>          Opt-in BLOCKED window (--follow only)",
+        "  --min-interval <ms>            Opt-in batching; BLOCKED bypasses (--follow only)",
+        "  --idle-backoff                 Opt-in IDLE backoff (--follow only)",
+        "  --all-managed",
+        "  --include-shells",
+        "  --agents-only",
+        "  --exclude-pane <id>            Repeatable",
+        "  --self-test",
+        "  --kinds <kind,...>",
+        "  --pane <id>                    Repeatable",
+        "  --repo <selector>",
+        "  --name-contains <text>",
+        "  --timeout-ms <ms>              0 polls once",
+        "  --limit <count>",
+        "  --ack-now",
+        "  --include-held-input",
+        "  --no-held-input",
+        "  --json                         Alias for --format json",
+        "",
+        "Defaults are responsive: no settle, no batching, all kinds, IDLE every --idle-after. BUSY carries no action; drop it with --kinds.",
+        "Expensive consumers opt in: --kinds agent.ready,agent.blocked,agent.idle,panel.exited,pane.gone --settle 180000 --blocked-settle 30000 --min-interval 600000 --idle-backoff",
+        "Pane Chat arms those flags itself through its skill; pass them only for your own scripts.",
+        "STUCK means real unsubmitted composer text; an agent prompt suggestion never counts.",
+        "Dead watch: HEARTBEAT is proof of life only. Judge death by a non-zero exit or a WATCH ERROR line, not by silence."
       ],
       "panes create": [
         "Usage:",
@@ -1267,11 +1792,19 @@ export const RUNPANE_CONTRACT = {
         "  --dry-run                      Validate and preview without creating panes",
         "  --yes                          Skip confirmation for mutating commands"
       ],
+      "panes adopt": [
+        "Usage:",
+        "  runpane panes adopt --repo <selector> --path <dir> --name <name> --agent <codex|claude|cursor> [options]",
+        "",
+        "Adopts an existing externally managed git worktree without creating, syncing, or deleting it.",
+        "",
+        "Options: --resume <id> stages the agent resume command; --launch runs it immediately; --folder <name> groups the pane; --no-pinned opts out of pinning; --dry-run previews."
+      ],
       "panes archive": [
         "Usage:",
-        "  runpane panes archive --pane <pane-id> [--source user|agent] [--force] --yes [--json]",
+        "  runpane panes archive --pane <pane-id> [--source user|agent] [--force] [--dry-run] --yes [--json]",
         "",
-        "Archives a Pane (session) exactly like the UI Archive action, including removal of its Pane-managed git worktree. Refuses to archive a pane with uncommitted, untracked, or unpushed-to-remote changes unless --force is passed. Waits for worktree removal to finish before returning.",
+        "Archives a Pane (session) exactly like the UI Archive action, including removal of its Pane-managed git worktree. Refreshes the configured upstream before checking for unpushed commits and reports exact commit evidence. Refuses unsafe archives unless --force is passed. Use --dry-run to print the evidence without mutating Pane state.",
         "",
         "Options:",
         "  --pane <pane-id>",
@@ -1279,6 +1812,7 @@ export const RUNPANE_CONTRACT = {
         "  --force",
         "  --pane-dir <path>",
         "  --json",
+        "  --dry-run",
         "  --yes"
       ],
       "panes pin": [
@@ -1493,6 +2027,100 @@ export const RUNPANE_CONTRACT = {
         "  --strategy <strategy>         Defaults to auto; Codex sends Ctrl+Enter and other panels send Enter.",
         "  --yes                         Skip confirmation prompts.",
         "  --json                        Print JSON output."
+      ],
+      "sessions list": [
+        "Usage:",
+        "python -m runpane sessions list [--json] [--pane-dir <path>]",
+        "",
+        "Options:",
+        "  --session <id|name>         Named Session id or exact name.",
+        "  --from-json <path|->         Read structured JSON from a file or stdin.",
+        "  --pane <pane-id>             User-visible Pane to associate or detach.",
+        "  --agent <codex|claude|cursor>  Agent terminal to use.",
+        "  --json                       Print JSON output."
+      ],
+      "sessions create": [
+        "Usage:",
+        "python -m runpane sessions create --from-json <path|-> [--json] [--pane-dir <path>]",
+        "",
+        "Options:",
+        "  --session <id|name>         Named Session id or exact name.",
+        "  --from-json <path|->         Read structured JSON from a file or stdin.",
+        "  --pane <pane-id>             User-visible Pane to associate or detach.",
+        "  --agent <codex|claude|cursor>  Agent terminal to use.",
+        "  --json                       Print JSON output."
+      ],
+      "sessions get": [
+        "Usage:",
+        "python -m runpane sessions get --session <id|name> [--json] [--pane-dir <path>]",
+        "",
+        "Options:",
+        "  --session <id|name>         Named Session id or exact name.",
+        "  --from-json <path|->         Read structured JSON from a file or stdin.",
+        "  --pane <pane-id>             User-visible Pane to associate or detach.",
+        "  --agent <codex|claude|cursor>  Agent terminal to use.",
+        "  --json                       Print JSON output."
+      ],
+      "sessions update": [
+        "Usage:",
+        "python -m runpane sessions update --session <id|name> --from-json <path|-> [--json] [--pane-dir <path>]",
+        "",
+        "Options:",
+        "  --session <id|name>         Named Session id or exact name.",
+        "  --from-json <path|->         Read structured JSON from a file or stdin.",
+        "  --pane <pane-id>             User-visible Pane to associate or detach.",
+        "  --agent <codex|claude|cursor>  Agent terminal to use.",
+        "  --json                       Print JSON output."
+      ],
+      "sessions set-agent": [
+        "Usage:",
+        "python -m runpane sessions set-agent --session <id|name> --agent <codex|claude|cursor> [--json] [--pane-dir <path>]",
+        "",
+        "Options:",
+        "  --session <id|name>         Named Session id or exact name.",
+        "  --from-json <path|->         Read structured JSON from a file or stdin.",
+        "  --pane <pane-id>             User-visible Pane to associate or detach.",
+        "  --agent <codex|claude|cursor>  Agent terminal to use.",
+        "  --json                       Print JSON output."
+      ],
+      "sessions associate": [
+        "Usage:",
+        "python -m runpane sessions associate --session <id|name> --pane <pane-id> [--json] [--pane-dir <path>]",
+        "",
+        "Options:",
+        "  --session <id|name>         Named Session id or exact name.",
+        "  --from-json <path|->         Read structured JSON from a file or stdin.",
+        "  --pane <pane-id>             User-visible Pane to associate or detach.",
+        "  --agent <codex|claude|cursor>  Agent terminal to use.",
+        "  --json                       Print JSON output."
+      ],
+      "sessions detach": [
+        "Usage:",
+        "python -m runpane sessions detach --session <id|name> [--pane <pane-id>] [--json] [--pane-dir <path>]",
+        "",
+        "Options:",
+        "  --session <id|name>         Named Session id or exact name.",
+        "  --from-json <path|->         Read structured JSON from a file or stdin.",
+        "  --pane <pane-id>             User-visible Pane to associate or detach.",
+        "  --agent <codex|claude|cursor>  Agent terminal to use.",
+        "  --json                       Print JSON output."
+      ],
+      "sessions overview": [
+        "Usage:",
+        "python -m runpane sessions overview --session <id|name> [--json] [--pane-dir <path>]",
+        "",
+        "Options:",
+        "  --session <id|name>         Named Session id or exact name.",
+        "  --from-json <path|->         Read structured JSON from a file or stdin.",
+        "  --pane <pane-id>             User-visible Pane to associate or detach.",
+        "  --agent <codex|claude|cursor>  Agent terminal to use.",
+        "  --json                       Print JSON output."
+      ],
+      "sessions": [
+        "Usage:",
+        "  runpane sessions <list|create|get|update|set-agent|associate|detach|overview> [options]",
+        "",
+        "Use a named Session to keep context, activity, and evidence attached to one orchestration thread."
       ]
     }
   },
@@ -1565,6 +2193,7 @@ export const RUNPANE_CONTRACT = {
       "runpane repos list --json",
       "runpane repos add --path /path/to/repo --name Pane --yes --json",
       "runpane panes list --repo active --json",
+      "runpane panes cost --pane <pane-id> --json",
       "runpane panes create --repo active --name issue-252 --agent <agent> --prompt \"Kick off the discussion skill for issue 252\" --source agent --no-focus --wait-ready --yes --json",
       "runpane panes create --from-json panes.json --yes --json",
       "runpane panes archive --pane <pane-id> --source agent --yes --json",
@@ -1572,6 +2201,17 @@ export const RUNPANE_CONTRACT = {
       "runpane panels list --pane <pane-id> --json",
       "runpane panels output --panel <panel-id> --limit 200 --json",
       "printf 'Continue\\n' | runpane panels input --panel <panel-id> --input-file - --yes --json",
+      "runpane watch --self-test",
+      "runpane watch --follow",
+      "runpane watch --follow --kinds agent.ready,agent.blocked,agent.idle,panel.exited,pane.gone --settle 180000 --blocked-settle 30000 --min-interval 600000 --idle-backoff",
+      "runpane sessions list [--json] [--pane-dir <path>]",
+      "runpane sessions create --from-json <path|-> [--json] [--pane-dir <path>]",
+      "runpane sessions get --session <id|name> [--json] [--pane-dir <path>]",
+      "runpane sessions update --session <id|name> --from-json <path|-> [--json] [--pane-dir <path>]",
+      "runpane sessions set-agent --session <id|name> --agent <codex|claude|cursor> [--json] [--pane-dir <path>]",
+      "runpane sessions associate --session <id|name> --pane <pane-id> [--json] [--pane-dir <path>]",
+      "runpane sessions detach --session <id|name> [--pane <pane-id>] [--json] [--pane-dir <path>]",
+      "runpane sessions overview --session <id|name> [--json] [--pane-dir <path>]",
       "runpane help",
       "runpane <command> --help"
     ],
@@ -1590,9 +2230,10 @@ export const RUNPANE_CONTRACT = {
       "`runpane repos list` connects to the running local Pane daemon and prints saved repository records.",
       "`runpane repos add` registers an existing git repository with the running local Pane daemon. It does not create directories or initialize git repositories by default.",
       "`runpane panes list` lists Pane sessions, optionally scoped to one saved repository.",
+      "`runpane panes cost` reports estimated token costs per Pane for the last 30 days, including per-model breakdowns and cache efficiency; unscoped output includes an Unattributed bucket that reconciles against workspace totals.",
       "`runpane panes create` connects to the running local Pane daemon, resolves the requested saved base repository, creates user-visible Pane sessions backed by Pane-managed worktrees/branches, opens terminal-backed tool tabs, and optionally sends initial input to the started tool. Built-in agent panes and `--source agent` default to background/no-focus unless `--focus` is passed. New Panes are pinned into the UI's favorite/pin set by default; pass `--no-pinned` to opt out. Panes created interactively in the Pane UI are unaffected.",
       "For `panes create --wait-ready`, `initialInput.verifiedSubmitted: true` is reported only after argument attachment or composer-clear plus activity evidence. Routing input does not by itself verify submission.",
-      "`runpane panes archive` archives a Pane exactly like the UI Archive action, including removal of its Pane-managed git worktree, and refuses (unless `--force`) when the pane's branch has uncommitted, untracked, or unpushed-to-remote changes. It waits for worktree removal to finish before returning and reports the outcome in `worktreeCleanup`.",
+      "`runpane panes archive` refreshes the configured upstream, reports exact unpushed commit evidence, and refuses unsafe archive operations unless `--force` is used. Add `--dry-run` to inspect the same evidence without archiving. Successful archives wait for worktree removal and report `worktreeCleanup`.",
       "`runpane panes rename` trims and updates a Pane's display name without changing its worktree, branch, panels, or focus, and returns the updated pane summary.",
       "`runpane panes focus` raises the Pane window and selects a Pane (and optionally one of its panels) exactly like clicking it in the UI. Because it steals the user's window focus, run it only on an explicit user request to open, focus, show, or switch to a Pane; never focus a Pane proactively, the same doctrine that keeps `panes create` background/no-focus for `--source agent`.",
       "`runpane panels list` lists tool panels inside one Pane session.",
@@ -1600,7 +2241,16 @@ export const RUNPANE_CONTRACT = {
       "`runpane panels input` sends exact input bytes to one terminal panel. Prefer `--input-file` for newlines, Ctrl-C, quotes, or shell-sensitive text.",
       "`runpane panes create --prompt` is an alias for `--initial-input`; request JSON and daemon payloads should use the canonical `initialInput` field.",
       "If composer submission cannot be verified without risking a duplicate, the create item is unsuccessful with `initialInput.staged`, `initialInput.attempts`, `initialInput.blocked.kind: submission_unverified`, and an actionable `nextCommand`. The CLI-facing `--prompt` alias maps to this canonical `initialInput` result.",
-      "When running from WSL while Pane is installed on Windows, the Linux wrapper may look for a missing `/tmp/pane-daemon.../daemon.sock` or resolve to a Windows shim such as Volta. In that case invoke the Windows wrapper through PowerShell from a Windows cwd, for example `powershell.exe -NoProfile -Command 'Set-Location $env:TEMP; runpane repos list --json'`."
+      "When running from WSL while Pane is installed on Windows, the Linux wrapper may look for a missing `/tmp/pane-daemon.../daemon.sock` or resolve to a Windows shim such as Volta. In that case invoke the Windows wrapper through PowerShell from a Windows cwd, for example `powershell.exe -NoProfile -Command 'Set-Location $env:TEMP; runpane repos list --json'`.",
+      "`runpane watch` waits for workspace transitions from the daemon journal without polling. `--follow` keeps waiting and prints one line per event: READY, BLOCKED, IDLE, STUCK, NEW, GONE, EXIT, plus HEARTBEAT every 60 seconds as proof of life. Defaults are responsive: no settle, no batching, all kinds, IDLE every `--idle-after`. Expensive consumers opt into `--kinds` (drop `agent.busy`; BUSY carries no action), `--settle <ms>` (READY only after a quiet window; a BUSY inside it cancels the line), `--blocked-settle <ms>`, `--min-interval <ms>` (batch non-urgent lines; BLOCKED bypasses it), and `--idle-backoff` (10m, 30m, 1h, 3h, then daily). The recommended orchestrator invocation is `runpane watch --follow --kinds agent.ready,agent.blocked,agent.idle,panel.exited,pane.gone --settle 180000 --blocked-settle 30000 --min-interval 600000 --idle-backoff`, which budgets about 6 wake-ups per active pane per hour worst case, usually 1-3. Pane Chat arms it automatically through its skill; only your own scripts need the flags. STUCK means real unsubmitted composer text, never an agent prompt suggestion. Judge a dead watch by a non-zero exit or a WATCH ERROR line, not by silence.",
+      "`sessions list` list durable named orchestration Sessions.",
+      "`sessions create` create a durable named orchestration Session and its hidden terminal owner.",
+      "`sessions get` read one durable named orchestration Session.",
+      "`sessions update` update a Session overview from structured JSON.",
+      "`sessions set-agent` switch the durable terminal agent for a named Session.",
+      "`sessions associate` associate a user-visible Pane with a named Session.",
+      "`sessions detach` detach a Pane from a named Session.",
+      "`sessions overview` read a live status, activity, git, and pull request overview for a named Session."
     ],
     "wrapperFlagNote": "The top-level `runpane --version` form prints the wrapper version. The install subcommand form `runpane install --version vX.Y.Z` selects a Pane release.",
     "localControlFlagNote": "`runpane doctor --json`, `runpane repos list`, `runpane panes ...`, and `runpane panels ...` commands use or describe the local framed daemon socket/pipe for a running Pane app. `--pane-dir` points the wrapper at a non-default Pane data directory, such as `PANE_DIR=~/.pane_test` in development. `runpane agent-context` is local/offline and can be used before Pane is running. In a Pane repository checkout, if `runpane` is not on PATH, use the built local wrapper with Node 22, for example `PATH=/opt/homebrew/opt/node@22/bin:$PATH node packages/runpane/dist/cli.js doctor --json`. From WSL, if the user runs Windows Pane, call the Windows wrapper through `powershell.exe -NoProfile -Command 'Set-Location $env:TEMP; runpane ...'` so the command can reach the Windows named-pipe daemon and avoid UNC cwd issues.",
@@ -1689,6 +2339,44 @@ export const RUNPANE_CONTRACT = {
         "/tmp/pane"
       ],
       [
+        "doctor",
+        "--report",
+        "--title",
+        "watch failed",
+        "--body-file",
+        "/tmp/watch-evidence.txt",
+        "--json"
+      ],
+      [
+        "watch",
+        "--as",
+        "monitor",
+        "--from",
+        "earliest",
+        "--follow",
+        "--format",
+        "lines",
+        "--heartbeat",
+        "60",
+        "--idle-after",
+        "600000",
+        "--settle",
+        "180000",
+        "--blocked-settle",
+        "30000",
+        "--min-interval",
+        "600000",
+        "--idle-backoff",
+        "--all-managed",
+        "--agents-only",
+        "--exclude-pane",
+        "pane-old",
+        "--kinds",
+        "agent.ready,agent.idle",
+        "--include-held-input",
+        "--self-test"
+      ],
+      [
         "daemon",
         "repair",
         "--pane-dir",
@@ -1730,6 +2418,13 @@ export const RUNPANE_CONTRACT = {
         "list",
         "--repo",
         "active",
+        "--json"
+      ],
+      [
+        "panes",
+        "cost",
+        "--pane",
+        "session-1",
         "--json"
       ],
       [
@@ -1949,6 +2644,26 @@ export const RUNPANE_CONTRACT = {
         "auto",
         "--yes",
         "--json"
+      ],
+      [
+        "sessions",
+        "list",
+        "--json"
+      ],
+      [
+        "sessions",
+        "get",
+        "--session",
+        "demo",
+        "--json"
+      ],
+      [
+        "sessions",
+        "update",
+        "--session",
+        "demo",
+        "--from-json",
+        "-"
       ]
     ],
     "topLevelHelpIncludes": [
@@ -2678,6 +3393,9 @@ export const RUNPANE_CONTRACT = {
         "ok": {
           "type": "boolean"
         },
+        "generation": {
+          "type": "number"
+        },
         "repo": {
           "$ref": "#/jsonSchemas/repoListResult/properties/repos/items"
         },
@@ -2930,6 +3648,12 @@ export const RUNPANE_CONTRACT = {
                       },
                       "nextCommand": {
                         "type": "string"
+                      },
+                      "verification": {
+                        "enum": [
+                          "observed",
+                          "unverifiable"
+                        ]
                       }
                     },
                     "additionalProperties": false
@@ -2968,6 +3692,15 @@ export const RUNPANE_CONTRACT = {
                       }
                     },
                     "additionalProperties": false
+                  },
+                  "sessionId": {
+                    "type": "string"
+                  },
+                  "paneId": {
+                    "type": "string"
+                  },
+                  "worktreePath": {
+                    "type": "string"
                   }
                 },
                 "additionalProperties": false
@@ -3003,7 +3736,9 @@ export const RUNPANE_CONTRACT = {
               "worktreePath",
               "repoId",
               "panelCount",
-              "pinned"
+              "pinned",
+              "agentStatus",
+              "ownership"
             ],
             "properties": {
               "id": {
@@ -3041,10 +3776,640 @@ export const RUNPANE_CONTRACT = {
               },
               "archived": {
                 "type": "boolean"
+              },
+              "agentStatus": {
+                "enum": [
+                  "active",
+                  "idle"
+                ]
+              },
+              "ownership": {
+                "enum": [
+                  "pane",
+                  "external"
+                ]
               }
             },
             "additionalProperties": false
           }
+        }
+      },
+      "additionalProperties": false
+    },
+    "paneCostRequest": {
+      "type": "object",
+      "properties": {
+        "repo": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "number"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "active": {
+                  "const": true
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
+        },
+        "paneId": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "paneCostResult": {
+      "$defs": {
+        "usageTotals": {
+          "type": "object",
+          "required": [
+            "inputTokens",
+            "outputTokens",
+            "cacheReadTokens",
+            "cacheCreationTokens",
+            "totalTokens",
+            "messageCount",
+            "estimatedCostUsd",
+            "costIncomplete",
+            "cacheSavingsUsd"
+          ],
+          "properties": {
+            "inputTokens": {
+              "type": "number"
+            },
+            "outputTokens": {
+              "type": "number"
+            },
+            "cacheReadTokens": {
+              "type": "number"
+            },
+            "cacheCreationTokens": {
+              "type": "number"
+            },
+            "totalTokens": {
+              "type": "number"
+            },
+            "messageCount": {
+              "type": "number"
+            },
+            "estimatedCostUsd": {
+              "type": "number"
+            },
+            "costIncomplete": {
+              "type": "boolean"
+            },
+            "cacheSavingsUsd": {
+              "type": "number"
+            }
+          },
+          "additionalProperties": false
+        },
+        "usageByModel": {
+          "type": "object",
+          "required": [
+            "model",
+            "provider",
+            "inputTokens",
+            "outputTokens",
+            "cacheReadTokens",
+            "cacheCreationTokens",
+            "totalTokens",
+            "messageCount",
+            "estimatedCostUsd",
+            "costIncomplete",
+            "cacheSavingsUsd"
+          ],
+          "properties": {
+            "model": {
+              "type": "string"
+            },
+            "provider": {
+              "enum": [
+                "claude",
+                "codex"
+              ]
+            },
+            "inputTokens": {
+              "type": "number"
+            },
+            "outputTokens": {
+              "type": "number"
+            },
+            "cacheReadTokens": {
+              "type": "number"
+            },
+            "cacheCreationTokens": {
+              "type": "number"
+            },
+            "totalTokens": {
+              "type": "number"
+            },
+            "messageCount": {
+              "type": "number"
+            },
+            "estimatedCostUsd": {
+              "type": "number"
+            },
+            "costIncomplete": {
+              "type": "boolean"
+            },
+            "cacheSavingsUsd": {
+              "type": "number"
+            }
+          },
+          "additionalProperties": false
+        },
+        "paneCostSlice": {
+          "type": "object",
+          "required": [
+            "inputTokens",
+            "outputTokens",
+            "cacheReadTokens",
+            "cacheCreationTokens",
+            "totalTokens",
+            "messageCount",
+            "estimatedCostUsd",
+            "costIncomplete",
+            "cacheSavingsUsd",
+            "uncachedCostUsd",
+            "uncachedInputTokens",
+            "cacheHitRate",
+            "byModel"
+          ],
+          "properties": {
+            "inputTokens": {
+              "type": "number"
+            },
+            "outputTokens": {
+              "type": "number"
+            },
+            "cacheReadTokens": {
+              "type": "number"
+            },
+            "cacheCreationTokens": {
+              "type": "number"
+            },
+            "totalTokens": {
+              "type": "number"
+            },
+            "messageCount": {
+              "type": "number"
+            },
+            "estimatedCostUsd": {
+              "type": "number"
+            },
+            "costIncomplete": {
+              "type": "boolean"
+            },
+            "cacheSavingsUsd": {
+              "type": "number"
+            },
+            "uncachedCostUsd": {
+              "type": "number"
+            },
+            "uncachedInputTokens": {
+              "type": "number"
+            },
+            "cacheHitRate": {
+              "type": "number"
+            },
+            "byModel": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/usageByModel"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "pane": {
+          "type": "object",
+          "required": [
+            "paneId",
+            "paneName",
+            "worktreePath",
+            "repoId",
+            "archived",
+            "createdAtMs",
+            "inputTokens",
+            "outputTokens",
+            "cacheReadTokens",
+            "cacheCreationTokens",
+            "totalTokens",
+            "messageCount",
+            "estimatedCostUsd",
+            "costIncomplete",
+            "cacheSavingsUsd",
+            "uncachedCostUsd",
+            "uncachedInputTokens",
+            "cacheHitRate",
+            "byModel"
+          ],
+          "properties": {
+            "paneId": {
+              "type": "string"
+            },
+            "paneName": {
+              "type": "string"
+            },
+            "worktreePath": {
+              "type": "string"
+            },
+            "repoId": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "archived": {
+              "type": "boolean"
+            },
+            "createdAtMs": {
+              "type": "number"
+            },
+            "inputTokens": {
+              "type": "number"
+            },
+            "outputTokens": {
+              "type": "number"
+            },
+            "cacheReadTokens": {
+              "type": "number"
+            },
+            "cacheCreationTokens": {
+              "type": "number"
+            },
+            "totalTokens": {
+              "type": "number"
+            },
+            "messageCount": {
+              "type": "number"
+            },
+            "estimatedCostUsd": {
+              "type": "number"
+            },
+            "costIncomplete": {
+              "type": "boolean"
+            },
+            "cacheSavingsUsd": {
+              "type": "number"
+            },
+            "uncachedCostUsd": {
+              "type": "number"
+            },
+            "uncachedInputTokens": {
+              "type": "number"
+            },
+            "cacheHitRate": {
+              "type": "number"
+            },
+            "byModel": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/usageByModel"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "type": "object",
+      "required": [
+        "ok",
+        "fromMs",
+        "toMs",
+        "pricingAsOf",
+        "panes"
+      ],
+      "properties": {
+        "ok": {
+          "const": true
+        },
+        "fromMs": {
+          "type": "number"
+        },
+        "toMs": {
+          "type": "number"
+        },
+        "pricingAsOf": {
+          "type": "string"
+        },
+        "panes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/pane"
+          }
+        },
+        "unattributed": {
+          "$ref": "#/$defs/paneCostSlice"
+        },
+        "totals": {
+          "$ref": "#/$defs/usageTotals"
+        }
+      },
+      "additionalProperties": false
+    },
+    "workspaceEntry": {
+      "type": "object",
+      "required": [
+        "gen",
+        "at",
+        "kind",
+        "paneId",
+        "paneName",
+        "source"
+      ],
+      "properties": {
+        "gen": {
+          "type": "number"
+        },
+        "at": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "agent.ready",
+            "agent.busy",
+            "agent.blocked",
+            "agent.unknown",
+            "agent.idle",
+            "pane.created",
+            "pane.gone",
+            "panel.exited"
+          ]
+        },
+        "paneId": {
+          "type": "string"
+        },
+        "paneName": {
+          "type": "string"
+        },
+        "repoId": {
+          "type": "number"
+        },
+        "repoName": {
+          "type": "string"
+        },
+        "worktreePath": {
+          "type": "string"
+        },
+        "panelId": {
+          "type": "string"
+        },
+        "agentType": {
+          "type": "string"
+        },
+        "from": {
+          "enum": [
+            "blocked",
+            "working",
+            "idle",
+            "unknown"
+          ]
+        },
+        "to": {
+          "enum": [
+            "blocked",
+            "working",
+            "idle",
+            "unknown"
+          ]
+        },
+        "source": {
+          "enum": [
+            "agent",
+            "exit",
+            "session"
+          ]
+        },
+        "reason": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "settledMs": {
+          "type": "number"
+        },
+        "idleMs": {
+          "type": "number"
+        },
+        "idleCount": {
+          "type": "number"
+        },
+        "heldInput": {
+          "type": "string"
+        },
+        "heldInputPresent": {
+          "type": "boolean"
+        },
+        "exitCode": {
+          "type": "number"
+        },
+        "baseline": {
+          "const": true
+        },
+        "changedWhileAway": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "workspaceWaitRequest": {
+      "type": "object",
+      "properties": {
+        "since": {
+          "type": "number"
+        },
+        "as": {
+          "type": "string"
+        },
+        "from": {
+          "enum": [
+            "now",
+            "earliest"
+          ]
+        },
+        "timeoutMs": {
+          "type": "number"
+        },
+        "limit": {
+          "type": "number"
+        },
+        "kinds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/jsonSchemas/workspaceEntry/properties/kind"
+          }
+        },
+        "paneIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "excludePaneIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "repo": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "number"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "active": {
+                  "const": true
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
+        },
+        "nameContains": {
+          "type": "string"
+        },
+        "agentsOnly": {
+          "type": "boolean"
+        },
+        "ackNow": {
+          "type": "boolean"
+        },
+        "includeHeldInput": {
+          "type": "boolean"
+        },
+        "includeHeldInputPresence": {
+          "type": "boolean"
+        },
+        "idleAfterMs": {
+          "type": "number"
+        },
+        "idleWindowStartMs": {
+          "type": "number"
+        },
+        "settleMs": {
+          "type": "number"
+        },
+        "blockedSettleMs": {
+          "type": "number"
+        },
+        "minIntervalMs": {
+          "type": "number"
+        },
+        "idleBackoff": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "workspaceStateResult": {
+      "type": "object",
+      "required": [
+        "ok",
+        "epoch",
+        "generation",
+        "entries"
+      ],
+      "properties": {
+        "ok": {
+          "const": true
+        },
+        "epoch": {
+          "type": "string"
+        },
+        "generation": {
+          "type": "number"
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/jsonSchemas/workspaceEntry"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "workspaceWaitResult": {
+      "type": "object",
+      "required": [
+        "ok",
+        "epoch",
+        "generation",
+        "entries",
+        "timedOut",
+        "nextCommand"
+      ],
+      "properties": {
+        "ok": {
+          "const": true
+        },
+        "epoch": {
+          "type": "string"
+        },
+        "generation": {
+          "type": "number"
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/jsonSchemas/workspaceEntry"
+          }
+        },
+        "timedOut": {
+          "type": "boolean"
+        },
+        "dropped": {
+          "type": "number"
+        },
+        "reset": {
+          "type": "object",
+          "required": [
+            "reason"
+          ],
+          "properties": {
+            "reason": {
+              "enum": [
+                "first-use",
+                "epoch-changed",
+                "cursor-truncated",
+                "unknown-consumer"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        "nextCommand": {
+          "type": "string"
         }
       },
       "additionalProperties": false
@@ -3066,6 +4431,9 @@ export const RUNPANE_CONTRACT = {
             "user",
             "agent"
           ]
+        },
+        "dryRun": {
+          "type": "boolean"
         }
       },
       "additionalProperties": false
@@ -3099,6 +4467,9 @@ export const RUNPANE_CONTRACT = {
       "properties": {
         "ok": {
           "const": true
+        },
+        "generation": {
+          "type": "number"
         },
         "paneId": {
           "type": "string"
@@ -3144,6 +4515,9 @@ export const RUNPANE_CONTRACT = {
       "properties": {
         "ok": {
           "const": true
+        },
+        "generation": {
+          "type": "number"
         },
         "dryRun": {
           "const": true
@@ -3214,6 +4588,9 @@ export const RUNPANE_CONTRACT = {
             "ok": {
               "type": "boolean"
             },
+            "generation": {
+              "type": "number"
+            },
             "paneId": {
               "type": "string"
             },
@@ -3252,11 +4629,74 @@ export const RUNPANE_CONTRACT = {
                 "hasUpstream": {
                   "type": "boolean"
                 },
+                "upstream": {
+                  "type": "string"
+                },
+                "upstreamRefreshed": {
+                  "type": "boolean"
+                },
                 "unpushedCommits": {
                   "type": "number"
+                },
+                "unpushedCommitDetails": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "sha",
+                      "subject"
+                    ],
+                    "properties": {
+                      "sha": {
+                        "type": "string"
+                      },
+                      "subject": {
+                        "type": "string"
+                      }
+                    },
+                    "additionalProperties": false
+                  }
                 }
               },
               "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "ok",
+            "paneId",
+            "dryRun",
+            "wouldArchive",
+            "forced",
+            "safetyCheck"
+          ],
+          "properties": {
+            "ok": {
+              "const": true
+            },
+            "generation": {
+              "type": "number"
+            },
+            "paneId": {
+              "type": "string"
+            },
+            "dryRun": {
+              "const": true
+            },
+            "wouldArchive": {
+              "type": "boolean"
+            },
+            "forced": {
+              "type": "boolean"
+            },
+            "safetyCheck": {
+              "$ref": "#/jsonSchemas/paneArchiveResult/oneOf/0/properties/safetyCheck"
+            },
+            "blocked": {
+              "$ref": "#/jsonSchemas/paneArchiveResult/oneOf/2/properties/blocked"
             }
           },
           "additionalProperties": false
@@ -3272,6 +4712,9 @@ export const RUNPANE_CONTRACT = {
           "properties": {
             "ok": {
               "const": false
+            },
+            "generation": {
+              "type": "number"
             },
             "paneId": {
               "type": "string"
@@ -3313,8 +4756,33 @@ export const RUNPANE_CONTRACT = {
                     "hasUpstream": {
                       "type": "boolean"
                     },
+                    "upstream": {
+                      "type": "string"
+                    },
+                    "upstreamRefreshed": {
+                      "type": "boolean"
+                    },
                     "unpushedCommits": {
                       "type": "number"
+                    },
+                    "unpushedCommitDetails": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "sha",
+                          "subject"
+                        ],
+                        "properties": {
+                          "sha": {
+                            "type": "string"
+                          },
+                          "subject": {
+                            "type": "string"
+                          }
+                        },
+                        "additionalProperties": false
+                      }
                     }
                   },
                   "additionalProperties": false
@@ -3414,6 +4882,9 @@ export const RUNPANE_CONTRACT = {
       "properties": {
         "ok": {
           "const": true
+        },
+        "generation": {
+          "type": "number"
         },
         "panelId": {
           "type": "string"
@@ -3648,7 +5119,8 @@ export const RUNPANE_CONTRACT = {
         "returnedLineCount",
         "hasMore",
         "text",
-        "state"
+        "state",
+        "composer"
       ],
       "properties": {
         "ok": {
@@ -3716,6 +5188,22 @@ export const RUNPANE_CONTRACT = {
           },
           "additionalProperties": false
         },
+        "composer": {
+          "type": "object",
+          "required": [
+            "isPresent",
+            "hasUndeliveredText"
+          ],
+          "properties": {
+            "isPresent": {
+              "type": "boolean"
+            },
+            "hasUndeliveredText": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
         "initialInput": {
           "$ref": "#/jsonSchemas/paneCreateResult/properties/items/items/oneOf/0/properties/initialInput"
         },
@@ -3748,11 +5236,16 @@ export const RUNPANE_CONTRACT = {
         "panelId",
         "inputBytes",
         "enter",
+        "sequenceName",
+        "verifiedSubmitted",
         "sentAt"
       ],
       "properties": {
         "ok": {
-          "const": true
+          "type": "boolean"
+        },
+        "generation": {
+          "type": "number"
         },
         "panelId": {
           "type": "string"
@@ -3766,11 +5259,29 @@ export const RUNPANE_CONTRACT = {
         "enter": {
           "const": "cr"
         },
+        "sequenceName": {
+          "enum": [
+            "codex-ctrl-enter-cr",
+            "enter-cr"
+          ]
+        },
+        "verifiedSubmitted": {
+          "type": "boolean"
+        },
         "sentAt": {
           "type": "string"
         },
+        "blocked": {
+          "$ref": "#/jsonSchemas/panelSubmitComposerResult/properties/blocked"
+        },
         "nextCommand": {
           "type": "string"
+        },
+        "verification": {
+          "enum": [
+            "observed",
+            "unverifiable"
+          ]
         }
       },
       "additionalProperties": false
@@ -4032,6 +5543,9 @@ export const RUNPANE_CONTRACT = {
         "ok": {
           "type": "boolean"
         },
+        "generation": {
+          "type": "number"
+        },
         "paneId": {
           "type": "string"
         },
@@ -4206,6 +5720,9 @@ export const RUNPANE_CONTRACT = {
         "ok": {
           "type": "boolean"
         },
+        "generation": {
+          "type": "number"
+        },
         "panelId": {
           "type": "string"
         },
@@ -4259,6 +5776,88 @@ export const RUNPANE_CONTRACT = {
         },
         "nextCommand": {
           "type": "string"
+        },
+        "verification": {
+          "enum": [
+            "observed",
+            "unverifiable"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "sessionListResult": {
+      "type": "object",
+      "required": [
+        "ok",
+        "sessions"
+      ],
+      "properties": {
+        "ok": {
+          "const": true
+        },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "selectedSessionId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "sessionResult": {
+      "type": "object",
+      "required": [
+        "ok",
+        "session"
+      ],
+      "properties": {
+        "ok": {
+          "const": true
+        },
+        "session": {
+          "type": "object"
+        },
+        "panelId": {
+          "type": "string"
+        },
+        "internalSessionId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "sessionOverviewResult": {
+      "type": "object",
+      "required": [
+        "ok",
+        "session",
+        "status",
+        "panes",
+        "activity",
+        "refreshedAt"
+      ],
+      "properties": {
+        "ok": {
+          "const": true
+        },
+        "session": {
+          "type": "object"
+        },
+        "status": {
+          "type": "string"
+        },
+        "panes": {
+          "type": "array"
+        },
+        "activity": {
+          "type": "array"
+        },
+        "refreshedAt": {
+          "type": "string"
         }
       },
       "additionalProperties": false
@@ -4271,7 +5870,7 @@ export const RUNPANE_CONTRACT = {
       "rules": [
         "Start with `runpane doctor --json` to understand wrapper, platform, daemon reachability, and the next safe commands before mutating Pane state.",
         "In a Pane repository checkout, if `runpane` is not on PATH, use the built local wrapper with Node 22, for example `PATH=/opt/homebrew/opt/node@22/bin:$PATH node packages/runpane/dist/cli.js doctor --json`.",
-        "Happy path for any user request to use Pane/RunPane: run `runpane doctor --json`, read `runpane agent-context --json`, resolve or add the saved base repo, create the requested visible Pane with a complete command such as `runpane panes create --repo <repo> --name <name> --agent <agent> --prompt \"<task>\" --source agent --no-focus --wait-ready --yes --json` (the new Pane is pinned by default; add `--no-pinned` for a throwaway Pane, or use `--tool-command <command>` instead of `--agent <agent>`), then validate with `panels wait` or `panels screen`.",
+        "Happy path for any user request to use Pane/RunPane: run `runpane doctor --json`, read `runpane agent-context --json`, resolve or add the saved base repo, create the requested visible Pane with a complete command such as `runpane panes create --repo <repo> --name <name> --agent <agent> --prompt \"<task>\" --source agent --no-focus --wait-ready --yes --json` (the new Pane is pinned by default; add `--no-pinned` for a throwaway Pane, or use `--tool-command <command>` instead of `--agent <agent>`), then validate with `panels wait` or `panels screen`. For long-lived supervision, use `runpane watch --follow` instead of polling wait or screen.",
         "Treat Pane as the user's visible cockpit for watching/co-driving work. Do not create Panes or panels for private delegation unless the user asked for visible Pane orchestration or the result should appear in the Pane app.",
         "Register the saved base repository once with `repos add`; do not register a pre-created worktree as a separate repo unless the user explicitly asks.",
         "Use `panes create` for separate visible Panes (Pane sessions) for feature/PR work. Pane creates and owns the worktree/branch for each new Pane.",
@@ -4286,10 +5885,10 @@ export const RUNPANE_CONTRACT = {
         "If the repository exists on disk but is not saved in Pane, use `runpane repos add --path <repo> --yes --json` before creating panes.",
         "Use `runpane agents doctor --agent <codex|claude|cursor> --repo <selector> --json` when agent availability differs across host, Windows, WSL, or repo environments.",
         "Use `runpane panes create --wait-ready` to create Panes and validate initial terminal readiness in one call.",
-        "Use `runpane panels screen` for compact current state, `panels wait` for readiness/text checks, `panels submit` for ordinary Enter-submitted input, and `panels submit-composer --strategy auto` for agent composers.",
+        "Use `runpane panels screen` for compact current state, including Claude and Codex composer state. Use `panels wait` for create-time readiness or text checks. Use `runpane watch --follow` to block on workspace transitions (READY, BLOCKED, IDLE, STUCK, EXIT) without polling. Use `panels submit` to send and submit a new turn. Use `panels submit-composer --strategy auto` only for a composer that was filled separately.",
         "Use `runpane panels input` only when exact bytes are required, such as Ctrl-C or handcrafted terminal input.",
         "Pane terminals draw inline images: sixel, iTerm2 inline images, and the kitty graphics protocol. Tools that need kitty graphics, such as terminal-browser and terminal-doom, run inside a Pane panel; `runpane doctor --json` reports the exact list under `terminal.graphicsProtocols`.",
-        "After creating Panes or sending terminal input, validate with `panels wait` or bounded `panels screen` before reporting success."
+        "After creating Panes or sending terminal input, validate with `panels wait` or bounded `panels screen` before reporting success. For ongoing supervision, `runpane watch --follow` is the canonical monitor."
       ],
       "detailCommand": "runpane agent-context --command <command> [--json]",
       "tools": [
@@ -4349,6 +5948,16 @@ export const RUNPANE_CONTRACT = {
           ]
         },
         {
+          "name": "panes cost",
+          "summary": "Report estimated token cost per Pane, with per-model breakdown and cache efficiency.",
+          "arguments": [
+            "--repo <selector>",
+            "--pane <pane-id>",
+            "--json",
+            "--pane-dir <path>"
+          ]
+        },
+        {
           "name": "panes create",
           "summary": "Create user-visible Panes (Pane sessions) backed by Pane-managed worktrees for feature/PR work and open terminal-backed tool tabs.",
           "arguments": [
@@ -4378,6 +5987,7 @@ export const RUNPANE_CONTRACT = {
             "--pane <pane-id>",
             "--source <user|agent>",
             "--force",
+            "--dry-run",
             "--yes",
             "--json"
           ]
@@ -4513,6 +6123,20 @@ export const RUNPANE_CONTRACT = {
             "--interval-ms <ms>",
             "--json",
             "--pane-dir <path>"
+          ]
+        },
+        {
+          "name": "watch",
+          "summary": "Wait for workspace transitions (READY, BLOCKED, IDLE, STUCK, NEW, GONE, EXIT) from the daemon journal without polling; responsive by default, with opt-in cadence flags for expensive consumers.",
+          "arguments": [
+            "--follow",
+            "--self-test",
+            "--kinds <kind,...>",
+            "--settle <ms>",
+            "--blocked-settle <ms>",
+            "--min-interval <ms>",
+            "--idle-backoff",
+            "--json"
           ]
         }
       ]
@@ -4680,11 +6304,34 @@ export const RUNPANE_CONTRACT = {
             "name": "--verbose",
             "required": false,
             "description": "Print extra diagnostics."
+          },
+          {
+            "name": "--report",
+            "required": false,
+            "description": "Prepare a redacted, inspectable diagnostic report."
+          },
+          {
+            "name": "--body-file",
+            "value": "<path|->",
+            "required": false,
+            "description": "Read report evidence from a file or stdin."
+          },
+          {
+            "name": "--title",
+            "value": "<text>",
+            "required": false,
+            "description": "Report title."
+          },
+          {
+            "name": "--yes",
+            "required": false,
+            "description": "Confirm creating exactly one greenfield-inc/Pane issue."
           }
         ],
         "examples": [
           "runpane doctor --json",
-          "runpane doctor"
+          "runpane doctor",
+          "runpane doctor --report --title \"runpane watch failed\" --body-file ./watch.txt --json"
         ],
         "jsonSchemas": [
           "doctorResult"
@@ -4886,6 +6533,50 @@ export const RUNPANE_CONTRACT = {
           "Without --repo, this lists sessions across saved Pane repositories."
         ]
       },
+      "panes cost": {
+        "name": "panes cost",
+        "summary": "Report estimated token cost per Pane, with per-model breakdown and cache efficiency.",
+        "details": "Use this to attribute estimated workspace token costs to Pane lifetimes and inspect the models and cache efficiency behind each Pane's spend.",
+        "requiresPaneDaemon": true,
+        "mutates": false,
+        "arguments": [
+          {
+            "name": "--repo",
+            "value": "<selector>",
+            "required": false,
+            "description": "Optional repository selector: active, id, exact path, or saved repository name."
+          },
+          {
+            "name": "--pane",
+            "value": "<pane-id>",
+            "required": false,
+            "description": "Return only the selected Pane."
+          },
+          {
+            "name": "--json",
+            "required": false,
+            "description": "Print machine-readable output."
+          },
+          {
+            "name": "--pane-dir",
+            "value": "<path>",
+            "required": false,
+            "description": "Connect to a specific Pane data directory."
+          }
+        ],
+        "examples": [
+          "runpane panes cost --pane <pane-id> --json"
+        ],
+        "jsonSchemas": [
+          "paneCostRequest",
+          "paneCostResult"
+        ],
+        "notes": [
+          "The report range is the last 30 days.",
+          "Costs are estimates based on API token prices.",
+          "The unattributed bucket reconciles the Pane rows against totals in the unscoped result."
+        ]
+      },
       "panes create": {
         "name": "panes create",
         "summary": "Create user-visible Panes (Pane sessions) backed by Pane-managed worktrees for feature/PR work and open terminal-backed tool tabs.",
@@ -5022,10 +6713,90 @@ export const RUNPANE_CONTRACT = {
           "If readiness returns blocked, inspect blocked.suggestedCommand rather than guessing which prompt to answer."
         ]
       },
+      "panes adopt": {
+        "name": "panes adopt",
+        "summary": "Adopt an existing externally managed git worktree as a Pane.",
+        "details": "Validates that the canonical path is a registered worktree of the selected saved repository, then creates a Pane record without creating, syncing, building, removing, or recreating the directory.",
+        "requiresPaneDaemon": true,
+        "mutates": true,
+        "arguments": [
+          {
+            "name": "--repo",
+            "value": "<selector>",
+            "required": true,
+            "description": "Saved repository selector."
+          },
+          {
+            "name": "--path",
+            "value": "<dir>",
+            "required": true,
+            "description": "Existing git worktree path."
+          },
+          {
+            "name": "--name",
+            "value": "<name>",
+            "required": true,
+            "description": "Pane name."
+          },
+          {
+            "name": "--agent",
+            "value": "<codex|claude|cursor>",
+            "required": true,
+            "description": "Agent whose terminal to create."
+          },
+          {
+            "name": "--resume",
+            "value": "<id>",
+            "required": false,
+            "description": "Persist this agent session id and stage its resume command."
+          },
+          {
+            "name": "--folder",
+            "value": "<name>",
+            "required": false,
+            "description": "Top-level sidebar folder."
+          },
+          {
+            "name": "--launch",
+            "required": false,
+            "description": "Run the resume command immediately."
+          },
+          {
+            "name": "--no-pinned",
+            "required": false,
+            "description": "Do not pin the adopted pane."
+          },
+          {
+            "name": "--dry-run",
+            "required": false,
+            "description": "Validate and preview only."
+          },
+          {
+            "name": "--yes",
+            "required": false,
+            "description": "Skip confirmation."
+          },
+          {
+            "name": "--json",
+            "required": false,
+            "description": "Print machine-readable output."
+          }
+        ],
+        "examples": [
+          "runpane panes adopt --repo active --path /path/to/worktree --name imported --agent codex --resume <id> --yes --json"
+        ],
+        "jsonSchemas": [
+          "paneCreateResult"
+        ],
+        "notes": [
+          "The resume command is staged without Enter unless --launch is passed.",
+          "Pane never removes an externally owned worktree."
+        ]
+      },
       "panes archive": {
         "name": "panes archive",
         "summary": "Archive a Pane (session) exactly like the UI Archive action, including safe removal of its Pane-managed git worktree.",
-        "details": "Use this to close out a Pane once its PR has merged. Refuses to archive (unless --force) when the pane's branch has uncommitted, untracked, or unpushed-to-remote changes, so an agent cannot silently discard work. A merged and pushed branch has no unpushed commits, so it archives cleanly. Waits for worktree removal to finish before returning.",
+        "details": "Use this to close out a Pane once its PR has merged. The safety check refreshes the configured upstream before comparing it to HEAD and includes exact unpushed commit IDs and subjects. Refuses unsafe archive operations unless --force is used. Use --dry-run to inspect the same evidence without mutating Pane state.",
         "requiresPaneDaemon": true,
         "mutates": true,
         "arguments": [
@@ -5052,6 +6823,11 @@ export const RUNPANE_CONTRACT = {
             "description": "Skip confirmation for mutating commands."
           },
           {
+            "name": "--dry-run",
+            "required": false,
+            "description": "Refresh and print archive safety evidence without archiving."
+          },
+          {
             "name": "--json",
             "required": false,
             "description": "Print machine-readable output."
@@ -5059,6 +6835,7 @@ export const RUNPANE_CONTRACT = {
         ],
         "examples": [
           "runpane panes archive --pane <pane-id> --source agent --yes --json",
+          "runpane panes archive --pane <pane-id> --dry-run --json",
           "runpane panes archive --pane <pane-id> --force --yes --json"
         ],
         "jsonSchemas": [
@@ -5067,6 +6844,8 @@ export const RUNPANE_CONTRACT = {
         ],
         "notes": [
           "If the result has ok:false with a blocked field, the pane was NOT archived; inspect blocked.code and rerun with --force if discarding the flagged work is intentional.",
+          "Inspect safetyCheck.unpushedCommitDetails for exact commit IDs and subjects; upstreamRefreshed confirms the tracking ref was refreshed first.",
+          "A --dry-run result sets dryRun:true and wouldArchive without deleting the Pane or its worktree.",
           "A successful archive waits for the Pane-managed worktree to be removed before returning; check worktreeCleanup in the result for the final outcome.",
           "Archiving a main-repo Pane (no Pane-managed worktree) always succeeds immediately since nothing is deleted from disk."
         ]
@@ -5473,13 +7252,14 @@ export const RUNPANE_CONTRACT = {
         ],
         "notes": [
           "Use this before `panels output` when an agent only needs the latest visible/current state.",
+          "The composer object reports whether a Claude or Codex composer is present and whether it holds undelivered text. Claude's dim placeholder suggestion does not count as undelivered text.",
           "If hasMore is true and context is missing, rerun with a larger --limit or use `panels output`."
         ]
       },
       "panels submit": {
         "name": "panels submit",
-        "summary": "Send text to a terminal panel and append a terminal Enter byte.",
-        "details": "Use this for ordinary interactive submissions. The daemon normalizes a final LF or CRLF to CR, or appends CR if no newline is present. Exact byte workflows remain on `panels input`.",
+        "summary": "Send and submit text to a terminal panel, including idle agent composers.",
+        "details": "Use this for ordinary interactive submissions. For Claude, Pane waits for the composer to appear and show the staged text, then sends Enter on its own and verifies that the composer cleared; Claude keeps an Enter that arrives together with the text as a newline. For an idle Codex composer, Pane stages the text, waits for Codex paste handling, sends the Codex submit sequence, and verifies that the turn started when visible evidence is available. Other terminals receive a normalized CR Enter. Exact byte workflows remain on `panels input`.",
         "requiresPaneDaemon": true,
         "mutates": true,
         "arguments": [
@@ -5527,7 +7307,8 @@ export const RUNPANE_CONTRACT = {
           "panelSubmitResult"
         ],
         "notes": [
-          "The response includes nextCommand for validation. Run it before reporting that the input worked.",
+          "The response includes sequenceName, verifiedSubmitted, and nextCommand. If ok is false, inspect blocked and do not assume the turn started.",
+          "Do not follow `panels submit` with `panels submit-composer`; Claude and idle Codex composer submission is handled atomically.",
           "Use `panels input` for Ctrl-C, escape sequences, or any workflow requiring exact bytes."
         ]
       },
@@ -5731,6 +7512,323 @@ export const RUNPANE_CONTRACT = {
           "Use --strategy auto for agent workflows; explicit strategies are diagnostic escape hatches.",
           "The JSON result includes sequenceName and verifiedSubmitted. If ok is false, follow blocked.suggestedCommand instead of assuming submission happened."
         ]
+      },
+      "workspace state": {
+        "name": "workspace state",
+        "summary": "Read one snapshot of every Pane and CLI panel.",
+        "details": "Use this instead of spawning one command per pane or panel.",
+        "requiresPaneDaemon": true,
+        "mutates": false,
+        "arguments": [
+          {
+            "name": "--repo",
+            "value": "<selector>",
+            "required": false,
+            "description": "Optionally limit the snapshot to one saved repository."
+          },
+          {
+            "name": "--json",
+            "required": false,
+            "description": "Print machine-readable output."
+          }
+        ],
+        "examples": [
+          "runpane workspace state --json"
+        ],
+        "notes": [
+          "The response carries the daemon epoch and current journal generation."
+        ]
+      },
+      "watch": {
+        "name": "watch",
+        "summary": "Wait for workspace transitions using the daemon journal.",
+        "details": "`runpane watch --follow` is the responsive monitor: lines, 60-second heartbeats, IDLE every 10 minutes, managed-agent scope, redacted STUCK detection, no settle, no batching, all kinds. Expensive consumers (one wake-up per line) opt into the cadence flags. Pane Chat arms them automatically through its pane-orchestrator skill; only your own scripts need to pass them. Named cursors persist in the Pane data directory.",
+        "requiresPaneDaemon": true,
+        "mutates": false,
+        "arguments": [
+          {
+            "name": "--as",
+            "value": "<consumer-name>",
+            "required": false,
+            "description": "Use a persisted named cursor (at-least-once delivery). Default: PANE_PANEL_ID under --follow when set, otherwise anonymous."
+          },
+          {
+            "name": "--since",
+            "value": "<generation>",
+            "required": false,
+            "description": "Use an explicit generation cursor instead of a name. Cannot be combined with --as, or with --settle, --blocked-settle, --min-interval."
+          },
+          {
+            "name": "--from",
+            "required": false,
+            "value": "<now|earliest>",
+            "description": "Starting point for a new named cursor. Default now (silent baseline); earliest replays the journal."
+          },
+          {
+            "name": "--follow",
+            "required": false,
+            "description": "Continue waiting until interrupted. Required by every cadence flag."
+          },
+          {
+            "name": "--format",
+            "value": "<lines|json>",
+            "required": false,
+            "description": "Output format. Default lines in every mode; --json selects json."
+          },
+          {
+            "name": "--heartbeat",
+            "value": "<seconds>",
+            "required": false,
+            "description": "Healthy-silence bound; a HEARTBEAT line proves the watcher is alive. Default 60 under --follow, 0 otherwise. Filter it out of any monitor that wakes an agent."
+          },
+          {
+            "name": "--idle-after",
+            "value": "<milliseconds>",
+            "required": false,
+            "description": "IDLE fires after a READY panel has stayed idle this long, then re-fires every multiple. Default 600000 under --follow, 0 otherwise."
+          },
+          {
+            "name": "--settle",
+            "value": "<milliseconds>",
+            "required": false,
+            "description": "Opt-in (follow only): emit READY only after the panel stays idle this long; a BUSY, BLOCKED, UNKNOWN, EXIT, or GONE inside the window cancels it silently. Default 0. Use when a pane flips idle/working while it waits on subagents; the orchestrator value is 180000."
+          },
+          {
+            "name": "--blocked-settle",
+            "value": "<milliseconds>",
+            "required": false,
+            "description": "Opt-in (follow only): emit BLOCKED only after this window; an in-pane answer inside it cancels the line. Default 0. The orchestrator value is 30000."
+          },
+          {
+            "name": "--min-interval",
+            "value": "<milliseconds>",
+            "required": false,
+            "description": "Opt-in (follow only): hold READY, IDLE, NEW, GONE, EXIT, and UNKNOWN lines and flush them together at most once per interval; BLOCKED bypasses it and carries the held lines with it. Default 0. The orchestrator value is 600000."
+          },
+          {
+            "name": "--idle-backoff",
+            "required": false,
+            "description": "Opt-in (follow only): IDLE fires at --idle-after, then 30m, 1h, 3h, then daily per panel; any activity resets the schedule. Default off (fixed multiples of --idle-after)."
+          },
+          {
+            "name": "--kinds",
+            "required": false,
+            "value": "<kind,...>",
+            "description": "Limit event kinds: agent.ready, agent.busy, agent.blocked, agent.unknown, agent.idle, pane.created, pane.gone, panel.exited. Default all. Drop agent.busy for any consumer that acts on lines; BUSY carries no action."
+          },
+          {
+            "name": "--pane",
+            "required": false,
+            "value": "<pane-id>",
+            "description": "Limit to a Pane; repeatable. Default all managed panes."
+          },
+          {
+            "name": "--exclude-pane",
+            "required": false,
+            "value": "<pane-id>",
+            "description": "Exclude a Pane; repeatable."
+          },
+          {
+            "name": "--repo",
+            "required": false,
+            "value": "<selector>",
+            "description": "Limit to a saved repository (active, id, path, or name). Default all repositories."
+          },
+          {
+            "name": "--name-contains",
+            "required": false,
+            "value": "<text>",
+            "description": "Limit by Pane name substring."
+          },
+          {
+            "name": "--agents-only",
+            "required": false,
+            "description": "Limit to CLI agent panels. Default on under --follow."
+          },
+          {
+            "name": "--all-managed",
+            "required": false,
+            "description": "Explicit spelling for the all-managed default scope."
+          },
+          {
+            "name": "--include-shells",
+            "required": false,
+            "description": "Include ordinary shell panels."
+          },
+          {
+            "name": "--timeout-ms",
+            "required": false,
+            "value": "<milliseconds>",
+            "description": "Wait timeout per request; 0 polls once. Default 60000, capped at 120000 (the follow loop re-issues requests)."
+          },
+          {
+            "name": "--limit",
+            "required": false,
+            "value": "<count>",
+            "description": "Maximum entries per response. Default 256."
+          },
+          {
+            "name": "--ack-now",
+            "required": false,
+            "description": "At-most-once named-cursor delivery (advance before you act). Default at-least-once."
+          },
+          {
+            "name": "--include-held-input",
+            "required": false,
+            "description": "Include up to 120 characters of unsubmitted composer text in JSON entries. Default off (presence only)."
+          },
+          {
+            "name": "--no-held-input",
+            "required": false,
+            "description": "Disable redacted STUCK detection in lines follow mode."
+          },
+          {
+            "name": "--self-test",
+            "required": false,
+            "description": "Probe the watch path anonymously without advancing a named cursor; run it before arming --follow."
+          },
+          {
+            "name": "--json",
+            "required": false,
+            "description": "Emit structured NDJSON; held-input content remains opt-in."
+          }
+        ],
+        "examples": [
+          "runpane watch --self-test",
+          "runpane watch --follow",
+          "runpane watch --as monitor --follow --json",
+          "runpane watch --follow --kinds agent.ready,agent.blocked,agent.idle,panel.exited,pane.gone --settle 180000 --blocked-settle 30000 --min-interval 600000 --idle-backoff"
+        ],
+        "notes": [
+          "Defaults stay responsive: no settle, no batching, all kinds, IDLE every --idle-after. Cadence flags are opt-in for expensive consumers and require --follow.",
+          "Recommended orchestrator invocation (what Pane Chat arms automatically): runpane watch --self-test, then runpane watch --follow --kinds agent.ready,agent.blocked,agent.idle,panel.exited,pane.gone --settle 180000 --blocked-settle 30000 --min-interval 600000 --idle-backoff. Budget: about 6 wake-ups per active pane per hour worst case, usually 1-3.",
+          "BUSY carries no action; drop it with --kinds. HEARTBEAT is client-side proof of life, is never shaped by cadence flags, and should be filtered out of any monitor that wakes an agent.",
+          "STUCK means real unsubmitted composer text. An agent prompt suggestion (for example a grey Try \"...\" hint) never counts.",
+          "Dead watch: judge death by a non-zero exit or a WATCH ERROR line, not by silence. Re-arm once; if it dies again, file runpane doctor --report.",
+          "Cadence state is held per named consumer; an anonymous --follow with a cadence flag names itself follow-<pid>. Held lines survive a reconnect of the same consumer; a changed filter re-delivers them under the new filter.",
+          "Journal loss is surfaced through reset and dropped metadata.",
+          "The daemon treats omitted idleAfterMs as disabled so older clients never receive agent.idle unexpectedly."
+        ]
+      },
+      "sessions list": {
+        "name": "sessions list",
+        "summary": "List durable named orchestration Sessions.",
+        "details": "List durable named orchestration Sessions.",
+        "requiresPaneDaemon": true,
+        "mutates": false,
+        "arguments": [],
+        "examples": [
+          "runpane sessions list [--json] [--pane-dir <path>]"
+        ],
+        "jsonSchemas": [
+          "sessionListResult"
+        ],
+        "notes": []
+      },
+      "sessions create": {
+        "name": "sessions create",
+        "summary": "Create a durable named orchestration Session and its hidden terminal owner.",
+        "details": "Create a durable named orchestration Session and its hidden terminal owner.",
+        "requiresPaneDaemon": true,
+        "mutates": true,
+        "arguments": [],
+        "examples": [
+          "runpane sessions create --from-json <path|-> [--json] [--pane-dir <path>]"
+        ],
+        "jsonSchemas": [
+          "sessionResult"
+        ],
+        "notes": []
+      },
+      "sessions get": {
+        "name": "sessions get",
+        "summary": "Read one durable named orchestration Session.",
+        "details": "Read one durable named orchestration Session.",
+        "requiresPaneDaemon": true,
+        "mutates": false,
+        "arguments": [],
+        "examples": [
+          "runpane sessions get --session <id|name> [--json] [--pane-dir <path>]"
+        ],
+        "jsonSchemas": [
+          "sessionResult"
+        ],
+        "notes": []
+      },
+      "sessions update": {
+        "name": "sessions update",
+        "summary": "Update a Session overview from structured JSON.",
+        "details": "Update a Session overview from structured JSON.",
+        "requiresPaneDaemon": true,
+        "mutates": true,
+        "arguments": [],
+        "examples": [
+          "runpane sessions update --session <id|name> --from-json <path|-> [--json] [--pane-dir <path>]"
+        ],
+        "jsonSchemas": [
+          "sessionResult"
+        ],
+        "notes": []
+      },
+      "sessions set-agent": {
+        "name": "sessions set-agent",
+        "summary": "Switch the durable terminal agent for a named Session.",
+        "details": "Switch the durable terminal agent for a named Session.",
+        "requiresPaneDaemon": true,
+        "mutates": true,
+        "arguments": [],
+        "examples": [
+          "runpane sessions set-agent --session <id|name> --agent <codex|claude|cursor> [--json] [--pane-dir <path>]"
+        ],
+        "jsonSchemas": [
+          "sessionResult"
+        ],
+        "notes": []
+      },
+      "sessions associate": {
+        "name": "sessions associate",
+        "summary": "Associate a user-visible Pane with a named Session.",
+        "details": "Associate a user-visible Pane with a named Session.",
+        "requiresPaneDaemon": true,
+        "mutates": true,
+        "arguments": [],
+        "examples": [
+          "runpane sessions associate --session <id|name> --pane <pane-id> [--json] [--pane-dir <path>]"
+        ],
+        "jsonSchemas": [
+          "sessionResult"
+        ],
+        "notes": []
+      },
+      "sessions detach": {
+        "name": "sessions detach",
+        "summary": "Detach a Pane from a named Session.",
+        "details": "Detach a Pane from a named Session.",
+        "requiresPaneDaemon": true,
+        "mutates": true,
+        "arguments": [],
+        "examples": [
+          "runpane sessions detach --session <id|name> [--pane <pane-id>] [--json] [--pane-dir <path>]"
+        ],
+        "jsonSchemas": [
+          "sessionResult"
+        ],
+        "notes": []
+      },
+      "sessions overview": {
+        "name": "sessions overview",
+        "summary": "Read a live status, activity, git, and pull request overview for a named Session.",
+        "details": "Read a live status, activity, git, and pull request overview for a named Session.",
+        "requiresPaneDaemon": true,
+        "mutates": false,
+        "arguments": [],
+        "examples": [
+          "runpane sessions overview --session <id|name> [--json] [--pane-dir <path>]"
+        ],
+        "jsonSchemas": [
+          "sessionOverviewResult"
+        ],
+        "notes": []
       }
     },
     "managedBlock": [
@@ -5742,7 +7840,7 @@ export const RUNPANE_CONTRACT = {
       "",
       "Pane mental model: a repository is the saved base repo; a Pane is a user-visible feature/PR workspace (Pane session) that normally maps to one Pane-managed git worktree and branch; a panel/tab is a terminal inside one Pane and shares that Pane's worktree; an agent is the CLI process running in a panel.",
       "",
-      "Default happy path when the user asks you to use Pane or RunPane: run `runpane doctor --json`; read `runpane agent-context --json`; resolve the saved base repository with `runpane repos list --json` or add it once with `runpane repos add --path <repo> --yes --json`; create one visible Pane (Pane session) for the requested feature/PR with a complete command such as `runpane panes create --repo <repo> --name <name> --agent <agent> --prompt \"<task>\" --source agent --no-focus --wait-ready --yes --json` or the equivalent `--tool-command <command>` form; then validate with `runpane panels wait` or `runpane panels screen` before reporting progress.",
+      "Default happy path when the user asks you to use Pane or RunPane: run `runpane doctor --json`; read `runpane agent-context --json`; resolve the saved base repository with `runpane repos list --json` or add it once with `runpane repos add --path <repo> --yes --json`; create one visible Pane (Pane session) for the requested feature/PR with a complete command such as `runpane panes create --repo <repo> --name <name> --agent <agent> --prompt \"<task>\" --source agent --no-focus --wait-ready --yes --json` or the equivalent `--tool-command <command>` form; then validate with `runpane panels wait` or `runpane panels screen` before reporting progress. For long-lived supervision, use `runpane watch --follow` instead of polling wait or screen.",
       "",
       "Use Pane when the user wants visible Panes or co-drivable parallel feature/PR workspaces. Do not use Pane as your default private delegation mechanism; for private background decomposition, use your normal subagent/worktree workflow.",
       "",
@@ -5762,9 +7860,9 @@ export const RUNPANE_CONTRACT = {
       "",
       "In a Pane repository checkout, if `runpane` is not on PATH, use the built local wrapper with Node 22: `PATH=/opt/homebrew/opt/node@22/bin:$PATH node packages/runpane/dist/cli.js doctor --json`.",
       "",
-      "Use `runpane agent-context --json` for full Pane CLI context. Use `runpane agent-context --command \"panels wait\" --json` or another command name for detailed schema only when needed.",
+      "Use `runpane agent-context --json` for full Pane CLI context. Use `runpane agent-context --command \"watch\" --json` or another command name for detailed schema only when needed.",
       "",
-      "Default to context-safe validation: after creating Panes or sending terminal input, run `runpane panels wait` or `runpane panels screen` before reporting success. Prefer `runpane panels submit` for normal text plus Enter; use `runpane panels input` only for exact bytes such as Ctrl-C or escape sequences.",
+      "Default to context-safe validation: after creating Panes or sending terminal input, run `runpane panels wait` or `runpane panels screen` before reporting success. For ongoing supervision, `runpane watch --follow` is the canonical monitor; do not poll wait or screen. Prefer `runpane panels submit` for normal text plus Enter; use `runpane panels input` only for exact bytes such as Ctrl-C or escape sequences.",
       "",
       "Pane terminals draw inline images: sixel, iTerm2 inline images, and the kitty graphics protocol. Tools that need kitty graphics, such as [terminal-browser](https://github.com/zenbu-labs/terminal-browser) and [terminal-doom](https://github.com/dcouple/terminal-doom), run inside a Pane panel. `runpane doctor --json` reports the protocol list under `terminal.graphicsProtocols`.",
       "",
@@ -5779,6 +7877,7 @@ export const RUNPANE_CONTRACT = {
       "- `runpane panels list --pane <pane-id> --json`",
       "- `runpane panels screen --panel <panel-id> --limit 80 --json`",
       "- `runpane panels wait --panel <panel-id> --for ready --timeout-ms 30000 --json`",
+      "- `runpane watch --follow --json`",
       "- `runpane panels submit --panel <panel-id> --text \"<answer>\" --yes --json`",
       "- `runpane panels input --panel <panel-id> --input-file <path|-> --yes --json`",
       "",

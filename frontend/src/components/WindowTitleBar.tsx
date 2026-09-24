@@ -1,3 +1,4 @@
+import { useTitleBarSlotStore } from '../stores/titleBarSlotStore';
 import { useEffect, useState, type CSSProperties } from 'react';
 
 import { useNavigationStore } from '../stores/navigationStore';
@@ -76,7 +77,25 @@ function useArrivedKeys(scope: string | null, keys: string[]): Set<string> {
 
 interface WindowTitleBarProps {
   projects: Project[];
+  /**
+   * Receives the element that app-level controls (the sidebar toggle and its
+   * menu) portal into. The slot sits beside the window controls and is the one
+   * `no-drag` island in the strip; everything else keeps dragging.
+   */
+  controlsSlotRef?: (element: HTMLDivElement | null) => void;
 }
+
+// SAFETY: Electron supports WebkitAppRegion although React's CSSProperties omits the vendor property.
+const CONTROLS_SLOT_STYLE = { WebkitAppRegion: 'no-drag' } as CSSProperties;
+// Traffic lights end around x=80; keep the shared gutter before app controls.
+const MAC_CONTROLS_LEFT: CSSProperties = { left: 80 + GUTTER_PX };
+const OVERLAY_CONTROLS_LEFT: CSSProperties = { left: `calc(env(titlebar-area-x, 0px) + ${GUTTER_PX}px)` };
+// The trailing slot hugs the end of the page's share of the strip: the window
+// edge on macOS, the overlay's caption buttons on Windows and Linux.
+const MAC_CONTROLS_RIGHT: CSSProperties = { right: GUTTER_PX };
+const OVERLAY_CONTROLS_RIGHT: CSSProperties = {
+  right: `calc(100% - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100%) + ${GUTTER_PX}px)`,
+};
 
 /**
  * The title bar strip above the tool tabs: a window drag region that also names
@@ -89,7 +108,8 @@ interface WindowTitleBarProps {
  * is `document.title`, which this also owns, that carries the pane name. That is
  * true on every platform for the taskbar and task switcher.
  */
-export function WindowTitleBar({ projects }: WindowTitleBarProps) {
+export function WindowTitleBar({ projects, controlsSlotRef }: WindowTitleBarProps) {
+  const setTrailingSlot = useTitleBarSlotStore((state) => state.setTrailingSlot);
   const activeView = useNavigationStore(state => state.activeView);
   const activeSession = useSessionStore(state => {
     if (!state.activeSessionId) return undefined;
@@ -125,10 +145,22 @@ export function WindowTitleBar({ projects }: WindowTitleBarProps) {
 
   return (
     <div
-      className="flex-shrink-0 flex items-center justify-center overflow-hidden bg-bg-primary select-none"
+      className="relative flex-shrink-0 flex items-center justify-center overflow-hidden bg-surface-primary select-none"
       style={{ ...TITLE_BAR_STYLE, ...(isMac() ? MAC_INSET_STYLE : OVERLAY_INSET_STYLE) }}
       data-testid="window-title-bar"
     >
+      <div
+        ref={controlsSlotRef}
+        className="absolute top-0 bottom-0 flex items-center gap-0.5"
+        style={{ ...CONTROLS_SLOT_STYLE, ...(isMac() ? MAC_CONTROLS_LEFT : OVERLAY_CONTROLS_LEFT) }}
+        data-testid="window-title-bar-controls"
+      />
+      <div
+        ref={setTrailingSlot}
+        className="absolute top-0 bottom-0 flex items-center gap-0.5"
+        style={{ ...CONTROLS_SLOT_STYLE, ...(isMac() ? MAC_CONTROLS_RIGHT : OVERLAY_CONTROLS_RIGHT) }}
+        data-testid="window-title-bar-trailing-controls"
+      />
       {title && (
         <div className="relative flex min-w-0 items-center">
           <div

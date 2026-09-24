@@ -16,13 +16,16 @@ import { CommitMessageDialog } from './session/CommitMessageDialog';
 import { FolderArchiveDialog } from './session/FolderArchiveDialog';
 import { ConfirmDialog } from './ConfirmDialog';
 import { ProjectView } from './ProjectView';
+import { UsageView } from './usage/UsageView';
 import { API } from '../utils/api';
-import { useResizable } from '../hooks/useResizable';
-import { useResizableHeight } from '../hooks/useResizableHeight';
+import { useObservedContentBox } from '../hooks/useObservedContentBox';
+import { useOuterPanelResize } from '../hooks/useOuterPanelResize';
+import { OUTER_PANEL_CONFIGS } from '../utils/outerPanelSizing';
+import { OuterResizeSeparator } from './ui/OuterResizeSeparator';
 import { usePanelStore } from '../stores/panelStore';
+import { useProjectViewActionsStore } from '../stores/projectViewActionsStore';
 import { panelApi } from '../services/panelApi';
 import { setPendingViewCommit } from './panels/diff/pendingViewCommit';
-import { requestLocalReviewMode } from './panels/diff/reviewModePreference';
 import { PanelTabBar } from './panels/PanelTabBar';
 import { PanelContainer } from './panels/PanelContainer';
 import { SplitLayout } from './panels/SplitLayout';
@@ -48,7 +51,7 @@ import {
   mergeAllGroups,
   type DropZone,
 } from '../utils/panelLayout';
-import { Download, Upload, GitMerge, GitPullRequestArrow, Terminal, ChevronDown, ChevronUp, RefreshCw, Archive, ArchiveRestore, GitCommitHorizontal, TerminalSquare, Undo2, X } from 'lucide-react';
+import { Download, Upload, GitMerge, GitPullRequestArrow, Terminal, ChevronDown, ChevronUp, RefreshCw, Archive, ArchiveRestore, GitCommitHorizontal, TerminalSquare, Undo2 } from 'lucide-react';
 import { getCliBrandIcon } from './ui/brandIconRegistry';
 import { visibleAgentPresets } from '../utils/agentPresets';
 import type { Project } from '../types/project';
@@ -56,8 +59,8 @@ import { devLog, renderLog } from '../utils/console';
 import { useConfigStore } from '../stores/configStore';
 import { cycleIndex } from '../utils/arrayUtils';
 import { formatKeyDisplay } from '../utils/hotkeyUtils';
-import { Tooltip } from './ui/Tooltip';
 import { Kbd } from './ui/Kbd';
+import type { InspectorTab } from './InspectorTabs';
 import { useErrorStore } from '../stores/errorStore';
 import ProjectSettings from './ProjectSettings';
 
@@ -66,6 +69,11 @@ function pickDefaultPanel(panelList: ToolPanel[], hasReviewPr: boolean): ToolPan
     || panelList.find(p => p.type === 'explorer')
     || panelList.find(p => p.type !== 'diff')
     || panelList[0];
+}
+
+/** Explorer and Review render in the inspector rail, never on the stage. */
+function isInspectorPanelType(type: ToolPanel['type']): boolean {
+  return type === 'explorer' || type === 'diff';
 }
 
 export const SessionView = memo(() => {
@@ -78,17 +86,13 @@ export const SessionView = memo(() => {
   const [currentUpstream, setCurrentUpstream] = useState<string | null>(null);
 
   // Config store for custom commands in terminal row pills
-  const { config, fetchConfig, updateConfig } = useConfigStore();
+  const { config, fetchConfig } = useConfigStore();
   useEffect(() => { if (!config) { fetchConfig(); } }, [config, fetchConfig]);
   const customCommands = useMemo(
     () => (config?.customCommands ?? []).filter(cmd => cmd?.name && cmd?.command),
     [config?.customCommands]
   );
   const isRemoteMode = config?.remoteDaemon?.client.mode === 'remote';
-  const deleteCustomCommand = useCallback((index: number) => {
-    const existing = config?.customCommands ?? [];
-    updateConfig({ customCommands: existing.filter((_, i) => i !== index) }).catch(() => {});
-  }, [config, updateConfig]);
 
   // Get active session by subscribing directly to store state
   // This ensures the component re-renders when git status or other session properties update
@@ -258,8 +262,10 @@ export const SessionView = memo(() => {
 
         // --- Layout load + reconcile ---
         // The pinned terminal (first terminal) is excluded from the layout tree
+        // and so are the inspector panels (Explorer / Review), which never
+        // sit on the stage — otherwise a close could hand the group to one.
         const pinned = loadedPanels.find(p => p.type === 'terminal');
-        const livePanels = pinned ? loadedPanels.filter(p => p.id !== pinned.id) : loadedPanels;
+        const livePanels = loadedPanels.filter(p => p.id !== pinned?.id && !isInspectorPanelType(p.type));
 
         // Sort for initial layout creation (explorer first, diff second, then position)
         const typeOrder = (type: string) => {
@@ -281,8 +287,10 @@ export const SessionView = memo(() => {
           // current store adopts them as orphans instead of dropping them.
           const nowPanels = usePanelStore.getState().panels[sid] || [];
           const pinnedNow = nowPanels.find(p => p.type === 'terminal');
-          const liveIdsNow = (pinnedNow ? nowPanels.filter(p => p.id !== pinnedNow.id) : nowPanels)
-            .map(p => p.id);
+          const liveIdsNow: string[] = [];
+          for (const p of nowPanels) {
+            if (p.id !== pinnedNow?.id && !isInspectorPanelType(p.type)) liveIdsNow.push(p.id);
+          }
           // Treat unknown future layout versions as no stored layout rather
           // than reconciling a shape this build doesn't understand.
           const versionOk = stored?.version === 1;
@@ -336,6 +344,7 @@ export const SessionView = memo(() => {
           if (pinnedTerminal && panel.id === pinnedTerminal.id) {
             return;
           }
+          if (isInspectorPanelType(panel.type)) return;
 
           // Add the new panel to the layout (into the focused group, falling
           // back to the primary group if focus is stale). addPanelToGroup is
@@ -404,12 +413,20 @@ export const SessionView = memo(() => {
     [sessionPanels]
   );
 
-  // Non-terminal panels for the tab bar (exclude the default terminal that's pinned to the bottom)
+  // Explorer and Review live in the right inspector (Files / Changes), not
+  // in the tab strip.
+  const filesPanel = useMemo(() => sessionPanels.find(p => p.type === 'explorer'), [sessionPanels]);
+  const changesPanel = useMemo(() => sessionPanels.find(p => p.type === 'diff'), [sessionPanels]);
+  const isInspectorPanel = useCallback(
+    (p: ToolPanel) => p.type === 'explorer' || p.type === 'diff',
+    [],
+  );
+
+  // Working panels for the tab bar: exclude the inspector panels and the
+  // default terminal that's pinned to the bottom.
   const tabBarPanels = useMemo(
-    () => defaultTerminalPanel
-      ? sessionPanels.filter(p => p.id !== defaultTerminalPanel.id)
-      : sessionPanels,
-    [sessionPanels, defaultTerminalPanel]
+    () => sessionPanels.filter(p => !isInspectorPanel(p) && p.id !== defaultTerminalPanel?.id),
+    [sessionPanels, defaultTerminalPanel, isInspectorPanel]
   );
 
   // Sort tab bar panels same as PanelTabBar: explorer first, diff second, then by position
@@ -567,6 +584,35 @@ export const SessionView = memo(() => {
     [activeSession, setActivePanelInStore, addToHistory, handleGroupPanelSelect]
   );
 
+  // --- Inspector (right rail: Details / Files / Changes) ---
+  const [detailVisible, setDetailVisible] = useState(() => {
+    const stored = localStorage.getItem('pane-detail-panel-visible');
+    return stored !== null ? stored === 'true' : true;
+  });
+  useEffect(() => {
+    localStorage.setItem('pane-detail-panel-visible', String(detailVisible));
+  }, [detailVisible]);
+  const [inspectorTab, setInspectorTab] = useState<InspectorTab>(() => {
+    const stored = localStorage.getItem('pane-inspector-tab');
+    return stored === 'files' || stored === 'details' ? stored : 'changes';
+  });
+  useEffect(() => {
+    localStorage.setItem('pane-inspector-tab', inspectorTab);
+  }, [inspectorTab]);
+  const [isDetailCollapsed, setIsDetailCollapsed] = useState(() => {
+    const stored = localStorage.getItem('pane-detail-collapsed');
+    return stored === null ? false : stored === 'true';
+  });
+  useEffect(() => {
+    localStorage.setItem('pane-detail-collapsed', String(isDetailCollapsed));
+  }, [isDetailCollapsed]);
+  /** Show the inspector on the given tab, whichever layout is active. */
+  const openInspector = useCallback((tab: InspectorTab) => {
+    setInspectorTab(tab);
+    setDetailVisible(true);
+    setIsDetailCollapsed(false);
+  }, []);
+
   const handleCommitClick = useCallback(
     async (commitHash: string) => {
       if (!activeSession || sessionPanels.length === 0) return;
@@ -576,21 +622,30 @@ export const SessionView = memo(() => {
       // currently active, CombinedDiffView is unmounted and will read this
       // module-level variable when it mounts after the panel switch.
       setPendingViewCommit(activeSession.id, commitHash);
-      requestLocalReviewMode(activeSession.id);
-      await handlePanelSelect(diffPanel);
+      openInspector('changes');
       window.setTimeout(() => {
         window.dispatchEvent(new CustomEvent('diff:view-commit', {
           detail: { sessionId: activeSession.id, commitHash },
         }));
       }, 0);
     },
-    [activeSession, sessionPanels, handlePanelSelect]
+    [activeSession, sessionPanels, openInspector]
   );
 
   // Tab cycling: navigates between panels in the focused group using
   // keyboard shortcuts. Supports wrap-around (last → first). Only enabled
   // when there are 2+ panels. Uses focusedGroupPanels (layout order).
+  // Main-repo panes render ProjectView, which owns its own tabs and inspector;
+  // the hotkeys below act on it through this bridge instead of this view's state.
+  const isMainRepoPane = !!activeSession?.isMainRepo;
+  const projectActions = useCallback(
+    () => (isMainRepoPane ? useProjectViewActionsStore.getState().actions : null),
+    [isMainRepoPane],
+  );
+
   const cycleTab = useCallback((direction: 'next' | 'prev') => {
+    const bridged = projectActions();
+    if (bridged) { bridged.cycleTab(direction); return; }
     if (!activeSession || focusedGroupPanels.length < 2) return;
 
     const currentIndex = focusedGroupPanels.findIndex(
@@ -601,7 +656,7 @@ export const SessionView = memo(() => {
 
     const nextPanel = focusedGroupPanels[nextIndex];
     handlePanelSelect(nextPanel);
-  }, [activeSession, focusedGroupPanels, currentActivePanel, handlePanelSelect]);
+  }, [activeSession, focusedGroupPanels, currentActivePanel, handlePanelSelect, projectActions]);
 
   // Tab cycling hotkeys
   useHotkey({
@@ -609,7 +664,7 @@ export const SessionView = memo(() => {
     label: 'Previous Tab',
     keys: 'mod+a',
     category: 'tabs',
-    enabled: () => focusedGroupPanels.length > 1,
+    enabled: () => (projectActions()?.tabCount() ?? focusedGroupPanels.length) > 1,
     action: () => cycleTab('prev'),
     showInPalette: true,
   });
@@ -619,7 +674,7 @@ export const SessionView = memo(() => {
     label: 'Next Tab',
     keys: 'mod+d',
     category: 'tabs',
-    enabled: () => focusedGroupPanels.length > 1,
+    enabled: () => (projectActions()?.tabCount() ?? focusedGroupPanels.length) > 1,
     action: () => cycleTab('next'),
     showInPalette: true,
   });
@@ -631,19 +686,20 @@ export const SessionView = memo(() => {
     const name = p.type === 'diff' ? 'Review' : p.title;
     return `Switch to ${name}`;
   };
-  useHotkey({ id: 'panel-tab-1', label: panelLabel(0), keys: 'mod+shift+1', category: 'tabs', enabled: () => !!focusedGroupPanels[0], action: () => { const p = focusedGroupPanels[0]; if (p) handlePanelSelect(p); } });
-  useHotkey({ id: 'panel-tab-2', label: panelLabel(1), keys: 'mod+shift+2', category: 'tabs', enabled: () => !!focusedGroupPanels[1], action: () => { const p = focusedGroupPanels[1]; if (p) handlePanelSelect(p); } });
-  useHotkey({ id: 'panel-tab-3', label: panelLabel(2), keys: 'mod+shift+3', category: 'tabs', enabled: () => !!focusedGroupPanels[2], action: () => { const p = focusedGroupPanels[2]; if (p) handlePanelSelect(p); } });
-  useHotkey({ id: 'panel-tab-4', label: panelLabel(3), keys: 'mod+shift+4', category: 'tabs', enabled: () => !!focusedGroupPanels[3], action: () => { const p = focusedGroupPanels[3]; if (p) handlePanelSelect(p); } });
-  useHotkey({ id: 'panel-tab-5', label: panelLabel(4), keys: 'mod+shift+5', category: 'tabs', enabled: () => !!focusedGroupPanels[4], action: () => { const p = focusedGroupPanels[4]; if (p) handlePanelSelect(p); } });
-  useHotkey({ id: 'panel-tab-6', label: panelLabel(5), keys: 'mod+shift+6', category: 'tabs', enabled: () => !!focusedGroupPanels[5], action: () => { const p = focusedGroupPanels[5]; if (p) handlePanelSelect(p); } });
-  useHotkey({ id: 'panel-tab-7', label: panelLabel(6), keys: 'mod+shift+7', category: 'tabs', enabled: () => !!focusedGroupPanels[6], action: () => { const p = focusedGroupPanels[6]; if (p) handlePanelSelect(p); } });
-  useHotkey({ id: 'panel-tab-8', label: panelLabel(7), keys: 'mod+shift+8', category: 'tabs', enabled: () => !!focusedGroupPanels[7], action: () => { const p = focusedGroupPanels[7]; if (p) handlePanelSelect(p); } });
-  useHotkey({ id: 'panel-tab-9', label: panelLabel(8), keys: 'mod+shift+9', category: 'tabs', enabled: () => !!focusedGroupPanels[8], action: () => { const p = focusedGroupPanels[8]; if (p) handlePanelSelect(p); } });
+  useHotkey({ id: 'panel-tab-1', label: panelLabel(0), keys: 'mod+shift+1', category: 'tabs', enabled: () => (projectActions()?.tabCount() ?? 0) > 0 || !!focusedGroupPanels[0], action: () => { const bridged = projectActions(); if (bridged) { bridged.selectTab(0); return; } const p = focusedGroupPanels[0]; if (p) handlePanelSelect(p); } });
+  useHotkey({ id: 'panel-tab-2', label: panelLabel(1), keys: 'mod+shift+2', category: 'tabs', enabled: () => (projectActions()?.tabCount() ?? 0) > 1 || !!focusedGroupPanels[1], action: () => { const bridged = projectActions(); if (bridged) { bridged.selectTab(1); return; } const p = focusedGroupPanels[1]; if (p) handlePanelSelect(p); } });
+  useHotkey({ id: 'panel-tab-3', label: panelLabel(2), keys: 'mod+shift+3', category: 'tabs', enabled: () => (projectActions()?.tabCount() ?? 0) > 2 || !!focusedGroupPanels[2], action: () => { const bridged = projectActions(); if (bridged) { bridged.selectTab(2); return; } const p = focusedGroupPanels[2]; if (p) handlePanelSelect(p); } });
+  useHotkey({ id: 'panel-tab-4', label: panelLabel(3), keys: 'mod+shift+4', category: 'tabs', enabled: () => (projectActions()?.tabCount() ?? 0) > 3 || !!focusedGroupPanels[3], action: () => { const bridged = projectActions(); if (bridged) { bridged.selectTab(3); return; } const p = focusedGroupPanels[3]; if (p) handlePanelSelect(p); } });
+  useHotkey({ id: 'panel-tab-5', label: panelLabel(4), keys: 'mod+shift+5', category: 'tabs', enabled: () => (projectActions()?.tabCount() ?? 0) > 4 || !!focusedGroupPanels[4], action: () => { const bridged = projectActions(); if (bridged) { bridged.selectTab(4); return; } const p = focusedGroupPanels[4]; if (p) handlePanelSelect(p); } });
+  useHotkey({ id: 'panel-tab-6', label: panelLabel(5), keys: 'mod+shift+6', category: 'tabs', enabled: () => (projectActions()?.tabCount() ?? 0) > 5 || !!focusedGroupPanels[5], action: () => { const bridged = projectActions(); if (bridged) { bridged.selectTab(5); return; } const p = focusedGroupPanels[5]; if (p) handlePanelSelect(p); } });
+  useHotkey({ id: 'panel-tab-7', label: panelLabel(6), keys: 'mod+shift+7', category: 'tabs', enabled: () => (projectActions()?.tabCount() ?? 0) > 6 || !!focusedGroupPanels[6], action: () => { const bridged = projectActions(); if (bridged) { bridged.selectTab(6); return; } const p = focusedGroupPanels[6]; if (p) handlePanelSelect(p); } });
+  useHotkey({ id: 'panel-tab-8', label: panelLabel(7), keys: 'mod+shift+8', category: 'tabs', enabled: () => (projectActions()?.tabCount() ?? 0) > 7 || !!focusedGroupPanels[7], action: () => { const bridged = projectActions(); if (bridged) { bridged.selectTab(7); return; } const p = focusedGroupPanels[7]; if (p) handlePanelSelect(p); } });
+  useHotkey({ id: 'panel-tab-9', label: panelLabel(8), keys: 'mod+shift+9', category: 'tabs', enabled: () => (projectActions()?.tabCount() ?? 0) > 8 || !!focusedGroupPanels[8], action: () => { const bridged = projectActions(); if (bridged) { bridged.selectTab(8); return; } const p = focusedGroupPanels[8]; if (p) handlePanelSelect(p); } });
 
   // --- Add Tool commands (palette-only, no keybindings) ---
   // Only enabled in session view (not project view) to prevent hidden panel mutations
-  const isInSessionView = !!activeSession && activeView === 'sessions';
+  // Worktree panes are the 'sessions' view; a main-repo pane is 'project'.
+  const isInSessionView = !!activeSession && (activeView === 'sessions' || activeView === 'project');
 
   useHotkey({
     id: 'add-tool-terminal',
@@ -651,25 +707,29 @@ export const SessionView = memo(() => {
     keys: 'mod+alt+1',
     category: 'tools',
     enabled: () => isInSessionView,
-    action: () => handlePanelCreate('terminal'),
+    action: () => { const bridged = projectActions(); if (bridged) bridged.addTerminal(); else void handlePanelCreate('terminal'); },
   });
 
   useHotkey({
     id: 'add-tool-explorer',
-    label: 'Add Explorer',
+    label: 'Show Files',
     keys: 'mod+alt+2',
     category: 'tools',
-    enabled: () => isInSessionView && !sessionPanels.some(p => p.type === 'explorer'),
-    action: () => handlePanelCreate('explorer'),
+    enabled: () => isInSessionView,
+    action: () => { const bridged = projectActions(); if (bridged) bridged.showInspector('files'); else openInspector('files'); },
   });
 
   // Close active panel tab (skip permanent panels like diff)
   const closeTabEnabled = () => {
+    const bridged = projectActions();
+    if (bridged) return bridged.canCloseActiveTab();
     if (!currentActivePanel) return false;
     const caps = PANEL_CAPABILITIES[currentActivePanel.type];
     return !caps?.permanent && !currentActivePanel.metadata?.permanent;
   };
   const closeTabAction = () => {
+    const bridged = projectActions();
+    if (bridged) { bridged.closeActiveTab(); return; }
     if (currentActivePanel) handlePanelClose(currentActivePanel);
   };
 
@@ -900,7 +960,7 @@ export const SessionView = memo(() => {
       const sid = activeSession.id;
 
       // For terminal panels with initialCommand (e.g., Terminal (Claude))
-      let initialState: { customState?: unknown } | undefined = undefined;
+      let initialState = options?.initialState;
       if (type === 'terminal' && options?.initialCommand) {
         initialState = {
           customState: {
@@ -927,7 +987,7 @@ export const SessionView = memo(() => {
       setActivePanelInStore(sid, newPanel.id);
 
       const becomesPinnedTerminal = type === 'terminal' && !hadTerminalBefore;
-      if (becomesPinnedTerminal) return;
+      if (becomesPinnedTerminal) return newPanel;
 
       // Add to layout (into the focused group, falling back to the primary
       // group if focus is stale). addPanelToGroup is idempotent, so racing
@@ -942,9 +1002,39 @@ export const SessionView = memo(() => {
           applyLayout(sid, { ...currentLayout, root: nextRoot });
         }
       }
+      return newPanel;
     },
     [activeSession, addPanel, setActivePanelInStore, applyLayout]
   );
+
+  const handleOpenUrlInBrowser = useCallback(async (url: string, title: string) => {
+    if (!activeSession) return;
+    const existingPanel = sessionPanels.find((candidate) => candidate.type === 'browser');
+    if (existingPanel) {
+      const updatedPanel = {
+        ...existingPanel,
+        title,
+        state: { ...existingPanel.state, customState: { ...existingPanel.state.customState, currentUrl: url } },
+      };
+      await panelApi.updatePanel(existingPanel.id, { title, state: updatedPanel.state });
+      updatePanelState(updatedPanel);
+      await handlePanelSelect(updatedPanel);
+      window.dispatchEvent(new CustomEvent('browser-panel:navigate', {
+        detail: { url, sessionId: activeSession.id },
+      }));
+      return;
+    }
+
+    await handlePanelCreate('browser', {
+      title,
+      initialState: { customState: { currentUrl: url } },
+    });
+  }, [activeSession, handlePanelCreate, handlePanelSelect, sessionPanels, updatePanelState]);
+
+  const handleShowExplorer = useCallback(async () => {
+    if (!filesPanel) await handlePanelCreate('explorer');
+    openInspector('files');
+  }, [filesPanel, handlePanelCreate, openInspector]);
 
   // --- SplitLayout callbacks ---
   const handleSizesChange = useCallback((splitNodeId: string, sizes: number[]) => {
@@ -1083,6 +1173,50 @@ export const SessionView = memo(() => {
     setDropZones(new Map());
   }, [primaryGroupId, primaryGroupNode, activeSession, isSplitLayout, topBarPanels, applyLayout]);
 
+  const hotkeys = useHotkeyStore((s) => s.hotkeys);
+  const hotkeyDisplay = useCallback((id: string) => {
+    const keys = hotkeys.get(id)?.keys;
+    return keys ? formatKeyDisplay(keys) : null;
+  }, [hotkeys]);
+
+  // The empty stage is the "+" menu laid out inline: one click (or the
+  // shortcut beside it) from a running tool, instead of a placeholder.
+  const emptyStage = useMemo(() => (
+    <div className="flex h-full flex-1 items-center justify-center">
+      <div className="w-64">
+        <div className="mb-2 px-2 text-[11px] font-semibold uppercase tracking-wide text-text-muted">Open</div>
+        {[
+          { key: 'terminal', label: 'Terminal', icon: <Terminal className="h-3.5 w-3.5" />, hotkeyId: 'add-tool-terminal', onClick: () => handlePanelCreate('terminal') },
+          ...agentPresets.map(preset => ({
+            key: preset.id,
+            label: preset.title,
+            icon: getCliBrandIcon(preset.iconKey, 'h-3.5 w-3.5'),
+            hotkeyId: preset.hotkeyId,
+            onClick: () => handlePanelCreate('terminal', { initialCommand: preset.command, title: preset.title }),
+          })),
+          ...customCommands.map((cmd, index) => ({
+            key: `custom-${index}`,
+            label: cmd.name,
+            icon: getCliBrandIcon(cmd.command, 'h-3.5 w-3.5') || <TerminalSquare className="h-3.5 w-3.5" />,
+            hotkeyId: `add-tool-custom-${index}`,
+            onClick: () => handlePanelCreate('terminal', { initialCommand: cmd.command, title: cmd.name }),
+          })),
+        ].map(item => (
+          <button
+            key={item.key}
+            type="button"
+            onClick={item.onClick}
+            className="flex h-7 w-full items-center gap-2 rounded px-2 text-left text-[13px] text-text-secondary hover:bg-surface-hover hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring-subtle"
+          >
+            <span className="flex-shrink-0 text-text-tertiary">{item.icon}</span>
+            <span className="truncate">{item.label}</span>
+            {hotkeyDisplay(item.hotkeyId) && <Kbd variant="inline" className="ml-auto pl-3">{hotkeyDisplay(item.hotkeyId)}</Kbd>}
+          </button>
+        ))}
+      </div>
+    </div>
+  ), [agentPresets, customCommands, handlePanelCreate, hotkeyDisplay]);
+
   // --- Editor stage element (shared by both layouts) ---
   const editorStageElement = useMemo(() => {
     if (!sessionLayout || !activeSession) return null;
@@ -1105,23 +1239,19 @@ export const SessionView = memo(() => {
         onDragEnd={handleDragEnd}
         onStripDrop={handleStripDrop}
         getPanelTabPresentation={getPanelTabPresentation}
+        emptyState={emptyStage}
       />
     );
   }, [
     sessionLayout, activeSession, tabBarPanels, focusedGroupId,
     handleSizesChange, handleGroupPanelSelect, handlePanelClose, handleFocusGroup,
     isTabDragging, draggedPanelId, dropZones, handleDropZoneChange,
-    handleDropTab, handleDragStart, handleDragEnd, handleStripDrop, getPanelTabPresentation,
+    handleDropTab, handleDragStart, handleDragEnd, handleStripDrop, getPanelTabPresentation, emptyStage,
   ]);
 
   // Dynamic shortcuts for custom commands (mod+shift+5, 6, 7, ...)
   const registerHotkey = useHotkeyStore((s) => s.register);
   const unregisterHotkey = useHotkeyStore((s) => s.unregister);
-  const hotkeys = useHotkeyStore((s) => s.hotkeys);
-  const hotkeyDisplay = useCallback((id: string) => {
-    const keys = hotkeys.get(id)?.keys;
-    return keys ? formatKeyDisplay(keys) : null;
-  }, [hotkeys]);
   const handlePanelCreateRef = useCommittedRef(handlePanelCreate);
   const isInSessionViewRef = useCommittedRef(isInSessionView);
 
@@ -1295,30 +1425,11 @@ export const SessionView = memo(() => {
     }
   }, [activeSession, isRemoteMode]);
 
-  // Detail panel state
-  const [detailVisible, setDetailVisible] = useState(() => {
-    const stored = localStorage.getItem('pane-detail-panel-visible');
-    return stored !== null ? stored === 'true' : false;
-  });
-
-  // Persist detail panel visibility
-  useEffect(() => {
-    localStorage.setItem('pane-detail-panel-visible', String(detailVisible));
-  }, [detailVisible]);
-
-  // Right-side resizable
-  const { width: detailWidth, startResize: startDetailResize } = useResizable({
-    defaultWidth: 200,
-    minWidth: 140,
-    maxWidth: 350,
-    storageKey: 'pane-detail-panel-width',
-    side: 'right'
-  });
-
   // Layout swap state
   const [layoutSwapped, setLayoutSwapped] = useState(() => {
     return localStorage.getItem('pane-layout-swapped') === 'true';
   });
+  const swappedLayoutRendered = layoutSwapped && Boolean(defaultTerminalPanel);
 
   useEffect(() => {
     localStorage.setItem('pane-layout-swapped', String(layoutSwapped));
@@ -1329,7 +1440,9 @@ export const SessionView = memo(() => {
   }, []);
 
   // Focused tool panels reserve the right/detail rail for the main workspace.
-  const isImmersivePanel = currentActivePanel ? currentActivePanel.type === 'diff' || currentActivePanel.type === 'explorer' : false;
+  // Explorer and Review now live in the inspector, so no panel reserves the
+  // right rail any more; immersive mode stays off.
+  const isImmersivePanel = false;
   const setImmersiveMode = useNavigationStore(s => s.setImmersiveMode);
   const immersiveMode = useNavigationStore(s => s.immersiveMode);
 
@@ -1339,6 +1452,37 @@ export const SessionView = memo(() => {
       setImmersiveMode(false);
     };
   }, [isImmersivePanel, setImmersiveMode]);
+
+  // A persisted active panel that is now an inspector panel (Explorer /
+  // Review from before they moved to the rail) opens the inspector on that
+  // tab and hands the stage to the first working panel.
+  const staleActiveHandledRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!activeSession || !currentActivePanel || !isInspectorPanel(currentActivePanel)) return;
+    const key = `${activeSession.id}:${currentActivePanel.id}`;
+    if (staleActiveHandledRef.current === key) return;
+    staleActiveHandledRef.current = key;
+    // Switch the inspector to the matching tab but respect the user's choice
+    // of whether the rail is shown at all.
+    setInspectorTab(currentActivePanel.type === 'diff' ? 'changes' : 'files');
+    const fallback = tabBarPanels[0];
+    if (fallback) void handlePanelSelect(fallback);
+  }, [activeSession, currentActivePanel, isInspectorPanel, tabBarPanels, handlePanelSelect]);
+
+  useEffect(() => {
+    if (!sessionLayout) return;
+    const inspectorIds = new Set<string>();
+    for (const p of sessionPanels) {
+      if (isInspectorPanel(p)) inspectorIds.add(p.id);
+    }
+    const working = new Map(tabBarPanels.map(p => [p.id, p]));
+    for (const group of allGroups(sessionLayout.root)) {
+      if (!group.activePanelId || !inspectorIds.has(group.activePanelId)) continue;
+      const nextId = group.panelIds.find(id => working.has(id));
+      const next = nextId ? working.get(nextId) : undefined;
+      if (next) handleGroupPanelSelect(group.id, next);
+    }
+  }, [sessionLayout, sessionPanels, tabBarPanels, isInspectorPanel, handleGroupPanelSelect]);
 
   // Auto-create terminal panel for existing sessions that don't have one
   // Unless the user has explicitly closed it previously
@@ -1370,39 +1514,6 @@ export const SessionView = memo(() => {
     hasTriedCreatingTerminal.current = false;
   }, [activeSession?.id]);
 
-  const { height: terminalHeight, startResize: startTerminalResize } = useResizableHeight({
-    defaultHeight: 200,
-    minHeight: 100,
-    maxHeight: 500,
-    storageKey: 'pane-bottom-terminal-height',
-  });
-
-  // Resizable width for terminal when it occupies the right column (swapped layout)
-  const { width: rightTerminalWidth, startResize: startRightTerminalResize } = useResizable({
-    defaultWidth: 350,
-    minWidth: 200,
-    maxWidth: 600,
-    storageKey: 'pane-right-terminal-width',
-    side: 'right',
-  });
-
-  // Resizable height for detail panel when it is the bottom bar (swapped layout)
-  const { height: detailBottomHeight, startResize: startDetailBottomResize } = useResizableHeight({
-    defaultHeight: 200,
-    minHeight: 80,
-    maxHeight: 400,
-    storageKey: 'pane-bottom-detail-height',
-  });
-
-  const [isDetailCollapsed, setIsDetailCollapsed] = useState(() => {
-    const stored = localStorage.getItem('pane-detail-collapsed');
-    return stored === null ? false : stored === 'true';
-  });
-
-  useEffect(() => {
-    localStorage.setItem('pane-detail-collapsed', String(isDetailCollapsed));
-  }, [isDetailCollapsed]);
-
   const toggleDetailCollapse = useCallback(() => {
     setIsDetailCollapsed(prev => !prev);
   }, []);
@@ -1412,12 +1523,12 @@ export const SessionView = memo(() => {
     if (immersiveMode) {
       return;
     }
-    if (layoutSwapped) {
+    if (swappedLayoutRendered) {
       toggleDetailCollapse();
     } else {
       setDetailVisible(v => !v);
     }
-  }, [immersiveMode, layoutSwapped, toggleDetailCollapse]);
+  }, [immersiveMode, swappedLayoutRendered, toggleDetailCollapse]);
 
   // Terminal collapse state with localStorage persistence (collapsed by default)
   const [isTerminalCollapsed, setIsTerminalCollapsed] = useState(() => {
@@ -1432,6 +1543,36 @@ export const SessionView = memo(() => {
   const toggleTerminalCollapse = useCallback(() => {
     setIsTerminalCollapsed(prev => !prev);
   }, []);
+
+  const sessionContentBox = useObservedContentBox<HTMLDivElement>();
+  const centerColumnBox = useObservedContentBox<HTMLDivElement>();
+  const detailResize = useOuterPanelResize({
+    config: OUTER_PANEL_CONFIGS.worktreeInspector,
+    containerPx: sessionContentBox.width,
+    enabled: !swappedLayoutRendered && detailVisible && !immersiveMode,
+  });
+  const terminalResize = useOuterPanelResize({
+    config: OUTER_PANEL_CONFIGS.bottomTerminal,
+    containerPx: centerColumnBox.height,
+    enabled: Boolean(defaultTerminalPanel) && !swappedLayoutRendered && !isTerminalCollapsed && !immersiveMode,
+  });
+  const terminalDockHeight = immersiveMode
+    ? terminalResize.renderedPx
+    : isTerminalCollapsed
+      ? Math.min(32, centerColumnBox.height)
+      : terminalResize.renderedPx;
+  // A zero-height dock is invisible: its chrome must not stay reachable.
+  const terminalDockContentActive = terminalDockHeight > 0;
+  const rightTerminalResize = useOuterPanelResize({
+    config: OUTER_PANEL_CONFIGS.rightTerminal,
+    containerPx: sessionContentBox.width,
+    enabled: swappedLayoutRendered && !immersiveMode,
+  });
+  const bottomDetailResize = useOuterPanelResize({
+    config: OUTER_PANEL_CONFIGS.bottomDetail,
+    containerPx: centerColumnBox.height,
+    enabled: swappedLayoutRendered && !isDetailCollapsed && !immersiveMode,
+  });
 
   // Ctrl+`: toggle bottom terminal
   useHotkey({
@@ -1450,7 +1591,7 @@ export const SessionView = memo(() => {
     keys: 'mod+shift+b',
     category: 'view',
     enabled: () => isInSessionView && !immersiveMode,
-    action: handleToggleDetailPanel,
+    action: () => { const bridged = projectActions(); if (bridged) bridged.toggleDetail(); else handleToggleDetailPanel(); },
   });
 
   // Create branch actions for the panel bar
@@ -1603,6 +1744,11 @@ export const SessionView = memo(() => {
   
   // Removed unused variables - now handled by panels
 
+  // Token usage, cost and rate limits — reported per host.
+  if (activeView === 'usage') {
+    return <UsageView />;
+  }
+
   // Show project view if navigation is set to project
   if (activeView === 'project' && activeProjectId) {
     if (isProjectLoading || !projectData) {
@@ -1659,7 +1805,7 @@ export const SessionView = memo(() => {
         {sessionStatusAnnouncement}
       </LiveRegion>
       {/* SINGLE SessionProvider wraps everything */}
-      <SessionProvider session={activeSession} gitBranchActions={branchActions} isMerging={hook.isMerging} gitCommands={hook.gitCommands} onOpenIDEWithCommand={handleOpenIDEWithCommand} onConfigureIDE={() => setShowProjectSettings(true)} onSetTracking={handleOpenSetTracking} trackingBranch={currentUpstream} configuredIDECommand={sessionProject?.open_ide_command} isRemoteMode={isRemoteMode}>
+      <SessionProvider session={activeSession} gitBranchActions={branchActions} isMerging={hook.isMerging} gitCommands={hook.gitCommands} onOpenIDEWithCommand={handleOpenIDEWithCommand} onOpenUrlInBrowser={handleOpenUrlInBrowser} onConfigureIDE={() => setShowProjectSettings(true)} onSetTracking={handleOpenSetTracking} trackingBranch={currentUpstream} configuredIDECommand={sessionProject?.open_ide_command} isRemoteMode={isRemoteMode}>
 
         {/* Tab bar at top */}
         <PanelTabBar
@@ -1668,6 +1814,7 @@ export const SessionView = memo(() => {
           onPanelSelect={handlePanelSelect}
           onPanelClose={handlePanelClose}
           onPanelCreate={handlePanelCreate}
+          onShowExplorer={() => { void handleShowExplorer(); }}
           projectEnvironment={activeProjectEnvironment}
           onToggleDetailPanel={handleToggleDetailPanel}
           detailPanelVisible={detailVisible}
@@ -1686,22 +1833,14 @@ export const SessionView = memo(() => {
         />
 
         {/* Content area: center panels + right detail */}
-        <div className="pane-session-content flex-1 flex flex-row min-h-0">
-          {layoutSwapped && defaultTerminalPanel ? (
+        <div ref={sessionContentBox.ref} className="pane-session-content flex-1 flex flex-row min-h-0 min-w-0">
+          {swappedLayoutRendered && defaultTerminalPanel ? (
             <>
               {/* SWAPPED LAYOUT: Center column with panels on top, horizontal detail panel on bottom */}
-              <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+              <div ref={centerColumnBox.ref} className="pane-center-column flex-1 flex flex-col min-h-0 min-w-0 overflow-hidden">
                 {/* Top: active panel content */}
                 <div className="pane-editor-stage flex-1 relative min-h-0 overflow-hidden bg-bg-editor">
-                  {editorStageElement || (
-                    <div className="flex-1 flex items-center justify-center text-text-secondary h-full">
-                      <div className="text-center p-8">
-                        <div className="text-4xl mb-4">⚡</div>
-                        <h2 className="text-xl font-semibold mb-2">No Active Panel</h2>
-                        <p className="text-sm">Add a tool panel to get started</p>
-                      </div>
-                    </div>
-                  )}
+                  {editorStageElement || emptyStage}
                 </div>
 
                 {/* Bottom: horizontal detail panel */}
@@ -1709,89 +1848,69 @@ export const SessionView = memo(() => {
                   isVisible={true}
                   onToggle={toggleDetailCollapse}
                   width={0}
-                  height={detailBottomHeight}
-                  onResize={startDetailBottomResize}
+                  height={bottomDetailResize.effectivePx}
+                  availableHeight={centerColumnBox.height}
+                  bodyActive={bottomDetailResize.bodyActive}
+                  resizeSeparator={bottomDetailResize.separatorVisible ? {
+                    label: 'Resize detail panel',
+                    orientation: 'horizontal',
+                    value: bottomDetailResize.effectivePx,
+                    minimum: bottomDetailResize.floor,
+                    maximum: bottomDetailResize.cap,
+                    ...bottomDetailResize.separatorHandlers,
+                  } : undefined}
                   mergeError={hook.mergeError}
                   orientation="horizontal"
                   isCollapsed={isDetailCollapsed}
                   onToggleCollapse={toggleDetailCollapse}
                   onSwapLayout={toggleLayoutSwap}
                   onCommitClick={handleCommitClick}
-                  terminalShortcuts={
-                    <>
-                      {agentPresets.map(preset => (
-                        <Tooltip key={preset.id} content={hotkeyDisplay(preset.hotkeyId) ? <Kbd>{hotkeyDisplay(preset.hotkeyId)}</Kbd> : undefined} side="top">
-                          <button
-                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium text-text-tertiary border border-border-primary hover:bg-surface-hover hover:text-text-secondary transition-colors whitespace-nowrap flex-shrink-0"
-                            onClick={() => handlePanelCreate('terminal', {
-                              initialCommand: preset.command,
-                              title: preset.title
-                            })}
-                          >
-                            {getCliBrandIcon(preset.iconKey, 'w-3 h-3')}
-                            {preset.title.split(' ')[0]}
-                          </button>
-                        </Tooltip>
-                      ))}
-                      {customCommands.map((cmd, index) => {
-                        const shortcutDisplay = hotkeyDisplay(`add-tool-custom-${index}`);
-                        const pill = (
-                          <button
-                            key={`shortcut-${index}`}
-                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium text-text-tertiary border border-border-primary hover:bg-surface-hover hover:text-text-secondary transition-colors whitespace-nowrap flex-shrink-0"
-                            onClick={() => handlePanelCreate('terminal', {
-                              initialCommand: cmd.command,
-                              title: cmd.name
-                            })}
-                            title={cmd.command}
-                          >
-                            {getCliBrandIcon(cmd.command, 'w-3 h-3') || <TerminalSquare className="w-3 h-3" />}
-                            {cmd.name.length > 13 ? cmd.name.slice(0, 13) + '…' : cmd.name}
-                          </button>
-                        );
-                        return shortcutDisplay ? (
-                          <Tooltip key={`shortcut-${index}`} content={<Kbd>{shortcutDisplay}</Kbd>} side="top">
-                            {pill}
-                          </Tooltip>
-                        ) : pill;
-                      })}
-                    </>
-                  }
+                  inspectorTab={inspectorTab}
+                  onInspectorTabChange={openInspector}
+                  filesPanel={filesPanel}
+                  changesPanel={changesPanel}
+                  changesCount={activeSession.gitStatus?.filesChanged || undefined}
+                  isMainRepo={!!activeSession.isMainRepo}
                 />
               </div>
 
               {/* Right column: terminal at full height — outer wrapper clips, inner stays fixed width so xterm doesn't reflow */}
               <div
-                className={`pane-terminal-rail pane-reveal flex-shrink-0 overflow-hidden transition-[width] duration-reveal ease-out-strong ${immersiveMode ? '' : 'border-l border-border-primary'}`}
-                style={{ width: immersiveMode ? '0px' : `${rightTerminalWidth}px` }}
+                className={`pane-terminal-rail flex-shrink-0 overflow-visible relative ${rightTerminalResize.renderedPx > 0 ? 'border-l border-border-primary' : ''}`}
+                style={{ width: `${rightTerminalResize.renderedPx}px` }}
               >
-                <div
-                  className="pane-terminal-rail-shell bg-surface-primary flex flex-col h-full relative"
-                  style={{ width: `${rightTerminalWidth}px` }}
-                >
-                  {/* Resize handle on left edge */}
+                {rightTerminalResize.separatorVisible && (
+                  <OuterResizeSeparator
+                    label="Resize terminal"
+                    orientation="vertical"
+                    value={rightTerminalResize.effectivePx}
+                    minimum={rightTerminalResize.floor}
+                    maximum={rightTerminalResize.cap}
+                    {...rightTerminalResize.separatorHandlers}
+                  />
+                )}
+                <div className="pane-terminal-rail-clip h-full overflow-hidden">
                   <div
-                    className="absolute top-0 left-0 w-1 h-full cursor-col-resize group z-10"
-                    onMouseDown={startRightTerminalResize}
+                    className="pane-terminal-rail-shell bg-surface-primary flex flex-col h-full relative overflow-hidden"
+                    style={{ width: `${rightTerminalResize.effectivePx}px` }}
+                    aria-hidden={!rightTerminalResize.bodyActive}
+                    inert={!rightTerminalResize.bodyActive ? true : undefined}
                   >
-                    <div className="absolute inset-0 bg-border-secondary group-hover:bg-interactive transition-colors" />
-                    <div className="absolute -left-2 right-0 top-0 bottom-0" />
-                  </div>
+                    {/* Terminal header */}
+                    <div className="pane-terminal-shell-header flex items-center h-8 px-3 bg-surface-primary border-b border-border-primary gap-2">
+                      <Terminal className="w-3.5 h-3.5 text-text-tertiary" />
+                      <span className="text-[11px] font-medium text-text-secondary uppercase tracking-wider">Terminal</span>
+                    </div>
 
-                  {/* Terminal header */}
-                  <div className="pane-terminal-shell-header flex items-center h-8 px-3 bg-surface-primary border-b border-border-primary gap-2">
-                    <Terminal className="w-3.5 h-3.5 text-text-tertiary" />
-                    <span className="text-[11px] font-medium text-text-secondary uppercase tracking-wider">Terminal</span>
-                  </div>
-
-                  {/* Terminal content - full height */}
-                  <div className="pane-terminal-shell-body flex-1 relative min-h-0 pb-1">
-                    <PanelContainer
-                      panel={defaultTerminalPanel}
-                      isActive={!immersiveMode}
-                      autoFocus={false}
-                      isMainRepo={!!activeSession.isMainRepo}
-                    />
+                    {/* Terminal content - full height */}
+                    <div className="pane-terminal-shell-body flex-1 relative min-h-0 pb-1">
+                      <PanelContainer
+                        panel={defaultTerminalPanel}
+                        isActive={rightTerminalResize.bodyActive}
+                        autoFocus={false}
+                        isMainRepo={!!activeSession.isMainRepo}
+                      />
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1799,120 +1918,75 @@ export const SessionView = memo(() => {
           ) : (
             <>
               {/* DEFAULT LAYOUT: Center column with panels on top, terminal on bottom */}
-              <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+              <div ref={centerColumnBox.ref} className="pane-center-column flex-1 flex flex-col min-h-0 min-w-0 overflow-hidden">
                 {/* Top: active panel content */}
                 <div className="pane-editor-stage flex-1 relative min-h-0 overflow-hidden bg-bg-editor">
-                  {editorStageElement || (
-                    <div className="flex-1 flex items-center justify-center text-text-secondary h-full">
-                      <div className="text-center p-8">
-                        <div className="text-4xl mb-4">⚡</div>
-                        <h2 className="text-xl font-semibold mb-2">No Active Panel</h2>
-                        <p className="text-sm">Add a tool panel to get started</p>
-                      </div>
-                    </div>
-                  )}
+                  {editorStageElement || emptyStage}
                 </div>
 
                 {/* Bottom: persistent terminal (collapsible) */}
                 {defaultTerminalPanel && (
                   <div
-                    className="pane-terminal-dock pane-reveal flex-shrink-0 border-t border-border-primary transition-[height] duration-reveal ease-out-strong"
-                    style={{ height: isTerminalCollapsed ? '32px' : `${terminalHeight}px` }}
+                    className={`pane-terminal-dock flex-shrink-0 flex flex-col relative overflow-visible ${
+                      !immersiveMode && (isTerminalCollapsed || terminalResize.renderedPx > 0)
+                        ? 'border-t border-border-primary'
+                        : ''
+                    }`}
+                    style={{ height: `${terminalDockHeight}px` }}
                   >
-                    {/* Terminal tab header with collapse toggle and pill shortcuts */}
-                    <div className="pane-terminal-shell-header flex items-center h-8 px-3 bg-surface-primary border-b border-border-primary gap-2">
-                      {/* Left: chevron + icon + label */}
-                      <button
-                        onClick={toggleTerminalCollapse}
-                        className="p-0.5 hover:bg-surface-hover rounded transition-colors"
-                        title={isTerminalCollapsed ? 'Expand terminal' : 'Collapse terminal'}
-                      >
-                        {isTerminalCollapsed ? (
-                          <ChevronUp className="w-3.5 h-3.5 text-text-tertiary" />
-                        ) : (
-                          <ChevronDown className="w-3.5 h-3.5 text-text-tertiary" />
-                        )}
-                      </button>
-                      <Terminal className="w-3.5 h-3.5 text-text-tertiary" />
-                      <span className="text-[11px] font-medium text-text-secondary uppercase tracking-wider">Terminal</span>
+                    {terminalResize.separatorVisible && (
+                      <OuterResizeSeparator
+                        label="Resize terminal"
+                        orientation="horizontal"
+                        value={terminalResize.effectivePx}
+                        minimum={terminalResize.floor}
+                        maximum={terminalResize.cap}
+                        {...terminalResize.separatorHandlers}
+                      />
+                    )}
+                    <div
+                      className="pane-terminal-dock-content flex flex-col h-full min-h-0 overflow-hidden"
+                      aria-hidden={!terminalDockContentActive}
+                      inert={!terminalDockContentActive ? true : undefined}
+                    >
+                      {/* Terminal tab header with collapse toggle and pill shortcuts */}
+                      <div className="pane-terminal-shell-header flex items-center h-8 px-3 bg-surface-primary border-b border-border-primary gap-2 flex-shrink-0">
+                        {/* Left: chevron + icon + label */}
+                        <button
+                          type="button"
+                          onClick={toggleTerminalCollapse}
+                          aria-label={isTerminalCollapsed ? 'Expand terminal' : 'Collapse terminal'}
+                          className="p-0.5 hover:bg-surface-hover rounded transition-colors"
+                          title={isTerminalCollapsed ? 'Expand terminal' : 'Collapse terminal'}
+                        >
+                          {isTerminalCollapsed ? (
+                            <ChevronUp className="w-3.5 h-3.5 text-text-tertiary" />
+                          ) : (
+                            <ChevronDown className="w-3.5 h-3.5 text-text-tertiary" />
+                          )}
+                        </button>
+                        <Terminal className="w-3.5 h-3.5 text-text-tertiary" />
+                        <span className="text-[11px] font-medium text-text-secondary uppercase tracking-wider">Terminal</span>
 
-                      {/* Middle: scrollable pill shortcuts */}
-                      <div className="flex-1 flex items-center gap-2 overflow-x-auto ml-3 scrollbar-none">
-                        {/* Agent pills */}
-                        {agentPresets.map(preset => (
-                          <Tooltip key={preset.id} content={hotkeyDisplay(preset.hotkeyId) ? <Kbd>{hotkeyDisplay(preset.hotkeyId)}</Kbd> : undefined} side="top">
-                            <button
-                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium text-text-tertiary border border-border-primary hover:bg-surface-hover hover:text-text-secondary transition-colors whitespace-nowrap flex-shrink-0"
-                              onClick={() => handlePanelCreate('terminal', {
-                                initialCommand: preset.command,
-                                title: preset.title
-                              })}
-                            >
-                              {getCliBrandIcon(preset.iconKey, 'w-3 h-3')}
-                              {preset.title.split(' ')[0]}
-                            </button>
-                          </Tooltip>
-                        ))}
-
-                        {/* Custom command pills */}
-                        {customCommands.map((cmd, index) => {
-                          const shortcutDisplay = hotkeyDisplay(`add-tool-custom-${index}`);
-                          const commandButton = (
-                            <button
-                              type="button"
-                              className="inline-flex items-center gap-1 pl-2 py-0.5 text-[11px] font-medium text-text-tertiary hover:text-text-secondary whitespace-nowrap"
-                              onClick={() => handlePanelCreate('terminal', {
-                                initialCommand: cmd.command,
-                                title: cmd.name
-                              })}
-                              title={cmd.command}
-                            >
-                              {getCliBrandIcon(cmd.command, 'w-3 h-3') || <TerminalSquare className="w-3 h-3" />}
-                              {cmd.name.length > 13 ? cmd.name.slice(0, 13) + '…' : cmd.name}
-                            </button>
-                          );
-                          return (
-                            <span
-                              key={`shortcut-${index}`}
-                              className="group/pill inline-flex items-center gap-0 pr-1 rounded-full text-text-tertiary border border-border-primary hover:bg-surface-hover transition-colors whitespace-nowrap flex-shrink-0"
-                            >
-                              {shortcutDisplay ? (
-                                <Tooltip content={<Kbd>{shortcutDisplay}</Kbd>} side="top">
-                                  {commandButton}
-                                </Tooltip>
-                              ) : commandButton}
-                              <button
-                                type="button"
-                                className="p-0.5 rounded-full opacity-0 group-hover/pill:opacity-100 group-focus-within/pill:opacity-100 hover:bg-surface-tertiary hover:text-text-primary transition-all"
-                                onClick={() => deleteCustomCommand(index)}
-                                aria-label={`Remove ${cmd.name} shortcut`}
-                              >
-                                <X className="w-2.5 h-2.5" />
-                              </button>
-                            </span>
-                          );
-                        })}
+                        <div className="flex-1" />
                       </div>
-
-                      {/* Right: resize grip (only when expanded, always outside scroll container) */}
+                      {/* Terminal content (hidden when collapsed) */}
                       {!isTerminalCollapsed && (
                         <div
-                          className="ml-2 h-full flex items-center cursor-row-resize group flex-shrink-0"
-                          onMouseDown={startTerminalResize}
-                        />
+                          className="pane-terminal-shell-body flex-1 min-h-0 relative pb-1"
+                          style={{ display: terminalResize.bodyActive ? 'block' : 'none' }}
+                          aria-hidden={!terminalResize.bodyActive}
+                          inert={!terminalResize.bodyActive ? true : undefined}
+                        >
+                          <PanelContainer
+                            panel={defaultTerminalPanel}
+                            isActive={terminalResize.bodyActive}
+                            autoFocus={false}
+                            isMainRepo={!!activeSession.isMainRepo}
+                          />
+                        </div>
                       )}
                     </div>
-                    {/* Terminal content (hidden when collapsed) */}
-                    {!isTerminalCollapsed && (
-                      <div className="pane-terminal-shell-body relative pb-1" style={{ height: `calc(100% - 36px)` }}>
-                        <PanelContainer
-                          panel={defaultTerminalPanel}
-                          isActive={true}
-                          autoFocus={false}
-                          isMainRepo={!!activeSession.isMainRepo}
-                        />
-                      </div>
-                    )}
                   </div>
                 )}
               </div>
@@ -1921,11 +1995,25 @@ export const SessionView = memo(() => {
               <DetailPanel
                 isVisible={detailVisible}
                 onToggle={() => setDetailVisible(v => !v)}
-                width={detailWidth}
-                onResize={startDetailResize}
+                width={detailResize.renderedPx}
+                bodyActive={detailResize.bodyActive}
+                resizeSeparator={detailResize.separatorVisible ? {
+                  label: 'Resize inspector',
+                  orientation: 'vertical',
+                  value: detailResize.effectivePx,
+                  minimum: detailResize.floor,
+                  maximum: detailResize.cap,
+                  ...detailResize.separatorHandlers,
+                } : undefined}
                 mergeError={hook.mergeError}
                 onSwapLayout={toggleLayoutSwap}
                 onCommitClick={handleCommitClick}
+                inspectorTab={inspectorTab}
+                onInspectorTabChange={openInspector}
+                filesPanel={filesPanel}
+                changesPanel={changesPanel}
+                changesCount={activeSession.gitStatus?.filesChanged || undefined}
+                isMainRepo={!!activeSession.isMainRepo}
               />
             </>
           )}
@@ -1968,7 +2056,7 @@ export const SessionView = memo(() => {
         onClose={() => hook.setShowArchiveConfirm(false)}
         onConfirm={hook.handleConfirmArchive}
         title="Archive Pane"
-        message={`Archive pane "${activeSession?.name}"? This will:\n\n• Move the pane to the archived panes list\n• Preserve all pane history and outputs\n${activeSession?.isMainRepo ? '• Close the active Claude Code connection' : `• Remove the git worktree locally (${activeSession?.worktreePath?.split('/').pop() || 'worktree'})`}`}
+        message={`Archive pane "${activeSession?.name}"? This will:\n\n• Move the pane to the archived panes list\n• Preserve all pane history and outputs\n${activeSession?.isMainRepo ? '• Close the active Claude Code connection' : activeSession?.worktreeOwnership === 'external' ? '• Leave the externally managed worktree untouched' : `• Remove the git worktree locally (${activeSession?.worktreePath?.split('/').pop() || 'worktree'})`}`}
         confirmText="Archive"
         variant="warning"
         icon={<Archive className="w-6 h-6 text-amber-500 flex-shrink-0" />}

@@ -11,8 +11,8 @@
  * `--color-bg-primary` and `--color-text-secondary` resolve to.
  */
 
-/** Plate colour: the title bar strip's own background (`bg-bg-primary`). */
-const OVERLAY_COLOR_TOKEN = '--color-bg-primary';
+/** Plate colour: the title bar strip's own background (`bg-surface-primary`, shared with the sidebar). */
+const OVERLAY_COLOR_TOKEN = '--color-surface-primary';
 /** Glyph colour: the same token the strip's pane name uses. */
 const OVERLAY_SYMBOL_COLOR_TOKEN = '--color-text-secondary';
 
@@ -89,6 +89,12 @@ export function toOverlayHex(cssColor: string): string | null {
  * makes the CSSOM serialize both as `rgb(r, g, b)`, one shape to parse.
  */
 export function readTitleBarOverlayColors(doc: Document = document): TitleBarOverlayColors | null {
+  const color = readThemeTokenHex(OVERLAY_COLOR_TOKEN, doc);
+  const symbolColor = readThemeTokenHex(OVERLAY_SYMBOL_COLOR_TOKEN, doc);
+  return color && symbolColor ? { color, symbolColor } : null;
+}
+
+export function readThemeTokenHex(token: string, doc: Document = document): string | null {
   const probe = doc.createElement('div');
   probe.setAttribute('aria-hidden', 'true');
   probe.style.cssText = [
@@ -97,8 +103,7 @@ export function readTitleBarOverlayColors(doc: Document = document): TitleBarOve
     'height:0',
     'overflow:hidden',
     'pointer-events:none',
-    `background-color:var(${OVERLAY_COLOR_TOKEN})`,
-    `color:var(${OVERLAY_SYMBOL_COLOR_TOKEN})`,
+    `background-color:var(${token})`,
   ].join(';');
 
   doc.body.appendChild(probe);
@@ -112,9 +117,7 @@ export function readTitleBarOverlayColors(doc: Document = document): TitleBarOve
       return null;
     }
 
-    const color = toOverlayHex(computed.backgroundColor);
-    const symbolColor = toOverlayHex(computed.color);
-    return color && symbolColor ? { color, symbolColor } : null;
+    return toOverlayHex(computed.backgroundColor);
   } finally {
     probe.remove();
   }

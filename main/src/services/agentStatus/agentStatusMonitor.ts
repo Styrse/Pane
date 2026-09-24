@@ -9,18 +9,16 @@
  * keeps the machine fully unit-testable.
  *
  * Arbitration precedence: a visible blocker wins immediately; otherwise recent
- * activity (or a working detection) means working; otherwise idle — but idle is
- * held briefly after working (to ride out spinner gaps) and suppressed during a
- * short startup grace so a booting agent doesn't flash "done".
+ * activity (or a working detection) means working; otherwise idle. PTY activity
+ * stays authoritative for a measured settle window, and a single trailing chunk
+ * cannot wake an already-idle panel unless working chrome is visible.
  */
 
 import type { AgentDetectionResult, AgentState } from '../../../../shared/types/agentStatus';
 
 export interface AgentStatusMonitorOptions {
-  /** Bytes seen within this window count as "working". */
-  workingActivityWindowMs?: number;
-  /** How long to hold `working` after activity stops before going idle. */
-  workingToIdleHoldMs?: number;
+  /** How long PTY activity keeps a panel working before it may settle idle. */
+  idleSettleMs?: number;
   /** Idle is suppressed for this long after a panel registers. */
   startupGraceMs?: number;
 }
@@ -28,13 +26,14 @@ export interface AgentStatusMonitorOptions {
 interface PanelTracker {
   startedAt: number;
   lastActivityAt: number | undefined;
-  idleSince: number | undefined;
+  activityChunksInBurst: number;
   published: AgentState | undefined;
 }
 
+const AGENT_IDLE_SETTLE_MS = 10_000;
+
 const DEFAULTS: Required<AgentStatusMonitorOptions> = {
-  workingActivityWindowMs: 600,
-  workingToIdleHoldMs: 700,
+  idleSettleMs: AGENT_IDLE_SETTLE_MS,
   startupGraceMs: 3000,
 };
 
@@ -51,7 +50,7 @@ export class AgentStatusMonitor {
     this.trackers.set(panelId, {
       startedAt: now,
       lastActivityAt: undefined,
-      idleSince: undefined,
+      activityChunksInBurst: 0,
       published: undefined,
     });
   }
@@ -72,7 +71,12 @@ export class AgentStatusMonitor {
   /** Record that PTY bytes were produced for a panel at `now`. */
   noteActivity(panelId: string, now: number): void {
     const tracker = this.trackers.get(panelId);
-    if (tracker) tracker.lastActivityAt = now;
+    if (!tracker) return;
+
+    const startsNewBurst =
+      tracker.lastActivityAt === undefined || now - tracker.lastActivityAt >= this.options.idleSettleMs;
+    tracker.activityChunksInBurst = startsNewBurst ? 1 : tracker.activityChunksInBurst + 1;
+    tracker.lastActivityAt = now;
   }
 
   getState(panelId: string): AgentState | undefined {
@@ -90,14 +94,16 @@ export class AgentStatusMonitor {
     // Agent-owned viewer (transcript/model picker): hold the known state.
     if (detection.skipStateUpdate) return null;
 
-    const { workingActivityWindowMs, workingToIdleHoldMs, startupGraceMs } = this.options;
+    const { idleSettleMs, startupGraceMs } = this.options;
     const recentlyActive =
-      tracker.lastActivityAt !== undefined && now - tracker.lastActivityAt < workingActivityWindowMs;
+      tracker.lastActivityAt !== undefined && now - tracker.lastActivityAt < idleSettleMs;
+    const activityCanPublishWorking =
+      tracker.published !== 'idle' || tracker.activityChunksInBurst >= 2;
 
     let candidate: AgentState;
     if (detection.state === 'blocked') {
       candidate = 'blocked';
-    } else if (detection.state === 'working' || recentlyActive) {
+    } else if (detection.visibleWorking || (recentlyActive && activityCanPublishWorking)) {
       candidate = 'working';
     } else {
       candidate = 'idle';
@@ -107,20 +113,6 @@ export class AgentStatusMonitor {
     if (candidate === 'idle' && now - tracker.startedAt < startupGraceMs) {
       candidate = tracker.published ?? 'working';
     }
-
-    // Working -> idle debounce: ride out spinner gaps before declaring done.
-    let holding = false;
-    if (candidate === 'idle' && tracker.published === 'working') {
-      if (tracker.idleSince === undefined) {
-        tracker.idleSince = now;
-        holding = true;
-      } else if (now - tracker.idleSince < workingToIdleHoldMs) {
-        holding = true;
-      }
-    } else {
-      tracker.idleSince = undefined;
-    }
-    if (holding) return null;
 
     if (tracker.published === candidate) return null;
     tracker.published = candidate;

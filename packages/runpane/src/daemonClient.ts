@@ -50,6 +50,7 @@ export interface PaneDaemonEndpoint {
 interface InvokeOptions {
   paneDir?: string;
   timeoutMs?: number;
+  eventInclude?: string[] | null;
 }
 
 interface TimeoutReference {
@@ -92,7 +93,7 @@ const paneDaemonFrameSchema: BoundarySchema<PaneDaemonFrame> = boundary.union(
   }),
 );
 
-class PaneDaemonClientError extends Error {
+export class PaneDaemonClientError extends Error {
   constructor(
     message: string,
     readonly code?: string,
@@ -135,6 +136,9 @@ export async function invokeDaemon<T>(
     channel,
     args,
   };
+  const eventFilterRequest: PaneDaemonRequestFrame | undefined = options.eventInclude === undefined
+    ? undefined
+    : { type: 'request', id: 0, channel: 'daemon:events', args: [{ include: options.eventInclude }] };
 
   return new Promise<T>((resolve, reject) => {
     const socket = net.createConnection(endpoint.path);
@@ -166,6 +170,7 @@ export async function invokeDaemon<T>(
     }, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
 
     socket.once('connect', () => {
+      if (eventFilterRequest) socket.write(encodePaneDaemonFrame(eventFilterRequest));
       socket.write(encodePaneDaemonFrame(request));
     });
 

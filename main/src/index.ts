@@ -75,6 +75,15 @@ import {
   WINDOW_CONTROLS_OVERLAY_HEIGHT,
   type WindowControlsOverlayColors,
 } from './utils/windowControlsOverlay';
+import { parseStoredBackgroundColors, WINDOW_BACKGROUND_COLORS_KEY } from './utils/windowBackgroundColor';
+import {
+  applyNativeThemeSource,
+  buildWindowAppearanceOptions,
+  ensureNativeThemeForwarding,
+  resolveOsPrefersDark,
+} from './services/appearanceService';
+import type { AppConfig } from './types/config';
+import { normalizeAppearance } from '../../shared/types/appearance';
 import type { WorktreeManager } from './services/worktreeManager';
 import type { GitStatusManager } from './services/gitStatusManager';
 import type { DatabaseService } from './database/database';
@@ -88,13 +97,15 @@ import { resourceMonitorService } from './services/resourceMonitorService';
 import { applyAppDirectoryOverrideFromArgs, migrateDataDirectory } from './utils/appDirectory';
 import { getCurrentWorktreeName } from './utils/worktreeUtils';
 import { setupAutoUpdater } from './autoUpdater';
-import { getCloudVmManager } from './ipc/cloud';
 import type { CliManagerFactory } from './services/cliManagerFactory';
 import { setupConsoleWrapper } from './utils/consoleWrapper';
 import * as fs from 'fs';
 import { terminalPanelManager } from './services/terminalPanelManager';
 import { panelManager } from './services/panelManager';
 import { worktreePoolManager } from './services/worktreePoolManager';
+import { usageManager } from './services/usage/usageManager';
+import { LeaderboardService } from './services/leaderboardService';
+import { registerLeaderboardHandlers } from './ipc/leaderboard';
 import { PtyHostSupervisor } from './ptyHost/ptyHostSupervisor';
 import { syncAutoStartOnBoot } from './utils/autoStart';
 import { createPaneDaemonHost, type PaneDaemonHost } from './daemon/bootstrap';
@@ -112,6 +123,7 @@ export const webviewContextMap = new Map<number, { panelId: string; sessionId: s
 // Active DevTools WebContentsViews, keyed by the page webContentsId they inspect
 const activeDevToolsViews = new Map<number, Electron.WebContentsView>();
 let devToolsHandlersRegistered = false;
+let appearanceConfigSyncRegistered = false;
 
 // Track partitions that already have the localhost header-stripping hook registered,
 // so we don't add duplicate listeners when multiple webviews share the same partition.
@@ -209,12 +221,13 @@ let databaseService: DatabaseService;
 let runCommandManager: RunCommandManager;
 let versionChecker: VersionChecker;
 let archiveProgressManager: ArchiveProgressManager;
+let leaderboardService: LeaderboardService;
 let analyticsManager: AnalyticsManager;
 let paneDaemonHost: PaneDaemonHost | null = null;
 let powerSaveManager: PowerSaveManager | null = null;
 
 // ptyHost supervisor — forked as an Electron UtilityProcess on app ready,
-// but only when the `usePtyHost` setting is enabled (default: off). When
+// but only when the `usePtyHost` setting is enabled (default: on for Windows). When
 // disabled, the supervisor is never forked and every manager transparently
 // falls through to the legacy in-main `pty.spawn` path.
 let ptyHostSupervisor: PtyHostSupervisor | null = null;
@@ -293,6 +306,17 @@ function readStoredOverlayColors(): WindowControlsOverlayColors | null {
   }
 }
 
+function readStoredBackgroundColors() {
+  try {
+    return parseStoredBackgroundColors(
+      databaseService?.getUserPreference(WINDOW_BACKGROUND_COLORS_KEY) ?? null,
+    );
+  } catch (error) {
+    console.error('Failed to read stored window background colors:', error);
+    return {};
+  }
+}
+
 async function createWindow() {
   // Strip iframe-blocking headers for localhost URLs (enables embedded browser panel)
   session.defaultSession.webRequest.onHeadersReceived(
@@ -326,6 +350,23 @@ async function createWindow() {
   }
 
   const windowControlsOverlay = shouldEnableWindowControlsOverlay(process.platform, process.env);
+  const appearance = normalizeAppearance(configManager.getConfig()).appearance;
+  const osPrefersDark = resolveOsPrefersDark();
+  applyNativeThemeSource(appearance);
+  // Appearance edits that arrive through the config file watcher (not the
+  // config:update IPC) must re-point nativeTheme too, or System mode resolves
+  // against a themeSource still pinned by a previous Fixed palette.
+  if (!appearanceConfigSyncRegistered) {
+    appearanceConfigSyncRegistered = true;
+    configManager.on('config-updated', (updated: AppConfig) => {
+      applyNativeThemeSource(normalizeAppearance(updated).appearance);
+    });
+  }
+  const appearanceOptions = buildWindowAppearanceOptions(
+    appearance,
+    osPrefersDark,
+    readStoredBackgroundColors(),
+  );
 
   // An icon path Electron cannot load is worse than none: on Windows it sets an
   // empty HICON, which clears the icon the window would otherwise inherit from
@@ -337,6 +378,7 @@ async function createWindow() {
   const mainWindowOptions: BrowserWindowConstructorOptions = {
     width: 1400,
     height: 900,
+    backgroundColor: appearanceOptions.backgroundColor,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -344,7 +386,10 @@ async function createWindow() {
       webviewTag: true,
       // The renderer has to know whether it owns the title bar before its first
       // paint, so this travels in argv rather than over async IPC.
-      additionalArguments: windowControlsOverlay ? [WINDOW_CONTROLS_OVERLAY_ARG] : [],
+      additionalArguments: [
+        ...appearanceOptions.additionalArguments,
+        ...(windowControlsOverlay ? [WINDOW_CONTROLS_OVERLAY_ARG] : []),
+      ],
     },
   };
   if (fs.existsSync(windowIconPath)) {
@@ -365,6 +410,7 @@ async function createWindow() {
       : { height: WINDOW_CONTROLS_OVERLAY_HEIGHT };
   }
   mainWindow = new BrowserWindow(mainWindowOptions);
+  ensureNativeThemeForwarding(() => mainWindow);
 
   // Set main window on analytics manager for IPC forwarding
   if (analyticsManager) {
@@ -374,6 +420,17 @@ async function createWindow() {
   // Increase max listeners to prevent warning when many panels are active
   // Each panel can register multiple event listeners
   mainWindow.webContents.setMaxListeners(100);
+
+  // Hand the renderer its per-window ptyHost data port on every load. This must
+  // be registered before loadURL/loadFile below: those promises resolve on
+  // did-finish-load, so a listener added after them never fires and terminals
+  // silently drop all output once they switch to the port. `on` (not `once`)
+  // re-attaches after renderer reloads, which replace the preload's port.
+  mainWindow.webContents.on('did-finish-load', () => {
+    if (ptyHostSupervisor && mainWindow && !mainWindow.isDestroyed()) {
+      ptyHostSupervisor.attachWindow(mainWindow.webContents);
+    }
+  });
 
   // Security hook: strip preload and enforce sandbox on any webview tags
   mainWindow.webContents.on('will-attach-webview', (_event, webPreferences, _params) => {
@@ -615,8 +672,11 @@ async function createWindow() {
   if (isDevelopment) {
     const devPort = process.env.VITE_PORT || process.env.PORT || '4521';
     await mainWindow.loadURL(`http://localhost:${devPort}`);
-    mainWindow.webContents.openDevTools();
-    
+    // DevTools stay closed unless asked for: PANE_OPEN_DEVTOOLS=1 pnpm dev.
+    if (process.env.PANE_OPEN_DEVTOOLS === '1') {
+      mainWindow.webContents.openDevTools();
+    }
+
   } else {
     // In production, use app.getAppPath() to get the root directory
     // This works correctly whether the app is packaged in ASAR or not
@@ -942,15 +1002,6 @@ async function createWindow() {
     const focused = mainWindow?.isFocused() ?? false;
     mainWindow?.webContents.send('window:focus-changed', focused);
   });
-
-  // Hand the renderer its per-window ptyHost data port once the preload
-  // listener is guaranteed to be installed. Chunk C: the port is a
-  // passthrough; Chunk D switches `TerminalPanel.tsx` to subscribe on it.
-  mainWindow.webContents.once('did-finish-load', () => {
-    if (ptyHostSupervisor && mainWindow) {
-      ptyHostSupervisor.attachWindow(mainWindow.webContents);
-    }
-  });
 }
 
 async function initializeServices() {
@@ -994,6 +1045,9 @@ async function initializeServices() {
   analyticsManager = services.analyticsManager;
   powerSaveManager = new PowerSaveManager(configManager, sessionManager);
   powerSaveManager.sync();
+
+  leaderboardService = new LeaderboardService(configManager);
+  registerLeaderboardHandlers(ipcMain, leaderboardService);
 
   ipcMain.handle('analytics:get-identity', async () => {
     try {
@@ -1112,7 +1166,7 @@ if (launchRemoteSetup) {
 
   // Start the ptyHost supervisor before the window opens so the renderer's
   // preload listener for 'ptyHost-port' has a port to receive when the window
-  // finishes loading. Gated on the `usePtyHost` setting: when off (default),
+  // finishes loading. Gated on the `usePtyHost` setting: when off,
   // the supervisor is never forked and every spawn site falls through to the
   // legacy in-main `pty.spawn` path with zero ptyHost code executing.
   if (configManager.getUsePtyHost()) {
@@ -1266,6 +1320,16 @@ if (launchRemoteSetup) {
     }
   }, 5000); // Delay to not slow down app startup
 
+  // Index agent CLI transcripts for the usage page. Read-only, and deferred so
+  // a first pass over a large ~/.claude never delays window creation.
+  setTimeout(() => {
+    void usageManager.start()
+      .then(() => leaderboardService.submitOnAppOpen())
+      .catch(error => {
+        console.warn('[Usage] Failed to start transcript indexing:', error);
+      });
+  }, 8000);
+
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) {
         console.log('[Main] Activating app, creating new window...');
@@ -1290,6 +1354,8 @@ if (launchRemoteSetup) {
   };
 
   logToFile('before-quit fired');
+
+  usageManager.stop();
 
   // Guard against multiple shutdown attempts
   if (shutdownInProgress) {
@@ -1433,15 +1499,6 @@ if (launchRemoteSetup) {
 
     // Phase 4: Host/runtime cleanup
     console.log('[Main] Shutting down daemon host services...');
-
-    // Kill IAP tunnel if running
-    const cloudManager = getCloudVmManager();
-    if (cloudManager) {
-      console.log('[Main] Stopping cloud IAP tunnel...');
-      cloudManager.stopTunnel();
-      cloudManager.stopPolling();
-      console.log('[Main] Cloud tunnel stopped');
-    }
 
     if (paneDaemonHost) {
       await paneDaemonHost.shutdown();

@@ -241,12 +241,23 @@ async function openSession(page: Page, theme: string, opts: { highContrast?: boo
     if (hc) window.localStorage.setItem('high-contrast', 'true');
   }, { themeId: theme, hc: highContrast });
   await installElectronApiMock(page, {
-    initialConfig: { theme, highContrast },
+    initialConfig: { theme, appearanceMode: 'fixed', highContrast },
     initialProjects: [project],
     initialSessions: [session, secondSession],
     initialPanels: panels,
     initialExecutions: executions,
-    initialCombinedDiff: combinedDiff,
+    diffManifests: {
+      session: {
+        scope: { kind: 'session' },
+        files: [{ path: 'frontend/src/contexts/themeContextValue.ts', kind: 'modified', additions: 41, deletions: 6, isBinary: false }],
+        resolvedBase: { kind: 'comparison-base', ref: 'origin/main', hash: '1111111111111111111111111111111111111111' },
+        resolvedTarget: { kind: 'working-tree' },
+        stats: combinedDiff.stats,
+      },
+    },
+    fileDiffs: {
+      'session:frontend/src/contexts/themeContextValue.ts': { file: { path: 'frontend/src/contexts/themeContextValue.ts', kind: 'modified', additions: 41, deletions: 6, isBinary: false }, patch: combinedDiff.diff, status: 'changed' },
+    },
     initialTerminalStates: { 'theme-terminal': { scrollbackBuffer: terminalScrollback } },
     initialUiState: { expandedProjects: [project.id] },
     activeProjectId: project.id,
@@ -259,17 +270,19 @@ async function openSession(page: Page, theme: string, opts: { highContrast?: boo
   const expandRepo = page.getByRole('button', { name: /^Expand repository pane$/ });
   if (await expandRepo.isVisible().catch(() => false)) await expandRepo.click();
   await page.getByRole('button', { name: session.name, exact: true }).click();
-  await expect(page.getByRole('tab', { name: 'Review', exact: true })).toBeVisible();
-  await page.getByRole('tab', { name: 'Review', exact: true }).click();
+  await expect(page.getByRole('tab', { name: 'Changes', exact: true })).toBeVisible();
+  await page.getByRole('tab', { name: 'Changes', exact: true }).click();
 
   const expandTerminal = page.getByRole('button', { name: 'Expand terminal', exact: true });
   if (await expandTerminal.isVisible().catch(() => false)) await expandTerminal.click();
   await expect(page.locator('.pane-terminal-shell-body .xterm-screen').first()).toBeVisible({ timeout: 15_000 });
   await expect(page.getByRole('status', { name: 'Loading terminal' })).toHaveCount(0);
-  // Expand the single changed file so the diff view (add/remove tints) is visible.
-  const expandFile = page.getByRole('button', { name: /^Expand diff for frontend\/src\/contexts\/themeContextValue\.ts$/ });
-  await expect(expandFile).toBeVisible({ timeout: 15_000 });
-  await expandFile.click();
+  // Open the single changed file as a diff tab so the add/remove tints are visible.
+  const openFile = page.getByRole('option', {
+    name: /^Open diff for frontend\/src\/contexts\/themeContextValue\.ts, Modified, \+41 −6$/,
+  });
+  await expect(openFile).toBeVisible({ timeout: 15_000 });
+  await openFile.click();
   await expect(page.locator('.diff-tailwindcss-wrapper').first()).toBeVisible({ timeout: 15_000 });
   // Let xterm replay + shiki highlighting settle before capturing.
   await page.mouse.move(4, 4);
@@ -353,7 +366,7 @@ test('appearance picker shows all 15 themes, grouped by family', async ({ page }
   await page.setViewportSize({ width: 1440, height: 1700 });
   await page.addInitScript(() => { window.localStorage.setItem('theme', 'colorblind-safe'); });
   await installElectronApiMock(page, {
-    initialConfig: { theme: 'colorblind-safe' },
+    initialConfig: { theme: 'colorblind-safe', appearanceMode: 'fixed' },
     initialProjects: [project],
     initialSessions: [session],
     initialPanels: panels,

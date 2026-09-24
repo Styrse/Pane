@@ -12,6 +12,7 @@ function createPersistence(): SettingsPersistence {
     configError: null,
     fetchConfig: () => Promise.resolve({}),
     saveConfig: () => Promise.resolve(true),
+    runSave: () => Promise.resolve(true),
     saveStates: {},
     reportSaveError: () => undefined,
     preferences: DEFAULT_SETTINGS_PREFERENCES,
@@ -31,7 +32,7 @@ describe('GeneralSettings feedback entry', () => {
     // Settings deep links focus a row by this id, so the row must carry it.
     expect(markup).toContain(`id="${settingDomId('send-feedback')}"`);
     expect(markup).toContain('Send Feedback');
-    expect(markup).toContain('dcouple/Pane');
+    expect(markup).toContain('greenfield-inc/Pane');
   });
 
   it('registers send-feedback under General so the catalog and the row agree', () => {

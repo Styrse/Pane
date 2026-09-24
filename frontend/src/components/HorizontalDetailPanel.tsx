@@ -7,35 +7,57 @@ import { Dropdown, DropdownMenuItem } from './ui/Dropdown';
 import { Tooltip } from './ui/Tooltip';
 import { GitHistoryGraph } from './GitHistoryGraph';
 import { useScrollSurface } from '../hooks/useScrollSurface';
+import { InspectorTabs, type InspectorTab } from './InspectorTabs';
+import { PanelContainer } from './panels/PanelContainer';
+import type { ToolPanel } from '../../../shared/types/panels';
+import { OuterResizeSeparator, type OuterResizeSeparatorProps } from './ui/OuterResizeSeparator';
 
 interface HorizontalDetailPanelProps {
   height?: number;
-  onResize: (event: React.MouseEvent) => void;
+  availableHeight?: number;
+  resizeSeparator?: OuterResizeSeparatorProps;
+  bodyActive?: boolean;
   mergeError?: string | null;
   isCollapsed?: boolean;
   onToggleCollapse?: () => void;
   onSwapLayout?: () => void;
   terminalShortcuts?: React.ReactNode;
   onCommitClick?: (hash: string) => void;
+  inspectorTab?: InspectorTab;
+  onInspectorTabChange?: (tab: InspectorTab) => void;
+  filesPanel?: ToolPanel;
+  changesPanel?: ToolPanel;
+  changesCount?: number;
+  isMainRepo?: boolean;
 }
 
 export function HorizontalDetailPanel({
   height,
-  onResize,
+  availableHeight,
+  resizeSeparator,
+  bodyActive = true,
   mergeError,
   isCollapsed,
   onToggleCollapse,
   onSwapLayout,
   terminalShortcuts,
   onCommitClick,
+  inspectorTab = 'details',
+  onInspectorTabChange,
+  filesPanel,
+  changesPanel,
+  changesCount,
+  isMainRepo = false,
 }: HorizontalDetailPanelProps) {
+  const hostedPanel = inspectorTab === 'files' ? filesPanel : inspectorTab === 'changes' ? changesPanel : undefined;
+  const showDetails = inspectorTab === 'details' || !hostedPanel;
   const sessionContext = useSession();
   const immersiveMode = useNavigationStore(state => state.immersiveMode);
   const detailPanelRef = React.useRef<HTMLDivElement>(null);
   const detailScrollSurfaceRef = useScrollSurface<HTMLDivElement>({
     id: `detail:${sessionContext?.session.id ?? 'unavailable'}`,
     sessionId: sessionContext?.session.id,
-    enabled: Boolean(sessionContext && !isCollapsed && !immersiveMode),
+    enabled: Boolean(sessionContext && bodyActive && !isCollapsed && !immersiveMode),
     priority: 30,
     ownerElement: () => detailPanelRef.current,
   });
@@ -68,32 +90,56 @@ export function HorizontalDetailPanel({
   const gitStatus = session.gitStatus;
   const isProject = !!session.isMainRepo;
   const gitUnavailable = isProject && gitStatus?.state === 'unknown';
+  const collapsedContentActive = Boolean(isCollapsed) && (availableHeight ?? 0) > 0;
+  const contentActive = !immersiveMode && (bodyActive || collapsedContentActive);
 
   return (
     <div
       ref={detailPanelRef}
-      className={`pane-detail-panel pane-detail-panel-horizontal flex-shrink-0 bg-surface-primary flex flex-col overflow-hidden relative transition-[height] duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] ${immersiveMode ? '' : 'border-t border-border-primary'}`}
-      style={{ height: immersiveMode ? '0px' : isCollapsed ? 'auto' : `${height ?? 200}px` }}
+      className={`pane-detail-panel pane-detail-panel-horizontal flex-shrink-0 bg-surface-primary flex flex-col overflow-visible relative ${immersiveMode ? '' : 'border-t border-border-primary'}`}
+      style={immersiveMode
+        ? { height: '0px' }
+        : isCollapsed
+          ? {
+              height: 'auto',
+              maxHeight: availableHeight === undefined ? undefined : `${Math.max(0, Math.floor(availableHeight))}px`,
+            }
+          : { height: `${height ?? 200}px` }}
     >
-      {!isCollapsed && (
-        <div
-          role="separator"
-          aria-label="Resize detail panel"
-          aria-orientation="horizontal"
-          tabIndex={-1}
-          className="absolute top-0 left-0 right-0 h-1 cursor-row-resize group z-10"
-          onMouseDown={onResize}
-        >
-          <div className="absolute -top-2 bottom-0 left-0 right-0" />
-        </div>
-      )}
+      {resizeSeparator && !immersiveMode && <OuterResizeSeparator {...resizeSeparator} />}
 
-      <div className="pane-detail-panel-inner flex flex-col h-full min-h-0">
+      <div
+        className="pane-detail-panel-inner flex flex-col h-full min-h-0 overflow-hidden"
+        aria-hidden={!contentActive}
+        inert={!contentActive ? true : undefined}
+      >
+        {onInspectorTabChange && bodyActive && !isCollapsed && (
+          <InspectorTabs
+            tab={showDetails ? 'details' : inspectorTab}
+            onTabChange={onInspectorTabChange}
+            filesPanel={filesPanel}
+            changesPanel={changesPanel}
+            changesCount={changesCount}
+          />
+        )}
+        {[filesPanel, changesPanel].map(panel => panel && (
+          <div
+            key={panel.id}
+            className="pane-inspector-host flex-1 min-h-0 relative"
+            style={{ display: bodyActive && panel === hostedPanel && !showDetails && !isCollapsed ? 'flex' : 'none' }}
+            aria-hidden={!bodyActive || panel !== hostedPanel || showDetails || isCollapsed}
+            inert={!bodyActive || panel !== hostedPanel || showDetails || isCollapsed ? true : undefined}
+          >
+            <PanelContainer panel={panel} isActive={bodyActive && !immersiveMode && panel === hostedPanel && !showDetails && !isCollapsed} isMainRepo={isMainRepo} autoFocus={false} />
+          </div>
+        ))}
+        {(showDetails || isCollapsed) && (<>
         <div className="flex items-start flex-shrink-0">
           <div className="flex items-center flex-wrap flex-1 min-w-0 min-h-[32px] px-3 gap-x-2 gap-y-1 py-1">
             <button
               type="button"
               onClick={onToggleCollapse}
+              aria-label={isCollapsed ? 'Expand detail panel' : 'Collapse detail panel'}
               className="p-0.5 hover:bg-surface-hover rounded transition-colors"
               title={isCollapsed ? 'Expand detail panel' : 'Collapse detail panel'}
             >
@@ -178,7 +224,7 @@ export function HorizontalDetailPanel({
           )}
         </div>
 
-        {!isCollapsed && !gitUnavailable && session.worktreePath && (
+        {bodyActive && !isCollapsed && !gitUnavailable && session.worktreePath && (
           <div
             ref={detailScrollSurfaceRef}
             role="region"
@@ -194,6 +240,7 @@ export function HorizontalDetailPanel({
             />
           </div>
         )}
+        </>)}
       </div>
     </div>
   );

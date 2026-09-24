@@ -29,8 +29,7 @@ describe('agent status pipeline (emulator -> detect -> monitor)', () => {
   it('goes working (spinner title) -> blocked (permission prompt) on real sequences', async () => {
     const emulator = new TerminalStateEmulator(60, 12);
     const monitor = new AgentStatusMonitor({
-      workingActivityWindowMs: 600,
-      workingToIdleHoldMs: 700,
+      idleSettleMs: 10_000,
       startupGraceMs: 3000,
     });
     monitor.register('p', 0);
@@ -53,8 +52,7 @@ describe('agent status pipeline (emulator -> detect -> monitor)', () => {
   it('classifies cursor-agent frames: working spinner -> approval prompt -> idle composer', async () => {
     const emulator = new TerminalStateEmulator(60, 14);
     const monitor = new AgentStatusMonitor({
-      workingActivityWindowMs: 600,
-      workingToIdleHoldMs: 700,
+      idleSettleMs: 10_000,
       startupGraceMs: 3000,
     });
     monitor.register('p', 0);
@@ -78,6 +76,25 @@ describe('agent status pipeline (emulator -> detect -> monitor)', () => {
     emulator.write('\x1b[2J\x1b[H');
     emulator.write('  Deleted probe.txt.\r\n');
     emulator.write(' ▄▄▄▄▄▄▄▄\r\n  → Add a follow-up\r\n ▀▀▀▀▀▀▀▀\r\n  /repo | Gemini 3.5 Flash\r\n');
-    expect(await classify(emulator, monitor, 9000, CURSOR_MANIFEST)).toBe('idle');
+    expect(await classify(emulator, monitor, 14_010, CURSOR_MANIFEST)).toBe('idle');
+  });
+
+  it('stays working across 5.03s high-effort redraw gaps', async () => {
+    const emulator = new TerminalStateEmulator(80, 14);
+    const monitor = new AgentStatusMonitor({ idleSettleMs: 10_000, startupGraceMs: 3000 });
+    monitor.register('p', 0);
+
+    emulator.write('· Newspapering… (3m 52s · ↓ 5.9k tokens · thinking with high effort)\r\n');
+    emulator.write('esc to interrupt\r\n');
+    monitor.noteActivity('p', 4000);
+    monitor.noteActivity('p', 4010);
+    expect(await classify(emulator, monitor, 4020)).toBe('working');
+
+    for (const now of [9050, 14_080, 19_110, 24_140]) {
+      emulator.write('\r\x1b[2K· Newspapering… (thinking with high effort)');
+      monitor.noteActivity('p', now);
+      expect(await classify(emulator, monitor, now + 10)).toBeNull();
+      expect(monitor.getState('p')).toBe('working');
+    }
   });
 });

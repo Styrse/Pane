@@ -180,6 +180,42 @@ describe('PaneDaemonServer', () => {
     await expect(client.nextFrame(100)).rejects.toThrow('Timed out waiting for Pane daemon frame');
   });
 
+  it('mutes event frames per client without affecting other clients', async () => {
+    const registry = new PaneCommandRegistry();
+    const server = new PaneDaemonServer(registry, createTempAppDirectory());
+    activeServers.push(server);
+    await server.start();
+    const muted = await connectClient(server);
+    const live = await connectClient(server);
+
+    muted.socket.write(encodePaneDaemonFrame({
+      type: 'request', id: 10, channel: 'daemon:events', args: [{ include: [] }],
+    }));
+    await expect(muted.nextFrame()).resolves.toMatchObject({
+      type: 'response', id: 10, ok: true, result: { muted: true, include: [] },
+    });
+
+    server.getEventSink().send('terminal:output', { data: 'noise' });
+    await expect(live.nextFrame()).resolves.toMatchObject({ type: 'event', channel: 'terminal:output' });
+    await expect(muted.nextFrame(100)).rejects.toThrow('Timed out waiting for Pane daemon frame');
+  });
+
+  it('filters event frames by channel prefix', async () => {
+    const registry = new PaneCommandRegistry();
+    const server = new PaneDaemonServer(registry, createTempAppDirectory());
+    activeServers.push(server);
+    await server.start();
+    const client = await connectClient(server);
+    client.socket.write(encodePaneDaemonFrame({
+      type: 'request', id: 11, channel: 'daemon:events', args: [{ include: ['panel:'] }],
+    }));
+    await client.nextFrame();
+
+    server.getEventSink().send('terminal:output', { data: 'ignored' });
+    server.getEventSink().send('panel:agentStatus', { state: 'working' });
+    await expect(client.nextFrame()).resolves.toMatchObject({ type: 'event', channel: 'panel:agentStatus' });
+  });
+
   it('forwards logs panel runtime events to daemon clients', async () => {
     const registry = new PaneCommandRegistry();
     const server = new PaneDaemonServer(registry, createTempAppDirectory());

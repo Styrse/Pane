@@ -94,16 +94,14 @@ export function Settings({ isOpen, onClose, category, onCategoryChange, openRequ
     }
   }, [isOpen]);
 
-  // Detect a Codex login each time Settings opens (main-process cache: 60 s). The last
-  // result is kept across closes so re-opening on the Usage tab does not flash it out.
+  // Show the Usage tab when Codex transcripts have been indexed (rate limits exist).
   useEffect(() => {
     if (!isOpen) return;
     let cancelled = false;
-    void window.electronAPI.agentUsage.get().then((response) => {
+    void API.usage.getReport({ providers: ['codex'] }).then((response) => {
       if (cancelled) return;
-      const available = response.success
-        && response.data?.providers.some((provider) => provider.id === 'codex' && provider.status === 'available') === true;
-      setCodexUsageDetection(available ? 'available' : 'unavailable');
+      const hasLimits = response.success && (response.data?.rateLimits.length ?? 0) > 0;
+      setCodexUsageDetection(hasLimits ? 'available' : 'unavailable');
     }).catch(() => {
       if (!cancelled) setCodexUsageDetection('unavailable');
     });
@@ -196,7 +194,7 @@ export function Settings({ isOpen, onClose, category, onCategoryChange, openRequ
       case 'remote-access':
         return remoteSubview
           ? <RemoteAccessWorkflows subview={remoteSubview} controller={remote} onBack={() => requestTransition(() => setRemoteSubview(undefined))} {...sharedDirtyProps} />
-          : <RemoteAccessSettings controller={remote} onOpenSubview={openRemoteSubview} closeSettings={onClose} />;
+          : <RemoteAccessSettings controller={remote} onOpenSubview={openRemoteSubview} />;
       case 'integrations':
         return <IntegrationsSettings persistence={persistence} {...sharedDirtyProps} />;
       case 'shortcuts':
@@ -215,7 +213,7 @@ export function Settings({ isOpen, onClose, category, onCategoryChange, openRequ
         onClose={requestClose}
         size="full"
         showCloseButton={false}
-        className="h-[calc(100vh-4rem)] min-h-[560px] max-h-[760px] max-w-6xl"
+        className="mx-auto h-[calc(100vh-4rem)] min-h-[560px] max-h-[760px] max-w-6xl"
       >
         <ModalHeader title="Pane Settings" icon={<SettingsIcon className="h-5 w-5" />} onClose={requestClose} />
         {persistence.isLoading && !persistence.config ? (

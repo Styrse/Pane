@@ -2,8 +2,128 @@ import type { ProjectEnvironment, ToolPanelType } from './panels';
 import type { RunpaneAgent } from './generatedRunpaneContract';
 import type { RemoteDaemonExecutableHealth } from './remoteDaemon';
 import type { TerminalGraphicsProtocol } from '../constants/terminalGraphics';
+import type { AgentState } from './agentStatus';
+import type { UsageByPane, UsagePaneCostSlice, UsageTotals } from './usage';
+import type {
+  OrchestrationSessionOverview,
+  OrchestrationSessionRecord,
+} from './orchestrationSession';
 
 export type RunpaneAgentId = RunpaneAgent;
+
+export interface RunpaneSessionSelector {
+  sessionId?: string;
+  name?: string;
+}
+
+export interface RunpaneSessionListResult {
+  ok: true;
+  sessions: OrchestrationSessionRecord[];
+  selectedSessionId?: string;
+}
+
+export interface RunpaneSessionResult {
+  ok: true;
+  session: OrchestrationSessionRecord;
+  panelId?: string;
+  internalSessionId?: string;
+}
+
+export interface RunpaneSessionOverviewResult extends OrchestrationSessionOverview {
+  ok: true;
+}
+
+export type RunpaneWorkspaceEntryKind =
+  | 'agent.ready'
+  | 'agent.busy'
+  | 'agent.blocked'
+  | 'agent.unknown'
+  | 'agent.idle'
+  | 'pane.created'
+  | 'pane.gone'
+  | 'panel.exited';
+
+export interface RunpaneWorkspaceEntry {
+  gen: number;
+  at: string;
+  kind: RunpaneWorkspaceEntryKind;
+  paneId: string;
+  paneName: string;
+  repoId?: number;
+  repoName?: string;
+  worktreePath?: string;
+  panelId?: string;
+  panelTitle?: string;
+  agentType?: string;
+  from?: AgentState;
+  to?: AgentState;
+  source: 'agent' | 'exit' | 'session';
+  reason?: string | null;
+  settledMs?: number;
+  idleMs?: number;
+  idleCount?: number;
+  heldInput?: string;
+  heldInputPresent?: boolean;
+  exitCode?: number;
+  baseline?: true;
+  changedWhileAway?: boolean;
+  panels?: RunpaneWorkspacePanelSummary[];
+}
+
+export interface RunpaneWorkspacePanelSummary {
+  panelId: string;
+  title: string;
+  agentType?: string;
+  agentState?: AgentState;
+}
+
+export interface RunpaneWorkspaceWaitRequest {
+  since?: number;
+  as?: string;
+  from?: 'now' | 'earliest';
+  timeoutMs?: number;
+  limit?: number;
+  kinds?: RunpaneWorkspaceEntryKind[];
+  paneIds?: string[];
+  excludePaneIds?: string[];
+  repo?: RunpaneRepoSelector;
+  nameContains?: string;
+  agentsOnly?: boolean;
+  ackNow?: boolean;
+  includeHeldInput?: boolean;
+  includeHeldInputPresence?: boolean;
+  idleAfterMs?: number;
+  idleWindowStartMs?: number;
+  /** Opt-in cadence shaping; each requires a named consumer (`as`). */
+  settleMs?: number;
+  blockedSettleMs?: number;
+  minIntervalMs?: number;
+  idleBackoff?: boolean;
+}
+
+export type RunpaneWorkspaceResetReason =
+  | 'first-use'
+  | 'epoch-changed'
+  | 'cursor-truncated'
+  | 'unknown-consumer';
+
+export interface RunpaneWorkspaceWaitResult {
+  ok: true;
+  epoch: string;
+  generation: number;
+  entries: RunpaneWorkspaceEntry[];
+  timedOut: boolean;
+  dropped?: number;
+  reset?: { reason: RunpaneWorkspaceResetReason };
+  nextCommand: string;
+}
+
+export interface RunpaneWorkspaceStateResult {
+  ok: true;
+  epoch: string;
+  generation: number;
+  entries: RunpaneWorkspaceEntry[];
+}
 
 export type RunpaneRepoSelector =
   | string
@@ -116,6 +236,28 @@ export interface RunpanePaneCreateRequest {
   source?: RunpanePanelCreateSource;
 }
 
+export interface RunpanePaneAdoptItem {
+  path: string;
+  name: string;
+  baseBranch?: string;
+  folder?: string;
+  pinned?: boolean;
+  tool: RunpaneToolSpec;
+  resume?: string;
+  launch?: boolean;
+}
+
+export interface RunpanePaneAdoptRequest {
+  repo: RunpaneRepoSelector;
+  panes: RunpanePaneAdoptItem[];
+  dryRun?: boolean;
+  noFocus?: boolean;
+  focus?: boolean;
+  source?: RunpanePanelCreateSource;
+}
+
+export type RunpanePaneAdoptResult = RunpanePaneCreateResult;
+
 export interface RunpaneErrorPayload {
   message: string;
   code?: string;
@@ -133,6 +275,7 @@ export type RunpanePanelBlockerKind =
 export interface RunpanePanelStateSummary {
   initialized: boolean;
   isAlternateScreen?: boolean;
+  /** @deprecated Derived from the authoritative agent status for wire compatibility. */
   activityStatus?: RunpanePanelActivityStatus;
   isCliReady?: boolean;
   isCliPanel?: boolean;
@@ -164,6 +307,7 @@ export interface RunpaneInitialInputDeliveryResult {
   strategy?: 'codex-ctrl-enter' | 'enter' | 'argument';
   sequenceName?: 'codex-ctrl-enter-cr' | 'enter-cr' | 'argument';
   verifiedSubmitted?: boolean;
+  verification?: RunpanePanelVerification;
   staged?: boolean;
   attempts?: number;
   sentAt?: string;
@@ -197,6 +341,9 @@ export interface RunpanePaneCreateFailureItem {
   ok: false;
   index: number;
   name?: string;
+  sessionId?: string;
+  paneId?: string;
+  worktreePath?: string;
   error: RunpaneErrorPayload;
 }
 
@@ -206,6 +353,7 @@ export type RunpanePaneCreateResultItem =
 
 export interface RunpanePaneCreateResult {
   ok: boolean;
+  generation?: number;
   repo: RunpaneRepoSummary;
   items: RunpanePaneCreateResultItem[];
 }
@@ -215,6 +363,7 @@ export interface RunpanePaneSummary {
   paneId: string;
   name: string;
   status: string;
+  agentStatus: RunpanePanelActivityStatus;
   worktreePath: string;
   repoId: number;
   repoName?: string;
@@ -223,6 +372,7 @@ export interface RunpanePaneSummary {
   createdAt?: string;
   lastActivity?: string;
   archived?: boolean;
+  ownership: 'pane' | 'external';
 }
 
 export interface RunpanePaneListRequest {
@@ -235,6 +385,21 @@ export interface RunpanePaneListResult {
   panes: RunpanePaneSummary[];
 }
 
+export interface RunpanePaneCostRequest {
+  repo?: RunpaneRepoSelector;
+  paneId?: string;
+}
+
+export interface RunpanePaneCostResult {
+  ok: true;
+  fromMs: number;
+  toMs: number;
+  pricingAsOf: string;
+  panes: UsageByPane[];
+  unattributed?: UsagePaneCostSlice;
+  totals?: UsageTotals;
+}
+
 export interface RunpanePanePinRequest {
   paneId: string;
   pinned: boolean;
@@ -243,6 +408,7 @@ export interface RunpanePanePinRequest {
 
 export interface RunpanePanePinResult {
   ok: true;
+  generation?: number;
   paneId: string;
   pinned: boolean;
   dryRun?: true;
@@ -257,6 +423,7 @@ export interface RunpanePaneRenameRequest {
 
 export interface RunpanePaneRenameResult {
   ok: true;
+  generation?: number;
   dryRun?: true;
   pane: RunpanePaneSummary;
 }
@@ -283,6 +450,7 @@ export interface RunpanePaneArchiveRequest {
   paneId: string;
   force?: boolean;
   source?: RunpanePanelCreateSource;
+  dryRun?: boolean;
 }
 
 export type RunpaneWorktreeCleanupState = 'completed' | 'failed' | 'timeout' | 'not-applicable';
@@ -298,7 +466,15 @@ export interface RunpanePaneArchiveSafetyCheck {
   hasUncommittedChanges?: boolean;
   hasUntrackedFiles?: boolean;
   hasUpstream?: boolean;
+  upstream?: string;
+  upstreamRefreshed?: boolean;
   unpushedCommits?: number;
+  unpushedCommitDetails?: RunpanePaneArchiveCommit[];
+}
+
+export interface RunpanePaneArchiveCommit {
+  sha: string;
+  subject: string;
 }
 
 export interface RunpanePaneArchiveBlockReason {
@@ -309,6 +485,7 @@ export interface RunpanePaneArchiveBlockReason {
 
 export interface RunpanePaneArchiveBlockedResult {
   ok: false;
+  generation?: number;
   paneId: string;
   blocked: RunpanePaneArchiveBlockReason;
   nextCommand: string;
@@ -316,6 +493,7 @@ export interface RunpanePaneArchiveBlockedResult {
 
 export interface RunpanePaneArchiveSuccessResult {
   ok: boolean;
+  generation?: number;
   paneId: string;
   archived: true;
   forced: boolean;
@@ -324,9 +502,20 @@ export interface RunpanePaneArchiveSuccessResult {
   safetyCheck: RunpanePaneArchiveSafetyCheck;
 }
 
+export interface RunpanePaneArchiveDryRunResult {
+  ok: true;
+  paneId: string;
+  dryRun: true;
+  wouldArchive: boolean;
+  forced: boolean;
+  safetyCheck: RunpanePaneArchiveSafetyCheck;
+  blocked?: RunpanePaneArchiveBlockReason;
+}
+
 export type RunpanePaneArchiveResult =
   | RunpanePaneArchiveSuccessResult
-  | RunpanePaneArchiveBlockedResult;
+  | RunpanePaneArchiveBlockedResult
+  | RunpanePaneArchiveDryRunResult;
 
 export interface RunpanePanelSummary {
   id: string;
@@ -368,6 +557,7 @@ export interface RunpanePanelCreateRequest {
 
 export interface RunpanePanelCreateResult {
   ok: boolean;
+  generation?: number;
   paneId: string;
   panelId: string;
   title: string;
@@ -420,6 +610,10 @@ export interface RunpanePanelScreenResult {
   hasMore: boolean;
   text: string;
   state: RunpanePanelStateSummary;
+  composer: {
+    isPresent: boolean;
+    hasUndeliveredText: boolean;
+  };
   nextCommand?: string;
 }
 
@@ -430,6 +624,7 @@ export interface RunpanePanelInputRequest {
 
 export interface RunpanePanelInputResult {
   ok: true;
+  generation?: number;
   panelId: string;
   paneId?: string;
   inputBytes: number;
@@ -442,13 +637,20 @@ export interface RunpanePanelSubmitRequest {
   input: string;
 }
 
+export type RunpanePanelVerification = 'observed' | 'unverifiable';
+
 export interface RunpanePanelSubmitResult {
-  ok: true;
+  ok: boolean;
+  generation?: number;
   panelId: string;
   paneId?: string;
   inputBytes: number;
   enter: 'cr';
+  sequenceName: 'codex-ctrl-enter-cr' | 'enter-cr';
+  verifiedSubmitted: boolean;
+  verification?: RunpanePanelVerification;
   sentAt: string;
+  blocked?: RunpanePanelBlockedState;
   nextCommand?: string;
 }
 
@@ -461,12 +663,14 @@ export interface RunpanePanelSubmitComposerRequest {
 
 export interface RunpanePanelSubmitComposerResult {
   ok: boolean;
+  generation?: number;
   panelId: string;
   paneId?: string;
   inputBytes: number;
   strategy: 'codex-ctrl-enter' | 'enter';
   sequenceName: 'codex-ctrl-enter-cr' | 'enter-cr';
   verifiedSubmitted: boolean;
+  verification?: RunpanePanelVerification;
   sentAt: string;
   blocked?: RunpanePanelBlockedState;
   nextCommand?: string;

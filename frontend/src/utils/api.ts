@@ -5,6 +5,18 @@ import type { UpdateConfigRequest } from '../types/config';
 import type { SessionCreationPreferences } from '../stores/sessionPreferencesStore';
 import type { PaneChatAgent, PaneChatState } from '../../../shared/types/paneChat';
 import type {
+  OrchestrationAssociationInput,
+  OrchestrationSessionCreateInput,
+  OrchestrationSessionListResult,
+  OrchestrationSessionOverview,
+  OrchestrationSessionRecord,
+  OrchestrationSessionSelector,
+  OrchestrationSessionUpdateInput,
+  OrchestrationSessionView,
+} from '../../../shared/types/orchestrationSession';
+import type { UsageReportRequest } from '../../../shared/types/usage';
+import type { LeaderboardResponse, LeaderboardStatus, LeaderboardSubmitResult } from '../../../shared/types/leaderboard';
+import type {
   RemoteDaemonClientRecord,
   RemoteDaemonClientSettings,
   RemoteDaemonHostConfig,
@@ -17,6 +29,7 @@ import type {
   PanePermissionResponse,
 } from '../../../shared/types/daemon';
 import type { ProjectDashboardSessionUpdateEvent, ProjectDashboardUpdateEvent } from '../types/projectDashboard';
+import type { DiffScope, FileDiffRequest } from '../../../shared/types/gitDiff';
 
 // Type for IPC response
 // oxlint-disable-next-line typescript/no-explicit-any -- Generic type parameter default for flexible API responses
@@ -26,6 +39,7 @@ export interface IPCResponse<T = any> {
   error?: string;
   details?: string;
   command?: string;
+  code?: string;
 }
 
 // Type for Git error response
@@ -61,6 +75,99 @@ export class API {
     async setAgent(agent: PaneChatAgent): Promise<IPCResponse<PaneChatState<Session>>> {
       if (!isElectron()) throw new Error('Electron API not available');
       return window.electronAPI.paneChat.setAgent(agent);
+    },
+  };
+
+  static orchestrationSessions = {
+    async list(): Promise<IPCResponse<OrchestrationSessionListResult>> {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.orchestrationSessions.list();
+    },
+    async select(selector: OrchestrationSessionSelector): Promise<IPCResponse<OrchestrationSessionListResult>> {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.orchestrationSessions.select(selector);
+    },
+    async create(input: OrchestrationSessionCreateInput): Promise<IPCResponse<OrchestrationSessionView<Session>>> {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.orchestrationSessions.create(input);
+    },
+    async get(selector: OrchestrationSessionSelector): Promise<IPCResponse<OrchestrationSessionView<Session>>> {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.orchestrationSessions.get(selector);
+    },
+    async update(selector: OrchestrationSessionSelector, input: OrchestrationSessionUpdateInput): Promise<IPCResponse<OrchestrationSessionRecord>> {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.orchestrationSessions.update(selector, input);
+    },
+    async setAgent(selector: OrchestrationSessionSelector, agent: PaneChatAgent): Promise<IPCResponse<OrchestrationSessionView<Session>>> {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.orchestrationSessions.setAgent(selector, agent);
+    },
+    async associate(selector: OrchestrationSessionSelector, association: OrchestrationAssociationInput): Promise<IPCResponse<OrchestrationSessionRecord>> {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.orchestrationSessions.associate(selector, association);
+    },
+    async detach(selector: OrchestrationSessionSelector, paneId?: string): Promise<IPCResponse<OrchestrationSessionRecord>> {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.orchestrationSessions.detach(selector, paneId);
+    },
+    async overview(selector: OrchestrationSessionSelector): Promise<IPCResponse<OrchestrationSessionOverview>> {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.orchestrationSessions.overview(selector);
+    },
+  };
+
+  // Image export
+  static export = {
+    async saveImage(data: string, defaultFilename: string) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.export.saveImage(data, defaultFilename);
+    },
+    async shareImage(data: string, filename: string) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.export.shareImage(data, filename);
+    },
+  };
+
+  // Token usage, cost and rate limits
+  static usage = {
+    /** Totals, time series, per-model breakdown and rolling-window state. */
+    async getReport(request?: UsageReportRequest) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.usage.getReport(request);
+    },
+    /** Health of the background transcript index. */
+    async getStatus() {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.usage.getStatus();
+    },
+    async rescan() {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.usage.rescan();
+    },
+  };
+
+  // Leaderboard
+  static leaderboard = {
+    async getStatus(): Promise<IPCResponse<LeaderboardStatus>> {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.leaderboard.getStatus();
+    },
+    async join(): Promise<IPCResponse<LeaderboardSubmitResult>> {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.leaderboard.join();
+    },
+    async leave(): Promise<IPCResponse> {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.leaderboard.leave();
+    },
+    async sendNow(): Promise<IPCResponse<LeaderboardSubmitResult>> {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.leaderboard.sendNow();
+    },
+    async fetch(): Promise<IPCResponse<LeaderboardResponse>> {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.leaderboard.fetch();
     },
   };
 
@@ -180,14 +287,14 @@ export class API {
       return window.electronAPI.sessions.gitDiff(sessionId);
     },
 
-    async getCombinedDiff(sessionId: string, executionIds?: number[]) {
+    async getDiffManifest(sessionId: string, scope: DiffScope) {
       if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.getCombinedDiff(sessionId, executionIds);
+      return window.electronAPI.sessions.getDiffManifest(sessionId, scope);
     },
 
-    async getCommitDiffByHash(sessionId: string, commitHash: string) {
+    async getFileDiff(sessionId: string, scope: DiffScope, request: FileDiffRequest) {
       if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.getCommitDiffByHash(sessionId, commitHash);
+      return window.electronAPI.sessions.getFileDiff(sessionId, scope, request);
     },
 
     // Main repo session
