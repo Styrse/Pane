@@ -1167,7 +1167,7 @@ export function registerGitHandlers(
       const ctx = sessionManager.getProjectContext(sessionId);
       if (!ctx) throw new Error('Project context not found for session');
 
-      const currentBranch = ctx.commandRunner.exec('git branch --show-current', session.worktreePath).trim();
+      const currentBranch = (await ctx.commandRunner.execAsync('git branch --show-current', session.worktreePath)).stdout.trim();
       if (!currentBranch) {
         return { success: false, error: 'Cannot create a pull request from a detached HEAD' };
       }
