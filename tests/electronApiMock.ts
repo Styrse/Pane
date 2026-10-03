@@ -1246,6 +1246,7 @@ export async function installElectronApiMock(page: Page, options: ElectronApiMoc
         },
         getProjectUpdates() {
           return lastProjectUpdate ? [clone(lastProjectUpdate)] : [];
+        },
         getSessionCreatePrCalls() {
           return clone(sessionCreatePrCalls);
         },
